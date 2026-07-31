@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tgz
+.dingtalk-codex-host/
+coverage/
+*.log
+.test-*/

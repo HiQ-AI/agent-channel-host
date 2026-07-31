@@ -1,0 +1,169 @@
+# dingtalk-codex-host
+
+`dingtalk-codex-host` 把当前钉钉用户收到的授权群聊/私聊消息，持续送入每个会话各自独立的 Codex App Server thread。它不是一个必须 `@` 才启动的机器人：Host 会观察允许列表内的每条新消息，由常驻会话判断 `silent / reply / escalate`，只有通过本地出站门禁的 `reply` 才会调用 DWS 发送。
+
+首版只发布 Node.js/TypeScript npm package，命令名为 `dingtalk-codex`。不提供 Windows portable zip/exe。
+
+## 运行机制
+
+```mermaid
+flowchart LR
+  DT[钉钉个人 Stream] --> DWS[唯一 DWS owner]
+  DWS --> Gate[conversation allowlist]
+  Gate --> WAL[SQLite WAL durable admission]
+  WAL --> A1[群 A actor / 固定 thread]
+  WAL --> A2[群 B actor / 固定 thread]
+  WAL --> DM[私聊 actor / 固定 thread]
+  A1 --> Decision[silent / reply / escalate]
+  A2 --> Decision
+  DM --> Decision
+  Decision --> Fresh[freshness + mode + UUID 门禁]
+  Fresh -->|reply only| Send[DWS 当前用户身份发送]
+```
+
+- 一个 instance 只持有一个 DWS bus owner；同一个 DWS profile 由跨 instance 文件锁防止重复 owner。
+- 每个群/私聊保存自己的 conversation 记录、Codex App Server 子进程和完整 thread ID，彼此不共享 transcript。
+- 已启用群在 Host 启动时立即 `thread/resume` 并常驻；私聊在新消息到来时启动/恢复，并按 `directMessageIdleMinutes` 空闲关闭 App Server 子进程。再次来消息时精确恢复原 thread。
+- 新消息先提交 SQLite WAL，再中断当前 active turn；等 `turn/completed.status=interrupted` 后，在同一个 thread 上为新消息启动独立 turn。实现不使用 `turn/steer`。
+- 新 thread 先保存 `provisioning`，执行严格 silent bootstrap，检查 `thread/loaded/list` 后才标记 `ready`。重启只允许精确 `thread/resume` 原 ID；状态或协议不匹配时 fail closed，不自动新建第二条 thread。
+- 模型最终文本不会直接发送。App Server 必须返回 output schema 约束的决定；只有 conversation 为 `reply`、action 为 `reply`、输入仍是该会话最新 sequence 时才写 outbox，并在调用 DWS 前再次检查 freshness。
+
+## 前置条件
+
+- Node.js `>=22.13.0`。本项目使用 Node 内置 `node:sqlite`；Node 22 会显示 SQLite experimental warning，这是 Node 当前的 API 状态。
+- 已安装并登录 DWS，当前验证基线是 `dws v1.0.55`。
+- 已安装并登录 Codex CLI，当前固定基线是 `codex-cli 0.145.0`，并校验该版本生成的 App Server JSON Schema SHA-256。
+- DWS/Codex 凭据继续由各自工具管理，本项目的配置和数据库不复制 token、cookie 或 client secret。
+
+## 从源码安装
+
+仓库发布到 GitHub 后，可直接从源码构建并注册全局命令：
+
+```powershell
+git clone https://github.com/HiQ-AI/dingtalk-codex-host.git
+Set-Location .\dingtalk-codex-host
+npm ci
+npm run verify
+npm link
+dingtalk-codex --help
+```
+
+## 初始化
+
+下面只写本地 instance 配置和空 SQLite 数据库，不启动订阅，也不发送消息：
+
+```powershell
+dingtalk-codex init `
+  --instance triss `
+  --cwd 'D:\agent-workspaces\triss' `
+  --name '翠丝' `
+  --role '公司数字化员工；按自身角色与各会话职责边界参与讨论'
+
+dingtalk-codex doctor --instance triss
+```
+
+Windows 默认数据目录为：
+
+```text
+%LOCALAPPDATA%\dingtalk-codex-host\instances\triss\
+├── config.yaml
+├── state.sqlite3
+├── protocol\
+├── run-host.cmd
+└── service.log
+```
+
+也可以用 `DINGTALK_CODEX_HOME` 指向另一个用户级状态根目录。DWS owner lock 始终位于当前操作系统用户的公共运行目录，不随该变量改变，避免两个 instance home 同时占用同一 profile。配置样例见 [`examples/triss-config.yaml`](examples/triss-config.yaml)，其中不包含 conversation ID 或凭据。
+
+## 添加授权会话
+
+群聊按标题调用 DWS 搜索，并要求唯一精确匹配；不会在多个候选中猜 ID。新会话默认 `shadow`，即正常处理和留证，但不发送：
+
+```powershell
+dingtalk-codex conversation add `
+  --instance triss `
+  --kind group `
+  --title '广场＆编辑器迭代中...' `
+  --responsibility '回答编辑器相关问题、需求、方案和 bug 排查；不负责开发实现' `
+  --mode shadow
+
+dingtalk-codex conversation list --instance triss
+```
+
+在连接 DWS 前，可对已登记会话执行离线 App Server canary。它会实际创建或恢复该会话的固定 Codex thread，并运行严格 silent turn，但不会订阅或发送钉钉消息；连续执行两次应分别看到 `startupMode=started` 和 `startupMode=resumed`，且 thread 前缀一致：
+
+```powershell
+dingtalk-codex verify --instance triss --id '<conversation UUID>'
+dingtalk-codex verify --instance triss --id '<conversation UUID>'
+```
+
+私聊使用 DWS 提供的 `openDingTalkId`，不接受姓名猜测：
+
+```powershell
+dingtalk-codex conversation add `
+  --instance triss `
+  --kind direct `
+  --title '同事私聊' `
+  --open-dingtalk-id '<openDingTalkId>' `
+  --responsibility '按翠丝默认角色回答职责范围内问题' `
+  --mode shadow
+```
+
+`conversation disable/enable --id <UUID>` 控制 allowlist。未授权 conversation 的事件只记录脱敏拒绝计数，不持久化消息正文。
+`--responsibility` 可省略；省略时使用 instance 的 `identity.role` 作为该会话职责。
+
+## 前台验证与常驻
+
+先在 `shadow` 模式前台运行，看到 `HOST_READY` 后再发一条不含 `@` 的测试消息：
+
+```powershell
+dingtalk-codex run --instance triss
+```
+
+另一个 PowerShell 查看脱敏状态：
+
+```powershell
+dingtalk-codex status --instance triss
+```
+
+`status` 的 `hostState` 来自 SQLite lease 心跳；`recoverable_sessions` 表示已完成 bootstrap、可精确 resume 的持久 session，不把它冒充为当前仍有子进程运行。
+
+确认 `received/processed`、固定 `threadIdPrefix`、重启后的 resume 和职责判断后，才显式切到 `reply`；运行中的 Host 需重启后读取新 mode：
+
+```powershell
+dingtalk-codex conversation mode --instance triss --id '<conversation UUID>' --mode reply
+```
+
+Windows 当前用户常驻使用计划任务，不以 LocalSystem 运行，也不复制登录态：
+
+```powershell
+dingtalk-codex service plan --instance triss
+dingtalk-codex service install --instance triss
+```
+
+卸载前先做零副作用检查：
+
+```powershell
+dingtalk-codex service remove --instance triss --check
+dingtalk-codex service remove --instance triss
+```
+
+非 Windows 平台可用 `dingtalk-codex run` 接入 systemd user、launchd 或平台进程管理器；首版不自动写这些平台的 service 文件。
+
+## 可靠性与安全边界
+
+- SQLite WAL 保证的是 Host 收到事件后的本地 admission/outbox 原子性。DWS v1.0.55 的本地 event bus 是易失 fan-out，早 ACK、进程内去重和断线窗口意味着这里不能宣称端到端 exactly-once。
+- `submitted` 只表示 DWS 发送调用成功，不等于对端已读或业务已接受。
+- Host 不会启动第二个网络接收服务；数据面就是当前用户下的一个 DWS owner 加两个共享 bus 的 consumer（全群、全单聊）。
+- conversation 内容属于本地敏感数据。状态命令和运行日志不输出正文、完整 conversation ID 或完整 thread ID；请按用户级敏感目录保护 instance 数据。
+- App Server 使用 stdio，不开放 experimental WebSocket transport；升级 Codex 前必须更新固定版本和生成 schema SHA，并重新执行测试、doctor、thread resume canary。
+
+## 开发与验收
+
+```powershell
+npm ci
+npm test
+npm run verify
+```
+
+测试覆盖 SQLite admission/去重/sequence、outbox 双重 freshness、单 owner lease、DWS 参数契约、active turn 中断、固定 session 上的新 turn、结构化决定 fail-closed、用户级 service 计划和 CLI init/status。真实 DWS 收发不在自动测试中，必须使用专用测试群/账号单独授权执行；`verify` 则用于本机真实 App Server canary。

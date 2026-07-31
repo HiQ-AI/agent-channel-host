@@ -1,0 +1,16 @@
+version: 1
+instance: triss
+identity:
+  name: 翠丝
+  role: 公司数字化员工；按自身角色与每个会话单独配置的职责边界参与讨论
+  signature: "- 翠丝代回"
+runtime:
+  cwd: D:\agent-workspaces\triss
+  dwsCommand: dws
+  codexCommand: codex
+  directMessageIdleMinutes: 30
+  startupTimeoutSeconds: 120
+  turnTimeoutSeconds: 180
+protocol:
+  codexVersion: codex-cli 0.145.0
+  schemaSha256: 1f66700d1cc3de4a5004e5614a6098878b405c7e7c5f8c9be97fc900d0ad6c68

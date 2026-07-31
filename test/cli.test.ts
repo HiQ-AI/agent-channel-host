@@ -1,0 +1,29 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdir, rm } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+
+test('CLI init 后 status 可独立运行且不输出完整 thread ID', async () => {
+  const root = resolve('.test-cli-state');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const cli = join(process.cwd(), 'dist', 'src', 'cli.js');
+  const env = { ...process.env, DINGTALK_CODEX_HOME: root };
+  try {
+    const initialized = await execFileAsync(process.execPath, [
+      cli, 'init', '--instance', 'test', '--cwd', process.cwd(), '--name', '测试员工', '--role', '测试角色',
+    ], { encoding: 'utf8', env });
+    assert.equal(JSON.parse(initialized.stdout).ok, true);
+    const status = await execFileAsync(process.execPath, [cli, 'status', '--instance', 'test'], { encoding: 'utf8', env });
+    const body = JSON.parse(status.stdout);
+    assert.equal(body.enabled_conversations, 0);
+    assert.deepEqual(body.sessions, []);
+    assert.doesNotMatch(status.stdout, /threadId"/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
