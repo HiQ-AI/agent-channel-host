@@ -14,9 +14,14 @@ flowchart LR
   WAL --> A1[群 A actor / 固定 thread]
   WAL --> A2[群 B actor / 固定 thread]
   WAL --> DM[私聊 actor / 固定 thread]
-  A1 --> Decision[silent / reply / escalate]
-  A2 --> Decision
-  DM --> Decision
+  DWS --> History[首次进群读取最近 50 条]
+  History --> A1
+  History --> A2
+  A1 --> Main[沟通讨论主会话]
+  A2 --> Main
+  DM --> Main
+  Main -->|实施任务| Worker[后台 subagent]
+  Main --> Decision[silent / reply / escalate]
   Decision --> Fresh[freshness + mode + UUID 门禁]
   Fresh -->|reply only| Send[DWS 当前用户身份发送]
 ```
@@ -24,8 +29,10 @@ flowchart LR
 - 一个 instance 只持有一个 DWS bus owner；同一个 DWS profile 由跨 instance 文件锁防止重复 owner。
 - 每个群/私聊保存自己的 conversation 记录、Codex App Server 子进程和完整 thread ID，彼此不共享 transcript。
 - 已启用群在 Host 启动时立即 `thread/resume` 并常驻；私聊在新消息到来时启动/恢复，并按 `directMessageIdleMinutes` 空闲关闭 App Server 子进程。再次来消息时精确恢复原 thread。
+- 群首次由 Host 启动时，先只读拉取最近 50 条消息并按时间顺序交给固定主 thread，再生成一次自我介绍。`shadow` 只准备并持久化介绍；切为 `reply`、重启 Host 后使用同一 UUID 发送，成功后不再重复介绍。
 - 新消息先提交 SQLite WAL，再中断当前 active turn；等 `turn/completed.status=interrupted` 后，在同一个 thread 上为新消息启动独立 turn。实现不使用 `turn/steer`。
 - 新 thread 先保存 `provisioning`，执行严格 silent bootstrap，检查 `thread/loaded/list` 后才标记 `ready`。重启只允许精确 `thread/resume` 原 ID；状态或协议不匹配时 fail closed，不自动新建第二条 thread。
+- 固定主 thread 只负责理解讨论、澄清和回报进展。具体实施请求必须调用 Codex 原生 `spawn_agent` 派发后台 subagent，并立即返回接手回执；宿主只有观察到真实子 thread ID 且主 thread 没有直接执行命令或改文件时，才接受该决定。后台 worker 不占用 actor drain，群里的后续消息仍可进入主 thread。
 - 模型最终文本不会直接发送。App Server 必须返回 output schema 约束的决定；只有 conversation 为 `reply`、action 为 `reply`、输入仍是该会话最新 sequence 时才写 outbox，并在调用 DWS 前再次检查 freshness。
 
 ## 前置条件
@@ -134,6 +141,8 @@ dingtalk-codex status --instance triss
 dingtalk-codex conversation mode --instance triss --id '<conversation UUID>' --mode reply
 ```
 
+群在 `shadow` 首次启动后，介绍已经准备但不会发送；上述切换后必须重启 Host，启动阶段会先发送这条已准备介绍，再开始消费实时事件。真实历史拉取与发送应只在专用测试群完成。
+
 Windows 当前用户常驻使用计划任务，不以 LocalSystem 运行，也不复制登录态：
 
 ```powershell
@@ -156,6 +165,7 @@ dingtalk-codex service remove --instance triss
 - `submitted` 只表示 DWS 发送调用成功，不等于对端已读或业务已接受。
 - Host 不会启动第二个网络接收服务；数据面就是当前用户下的一个 DWS owner 加两个共享 bus 的 consumer（全群、全单聊）。
 - conversation 内容属于本地敏感数据。状态命令和运行日志不输出正文、完整 conversation ID 或完整 thread ID；请按用户级敏感目录保护 instance 数据。
+- App Server 的主 thread 与 subagent 使用 `workspaceWrite`，可写范围固定为 instance 配置的 `runtime.cwd`，网络关闭且审批策略为 `never`。请把 `runtime.cwd` 指向专用工作目录；主 thread 直接执行 `commandExecution` 或 `fileChange` 时，本轮 fail closed、不发群回执。
 - App Server 使用 stdio，不开放 experimental WebSocket transport；升级 Codex 前必须更新固定版本和生成 schema SHA，并重新执行测试、doctor、thread resume canary。
 
 ## 开发与验收
@@ -164,6 +174,9 @@ dingtalk-codex service remove --instance triss
 npm ci
 npm test
 npm run verify
+
+$canaryRoot = Join-Path $env:LOCALAPPDATA 'dingtalk-codex-host\delegation-canary'
+node docs/acceptance/group-onboarding-delegation/scripts/app-server-delegation-canary.mjs $canaryRoot
 ```
 
-测试覆盖 SQLite admission/去重/sequence、outbox 双重 freshness、单 owner lease、DWS 参数契约、active turn 中断、固定 session 上的新 turn、结构化决定 fail-closed、用户级 service 计划和 CLI init/status。真实 DWS 收发不在自动测试中，必须使用专用测试群/账号单独授权执行；`verify` 则用于本机真实 App Server canary。
+测试覆盖 SQLite admission/去重/sequence、outbox 双重 freshness、单 owner lease、首次群历史与介绍状态机、DWS 参数契约、active turn 中断、固定 session 上的新 turn、后台 subagent 决策证据、用户级 service 计划和 CLI init/status。最后一条 canary 会真实派发一个延迟 worker，证明主 turn 先返回、worker 后完成，但不连接或发送钉钉。真实 DWS 收发必须使用专用测试群/账号单独授权执行；`verify` 用于本机固定会话 App Server canary。

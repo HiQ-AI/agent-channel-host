@@ -8,6 +8,7 @@ import type {
   ConversationKind,
   ConversationMode,
   Decision,
+  GroupOnboardingRecord,
   NormalizedEvent,
   OutboxRecord,
   SessionRecord,
@@ -102,8 +103,30 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_inbound_conversation_sequence
         ON inbound_events(conversation_id, sequence DESC);
       CREATE INDEX IF NOT EXISTS idx_outbox_state ON outbox(state, created_at);
-      PRAGMA user_version=1;
     `);
+    const version = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (version < 2) {
+      this.db.exec(`
+        ALTER TABLE decisions ADD COLUMN work_type TEXT;
+        ALTER TABLE decisions ADD COLUMN delegation TEXT;
+        ALTER TABLE decisions ADD COLUMN subagent_thread_id TEXT;
+        CREATE TABLE group_onboarding (
+          conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+          state TEXT NOT NULL CHECK(state IN ('pending','prepared','sending','submitted','failed')),
+          history_count INTEGER,
+          history_loaded_at TEXT,
+          intro_turn_id TEXT,
+          intro_text TEXT,
+          intro_uuid TEXT UNIQUE,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO group_onboarding(conversation_id,state,created_at,updated_at)
+          SELECT id,'pending',created_at,updated_at FROM conversations WHERE kind='group';
+        PRAGMA user_version=2;
+      `);
+    }
   }
 
   addConversation(input: {
@@ -115,11 +138,23 @@ export class Store {
   }): Conversation {
     const now = new Date().toISOString();
     const id = randomUUID();
-    this.db.prepare(`
-      INSERT INTO conversations(id,kind,external_id,title,responsibility,mode,enabled,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,1,?,?)
-    `).run(id, input.kind, input.externalId, input.title, input.responsibility, input.mode, now, now);
-    return this.getConversation(id)!;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare(`
+        INSERT INTO conversations(id,kind,external_id,title,responsibility,mode,enabled,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,1,?,?)
+      `).run(id, input.kind, input.externalId, input.title, input.responsibility, input.mode, now, now);
+      if (input.kind === 'group') {
+        this.db.prepare(`
+          INSERT INTO group_onboarding(conversation_id,state,created_at,updated_at) VALUES(?,'pending',?,?)
+        `).run(id, now, now);
+      }
+      this.db.exec('COMMIT');
+      return this.getConversation(id)!;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   setConversationEnabled(id: string, enabled: boolean): boolean {
@@ -203,18 +238,28 @@ export class Store {
     }
   }
 
-  recordDecision(eventId: string, turnId: string | null, turnStatus: string, decision: Decision | null): void {
+  recordDecision(
+    eventId: string,
+    turnId: string | null,
+    turnStatus: string,
+    decision: Decision | null,
+    subagentThreadId: string | null = null,
+  ): void {
     this.db.prepare(`
-      INSERT INTO decisions(inbound_event_id,turn_id,turn_status,action,responsibility_match,category,reply_text,reason_code,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?)
+      INSERT INTO decisions(
+        inbound_event_id,turn_id,turn_status,action,responsibility_match,category,reply_text,reason_code,
+        work_type,delegation,subagent_thread_id,created_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(inbound_event_id) DO UPDATE SET
         turn_id=excluded.turn_id,turn_status=excluded.turn_status,action=excluded.action,
         responsibility_match=excluded.responsibility_match,category=excluded.category,
-        reply_text=excluded.reply_text,reason_code=excluded.reason_code,created_at=excluded.created_at
+        reply_text=excluded.reply_text,reason_code=excluded.reason_code,work_type=excluded.work_type,
+        delegation=excluded.delegation,subagent_thread_id=excluded.subagent_thread_id,created_at=excluded.created_at
     `).run(
       eventId, turnId, turnStatus, decision?.action ?? null,
       decision ? (decision.responsibilityMatch ? 1 : 0) : null,
       decision?.category ?? null, decision?.replyText ?? null, decision?.reasonCode ?? null,
+      decision?.workType ?? null, decision?.delegation ?? null, subagentThreadId,
       new Date().toISOString(),
     );
     this.db.prepare('UPDATE inbound_events SET processing_state=? WHERE id=?').run(turnStatus, eventId);
@@ -282,6 +327,54 @@ export class Store {
     return Number(row.sequence);
   }
 
+  getGroupOnboarding(conversationId: string): GroupOnboardingRecord | null {
+    return mapGroupOnboarding(this.db.prepare(
+      'SELECT * FROM group_onboarding WHERE conversation_id=?',
+    ).get(conversationId) as Row | undefined);
+  }
+
+  prepareGroupOnboarding(
+    conversationId: string,
+    historyCount: number,
+    introTurnId: string,
+    introText: string,
+    introUuid: string,
+  ): GroupOnboardingRecord {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE group_onboarding SET
+        state='prepared',history_count=?,history_loaded_at=?,intro_turn_id=?,intro_text=?,intro_uuid=?,
+        error=NULL,updated_at=?
+      WHERE conversation_id=? AND state<>'submitted'
+    `).run(historyCount, now, introTurnId, introText, introUuid, now, conversationId);
+    const record = this.getGroupOnboarding(conversationId);
+    if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
+    return record;
+  }
+
+  claimGroupOnboardingIntro(conversationId: string): GroupOnboardingRecord | null {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.getGroupOnboarding(conversationId);
+      if (!current || current.state === 'submitted' || !current.introText || !current.introUuid) {
+        this.db.exec('COMMIT');
+        return null;
+      }
+      this.db.prepare("UPDATE group_onboarding SET state='sending',error=NULL,updated_at=? WHERE conversation_id=?")
+        .run(new Date().toISOString(), conversationId);
+      this.db.exec('COMMIT');
+      return this.getGroupOnboarding(conversationId);
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  finishGroupOnboardingIntro(conversationId: string, state: 'submitted' | 'failed', error: string | null): void {
+    this.db.prepare('UPDATE group_onboarding SET state=?,error=?,updated_at=? WHERE conversation_id=?')
+      .run(state, error, new Date().toISOString(), conversationId);
+  }
+
   acquireLease(key: string, ownerId: string, nowMs: number, ttlMs: number): boolean {
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -321,7 +414,8 @@ export class Store {
         (SELECT COUNT(*) FROM inbound_events) AS received,
         (SELECT COUNT(*) FROM decisions WHERE turn_status='completed') AS processed,
         (SELECT COUNT(*) FROM outbox WHERE state='submitted') AS submitted,
-        (SELECT COUNT(*) FROM outbox WHERE state IN ('pending','sending')) AS pending_outbox
+        (SELECT COUNT(*) FROM outbox WHERE state IN ('pending','sending')) AS pending_outbox,
+        (SELECT COUNT(*) FROM group_onboarding WHERE state<>'submitted') AS pending_group_onboarding
     `).get() as Row;
     const sessions = this.db.prepare(`
       SELECT c.title,c.kind,s.thread_id,s.lifecycle,s.updated_at
@@ -372,5 +466,21 @@ function mapOutbox(row: Row | undefined): OutboxRecord | null {
     inputSequence: Number(row.input_sequence), uuid: String(row.uuid), text: String(row.text),
     state: row.state as OutboxRecord['state'], error: row.error ? String(row.error) : null,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
+}
+
+function mapGroupOnboarding(row: Row | undefined): GroupOnboardingRecord | null {
+  if (!row) return null;
+  return {
+    conversationId: String(row.conversation_id),
+    state: row.state as GroupOnboardingRecord['state'],
+    historyCount: row.history_count === null ? null : Number(row.history_count),
+    historyLoadedAt: row.history_loaded_at ? String(row.history_loaded_at) : null,
+    introTurnId: row.intro_turn_id ? String(row.intro_turn_id) : null,
+    introText: row.intro_text ? String(row.intro_text) : null,
+    introUuid: row.intro_uuid ? String(row.intro_uuid) : null,
+    error: row.error ? String(row.error) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
   };
 }

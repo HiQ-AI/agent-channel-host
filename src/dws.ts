@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
 import type { HostConfig } from './config.js';
-import type { ConversationKind, NormalizedEvent, OutboxRecord } from './types.js';
+import type { Conversation, ConversationKind, NormalizedEvent, OutboxRecord } from './types.js';
 import { delay, stopChild, withTimeout } from './process-utils.js';
 import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from './command.js';
 export const GROUP_EVENT = 'user_im_message_receive_group_all';
@@ -11,6 +11,11 @@ export const DIRECT_EVENT = 'user_im_message_receive_o2o_all';
 export interface DwsCommandResult {
   stdout: string;
   stderr: string;
+}
+
+export interface RecentGroupHistory {
+  count: number;
+  prompt: string;
 }
 
 export async function runDwsJson(config: HostConfig, args: string[], timeoutMs = 30_000): Promise<unknown> {
@@ -42,6 +47,59 @@ export async function resolveExactGroup(config: HostConfig, title: string): Prom
     throw new Error(`群名“${title}”精确匹配数量为 ${exact.length}，拒绝猜测 ID`);
   }
   return { title, openConversationId: String(exact[0]!.openConversationId) };
+}
+
+export async function fetchRecentGroupHistory(
+  config: HostConfig,
+  conversation: Conversation,
+  now = new Date(),
+  runner: typeof runDwsJson = runDwsJson,
+): Promise<RecentGroupHistory> {
+  if (conversation.kind !== 'group') throw new Error('只有群 conversation 可以拉取群历史');
+  const result = await runner(config, [
+    'chat', 'message', 'list', '--group', conversation.externalId,
+    '--time', formatDwsLocalTime(now), '--direction', 'older', '--limit', '50',
+  ], 45_000);
+  return parseRecentGroupHistory(result);
+}
+
+export function parseRecentGroupHistory(value: unknown): RecentGroupHistory {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS 群历史返回结构无效');
+  const body = value as Record<string, unknown>;
+  if (body.success !== true) {
+    throw new Error(`DWS 群历史读取失败：${text(body.errorMsg) ?? text(body.errorCode) ?? 'unknown'}`);
+  }
+  const result = body.result;
+  const nested = result && typeof result === 'object' && !Array.isArray(result)
+    ? result as Record<string, unknown>
+    : null;
+  const messages = Array.isArray(result)
+    ? result
+    : Array.isArray(nested?.messages)
+      ? nested.messages
+      : Array.isArray(nested?.data)
+        ? nested.data
+        : null;
+  if (!messages) throw new Error('DWS 群历史返回缺少消息数组');
+
+  const newestFirst = messages.slice(0, 50).map(projectHistoryMessage);
+  const selected: string[] = [];
+  let size = 0;
+  for (const message of newestFirst) {
+    const serialized = safeJson(message);
+    if (size + serialized.length > 60_000) break;
+    selected.push(serialized);
+    size += serialized.length;
+  }
+  return {
+    count: selected.length,
+    prompt: selected.reverse().join('\n'),
+  };
+}
+
+export function formatDwsLocalTime(value: Date): string {
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
 }
 
 export async function dwsDoctor(config: HostConfig): Promise<Record<string, unknown>> {
@@ -203,7 +261,10 @@ export class DwsEventOwner {
 export class DwsSender {
   constructor(private readonly config: HostConfig) {}
 
-  async send(conversation: { kind: ConversationKind; externalId: string }, record: OutboxRecord): Promise<void> {
+  async send(
+    conversation: { kind: ConversationKind; externalId: string },
+    record: Pick<OutboxRecord, 'text' | 'uuid'>,
+  ): Promise<void> {
     const target = conversation.kind === 'group'
       ? ['--group', conversation.externalId]
       : ['--open-dingtalk-id', conversation.externalId];
@@ -235,4 +296,30 @@ function safeJson(value: unknown): string {
   } catch {
     return '[unserializable]';
   }
+}
+
+function projectHistoryMessage(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { content: value };
+  const source = value as Record<string, unknown>;
+  const quoted = firstValue(source, ['quotedMessage', 'quoted_message']);
+  const forwarded = firstValue(source, ['forwardMessages', 'forward_messages']);
+  return {
+    sender: text(firstValue(source, ['senderName', 'sender_name', 'sender', 'nickName', 'nickname'])),
+    occurredAt: text(firstValue(source, ['createTime', 'create_time', 'sendTime', 'timestamp'])),
+    messageType: text(firstValue(source, ['msgType', 'messageType', 'type'])),
+    content: firstValue(source, ['content', 'msgContent', 'text', 'message']),
+    quotedMessage: quoted && typeof quoted === 'object' ? projectHistoryMessage(quoted) : quoted,
+    forwardedMessages: Array.isArray(forwarded)
+      ? forwarded.slice(0, 50).map(projectHistoryMessage)
+      : forwarded && typeof forwarded === 'object'
+        ? projectHistoryMessage(forwarded)
+        : forwarded,
+  };
+}
+
+function firstValue(source: Record<string, unknown>, names: string[]): unknown {
+  for (const name of names) {
+    if (source[name] !== undefined && source[name] !== null) return source[name];
+  }
+  return null;
 }

@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, rmSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.js';
-import { normalizeDwsEvent, consumerArgs } from '../src/dws.js';
+import { normalizeDwsEvent, consumerArgs, fetchRecentGroupHistory } from '../src/dws.js';
 import { defaultConfig } from '../src/config.js';
 
 test('授权会话才可持久化，事件按会话单调编号并去重', () => {
@@ -69,4 +72,73 @@ test('私聊 allowlist 使用对端 openDingTalkId，不与 conversationId 混�
   });
   assert.equal(event?.kind, 'direct');
   assert.equal(event?.conversationExternalId, 'open-user-1');
+});
+
+test('首次群历史固定从当前本地时间向前拉 50 条，并按时间从早到晚投影', async () => {
+  const config = defaultConfig('history', '.', 'Agent', 'role');
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'cid-history', title: '历史群', responsibility: '了解讨论', mode: 'shadow',
+  });
+  let captured: string[] = [];
+  const history = await fetchRecentGroupHistory(
+    config,
+    conversation,
+    new Date(2026, 7, 1, 1, 2, 3),
+    async (_config, args) => {
+      captured = args;
+      return {
+        success: true,
+        result: [
+          {
+            openMessageId: 'secret-new', senderName: '同事乙', createTime: '2026-08-01 01:00:00', content: '新消息',
+            quotedMessage: { openMessageId: 'secret-quoted', senderName: '同事丙', content: '引用内容' },
+          },
+          {
+            openMessageId: 'secret-old', senderName: '同事甲', createTime: '2026-08-01 00:59:00', content: '旧消息',
+            forwardMessages: [{ openMessageId: 'secret-forwarded', senderName: '同事丁', content: '转发内容' }],
+          },
+        ],
+      };
+    },
+  );
+  assert.deepEqual(captured, [
+    'chat', 'message', 'list', '--group', 'cid-history', '--time', '2026-08-01 01:02:03',
+    '--direction', 'older', '--limit', '50',
+  ]);
+  assert.equal(history.count, 2);
+  assert.ok(history.prompt.indexOf('旧消息') < history.prompt.indexOf('新消息'));
+  assert.match(history.prompt, /引用内容/);
+  assert.match(history.prompt, /转发内容/);
+  assert.doesNotMatch(history.prompt, /secret-(old|new|quoted|forwarded)/);
+  store.close();
+});
+
+test('v1 已有群迁移后补为 pending onboarding', () => {
+  const path = resolve('.test-migration-state', 'state.sqlite3');
+  rmSync(dirname(path), { recursive: true, force: true });
+  mkdirSync(dirname(path), { recursive: true });
+  const old = new DatabaseSync(path);
+  old.exec(`
+    CREATE TABLE conversations (
+      id TEXT PRIMARY KEY,kind TEXT NOT NULL,external_id TEXT NOT NULL,title TEXT NOT NULL,
+      responsibility TEXT NOT NULL,mode TEXT NOT NULL,enabled INTEGER NOT NULL,
+      created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(kind, external_id)
+    );
+    CREATE TABLE decisions (
+      inbound_event_id TEXT PRIMARY KEY,turn_id TEXT,turn_status TEXT NOT NULL,action TEXT,
+      responsibility_match INTEGER,category TEXT,reply_text TEXT,reason_code TEXT,created_at TEXT NOT NULL
+    );
+    INSERT INTO conversations VALUES('group-v1','group','cid-v1','旧群','参与讨论','shadow',1,'2026-01-01','2026-01-01');
+    PRAGMA user_version=1;
+  `);
+  old.close();
+  try {
+    const migrated = new Store(path);
+    assert.equal(migrated.getGroupOnboarding('group-v1')?.state, 'pending');
+    assert.equal(migrated.status().pending_group_onboarding, 1);
+    migrated.close();
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
 });
