@@ -52,6 +52,7 @@ export class AppServerSession {
   private notifications: Array<{ method: string; params: JsonObject }> = [];
   private agentMessages = new Map<string, string>();
   private turnEvidence = new Map<string, TurnEvidence>();
+  private backgroundThreadIds = new Set<string>();
   private requestId = 0;
   private stopping = false;
   private threadId: string | null = null;
@@ -69,6 +70,10 @@ export class AppServerSession {
 
   get currentThreadId(): string | null {
     return this.threadId;
+  }
+
+  hasBackgroundWork(): boolean {
+    return this.backgroundThreadIds.size > 0;
   }
 
   async start(): Promise<{ mode: 'started' | 'resumed'; threadId: string; bootstrapPerformed: boolean }> {
@@ -281,6 +286,10 @@ export class AppServerSession {
     const params = message.params && typeof message.params === 'object' ? message.params as JsonObject : {};
     if (!method) return;
     this.observeNotification(method, params);
+    const notificationThreadId = typeof params.threadId === 'string' ? params.threadId : null;
+    if ((method === 'turn/completed' || method === 'thread/closed') && notificationThreadId) {
+      this.backgroundThreadIds.delete(notificationThreadId);
+    }
     if (method === 'item/started' || method === 'item/completed') {
       const item = params.item as JsonObject | undefined;
       const turnId = typeof params.turnId === 'string' ? params.turnId : null;
@@ -292,9 +301,15 @@ export class AppServerSession {
         : typeof item?.senderThreadId === 'string'
           ? item.senderThreadId
           : null;
+      const itemType = String(item?.type ?? '');
+      if (itemType === 'subAgentActivity' && item?.kind === 'started' && typeof item.agentThreadId === 'string') {
+        this.backgroundThreadIds.add(item.agentThreadId);
+      }
+      if (itemType === 'subAgentActivity' && item?.kind === 'interrupted' && typeof item.agentThreadId === 'string') {
+        this.backgroundThreadIds.delete(item.agentThreadId);
+      }
       if (turnId && eventThreadId === this.threadId && item) {
         const evidence = this.turnEvidence.get(turnId) ?? emptyTurnEvidence();
-        const itemType = String(item.type ?? '');
         if (itemType === 'commandExecution' || itemType === 'fileChange') evidence.mainWorkItems.push(itemType);
         if (itemType === 'subAgentActivity' && item.kind === 'started' && typeof item.agentThreadId === 'string') {
           if (!evidence.spawnedSubagentThreadIds.includes(item.agentThreadId)) {
@@ -312,6 +327,7 @@ export class AppServerSession {
                   ? [item.receiverThreadId]
                   : [];
             for (const child of children) {
+              this.backgroundThreadIds.add(child);
               if (!evidence.spawnedSubagentThreadIds.includes(child)) evidence.spawnedSubagentThreadIds.push(child);
             }
           }
@@ -350,6 +366,7 @@ export class AppServerSession {
     this.stdout?.close();
     this.stderr?.close();
     this.child = null;
+    this.backgroundThreadIds.clear();
   }
 }
 

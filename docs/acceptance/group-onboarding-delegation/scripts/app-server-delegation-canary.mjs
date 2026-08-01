@@ -47,6 +47,8 @@ try {
 这是一个具体实施任务。主会话必须调用 spawn_agent 派发一个后台 worker，worker 的唯一任务是：先执行 PowerShell “Start-Sleep -Seconds 15”，然后使用 apply_patch 创建文件“${marker}”，内容为 WORKER_DONE。主会话不得自己执行命令或修改文件，也不得 wait_agent 等待 worker；派发成功后立即返回 action="reply"、responsibilityMatch=true、category="delegation_canary"、replyText="已派后台 worker 处理，我继续保持在线。\\n\\n- 验证员工代回"、reasonCode="worker_started"、workType="implementation"、delegation="started"。
 `.trim());
   const mainCompletedAt = Date.now();
+  const backgroundActiveAtMainReturn = session.hasBackgroundWork();
+  if (!backgroundActiveAtMainReturn) throw new Error('主 turn 返回时未观察到仍在运行的后台 subagent');
   let markerAt = null;
   try {
     await access(marker);
@@ -66,12 +68,19 @@ try {
     }
   }
   if (markerAt === null) throw new Error('主 turn 返回后 60 秒内 worker 未完成 marker');
+  const backgroundDeadline = Date.now() + 10_000;
+  while (session.hasBackgroundWork() && Date.now() < backgroundDeadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  if (session.hasBackgroundWork()) throw new Error('worker 完成后 10 秒内后台忙碌状态未释放');
   process.stdout.write(`${JSON.stringify({
     ok: true,
     mainTurnIdPrefix: result.turnId.slice(0, 12),
     subagentThreadIdPrefix: result.subagentThreadId?.slice(0, 12) ?? null,
     mainElapsedMs: mainCompletedAt - startedAt,
     workerCompletedAfterMainMs: markerAt - mainCompletedAt,
+    backgroundActiveAtMainReturn,
+    backgroundActiveAfterWorker: session.hasBackgroundWork(),
     decision: result.decision,
   }, null, 2)}\n`);
 } catch (error) {

@@ -23,6 +23,36 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     assert.equal(body.enabled_conversations, 0);
     assert.deepEqual(body.sessions, []);
     assert.doesNotMatch(status.stdout, /threadId"/);
+
+    const added = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'add', '--instance', 'test', '--kind', 'direct', '--title', '测试私聊',
+      '--open-dingtalk-id', 'open-test-user',
+    ], { encoding: 'utf8', env });
+    const addedBody = JSON.parse(added.stdout);
+    assert.equal(addedBody.sessionLifecycle, 'idle');
+    assert.equal(addedBody.idleTimeoutMinutes, 5);
+
+    const changed = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'lifecycle', '--instance', 'test', '--id', addedBody.id,
+      '--lifecycle', 'resident', '--idle-minutes', '9',
+    ], { encoding: 'utf8', env });
+    const changedBody = JSON.parse(changed.stdout);
+    assert.equal(changedBody.sessionLifecycle, 'resident');
+    assert.equal(changedBody.idleTimeoutMinutes, 9);
+    assert.equal(changedBody.restartRequired, true);
+
+    const custom = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'add', '--instance', 'test', '--kind', 'direct', '--title', '常驻私聊',
+      '--open-dingtalk-id', 'open-resident-user', '--lifecycle', 'resident', '--idle-minutes', '11',
+    ], { encoding: 'utf8', env });
+    const customBody = JSON.parse(custom.stdout);
+    assert.equal(customBody.sessionLifecycle, 'resident');
+    assert.equal(customBody.idleTimeoutMinutes, 11);
+
+    await assert.rejects(execFileAsync(process.execPath, [
+      cli, 'conversation', 'lifecycle', '--instance', 'test', '--id', addedBody.id,
+      '--lifecycle', 'idle', '--idle-minutes', '0',
+    ], { encoding: 'utf8', env }), /1-35791 的正整数/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

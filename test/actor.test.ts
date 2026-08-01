@@ -194,6 +194,7 @@ test('实施任务派发回执不占用 actor，可继续处理下一条群消�
     start: async () => undefined,
     interruptActive: async () => false,
     stop: async () => undefined,
+    hasBackgroundWork: () => !workerFinished,
     runDecision: async () => {
       calls += 1;
       return calls === 1 ? {
@@ -222,8 +223,9 @@ test('实施任务派发回执不占用 actor，可继续处理下一条群消�
   await waitFor(() => calls === 1);
   actor.submit(admitted('follow-up-event'));
   await waitFor(() => calls === 2 && store.status().processed === 2);
-  assert.equal(workerFinished, false);
+  assert.equal(actor.isBusy(), true);
   workerFinished = true;
+  await waitFor(() => !actor.isBusy());
   await actor.stop();
   store.close();
 });

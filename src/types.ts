@@ -1,5 +1,7 @@
 export type ConversationKind = 'group' | 'direct';
 export type ConversationMode = 'shadow' | 'reply';
+export type ConversationLifecycle = 'resident' | 'idle';
+export const MAX_IDLE_TIMEOUT_MINUTES = 35_791;
 
 export interface Conversation {
   id: string;
@@ -8,6 +10,8 @@ export interface Conversation {
   title: string;
   responsibility: string;
   mode: ConversationMode;
+  sessionLifecycle: ConversationLifecycle;
+  idleTimeoutMinutes: number;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;

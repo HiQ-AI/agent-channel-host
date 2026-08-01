@@ -1,6 +1,6 @@
 # dingtalk-codex-host
 
-`dingtalk-codex-host` 把当前钉钉用户收到的授权群聊/私聊消息，持续送入每个会话各自独立的 Codex App Server thread。它不是一个必须 `@` 才启动的机器人：Host 会观察允许列表内的每条新消息，由常驻会话判断 `silent / reply / escalate`，只有通过本地出站门禁的 `reply` 才会调用 DWS 发送。
+`dingtalk-codex-host` 把当前钉钉用户收到的授权群聊/私聊消息，持续送入每个会话各自独立的 Codex App Server thread。它不是一个必须 `@` 才启动的机器人：Host 会观察允许列表内的每条新消息，由固定会话判断 `silent / reply / escalate`，只有通过本地出站门禁的 `reply` 才会调用 DWS 发送。
 
 首版只发布 Node.js/TypeScript npm package，命令名为 `dingtalk-codex`。不提供 Windows portable zip/exe。
 
@@ -28,7 +28,7 @@ flowchart LR
 
 - 一个 instance 只持有一个 DWS bus owner；同一个 DWS profile 由跨 instance 文件锁防止重复 owner。
 - 每个群/私聊保存自己的 conversation 记录、Codex App Server 子进程和完整 thread ID，彼此不共享 transcript。
-- 已启用群在 Host 启动时立即 `thread/resume` 并常驻；私聊在新消息到来时启动/恢复，并按 `directMessageIdleMinutes` 空闲关闭 App Server 子进程。再次来消息时精确恢复原 thread。
+- 每个群聊/私聊独立配置 `resident` 或 `idle`。默认群聊常驻，私聊空闲 5 分钟释放 App Server 子进程；超时可按会话修改。释放不删除 thread，下一条消息仍以原 ID 精确 `thread/resume`。
 - 群首次由 Host 启动时，先只读拉取最近 50 条消息并按时间顺序交给固定主 thread，再生成一次自我介绍。`shadow` 只准备并持久化介绍；切为 `reply`、重启 Host 后使用同一 UUID 发送，成功后不再重复介绍。
 - 新消息先提交 SQLite WAL，再中断当前 active turn；等 `turn/completed.status=interrupted` 后，在同一个 thread 上为新消息启动独立 turn。实现不使用 `turn/steer`。
 - 新 thread 先保存 `provisioning`，执行严格 silent bootstrap，检查 `thread/loaded/list` 后才标记 `ready`。重启只允许精确 `thread/resume` 原 ID；状态或协议不匹配时 fail closed，不自动新建第二条 thread。
@@ -119,6 +119,38 @@ dingtalk-codex conversation add `
 `conversation disable/enable --id <UUID>` 控制 allowlist。未授权 conversation 的事件只记录脱敏拒绝计数，不持久化消息正文。
 `--responsibility` 可省略；省略时使用 instance 的 `identity.role` 作为该会话职责。
 
+## 会话生命周期
+
+`conversation add` 的默认值是 `group=resident`、`direct=idle + 5 分钟`。也可以在添加时覆盖：
+
+```powershell
+dingtalk-codex conversation add `
+  --instance triss `
+  --kind group `
+  --title '低频项目群' `
+  --lifecycle idle `
+  --idle-minutes 15
+```
+
+已有会话使用独立命令修改；运行中的 Host 需重启后生效：
+
+```powershell
+# 空闲 10 分钟后释放本地 App Server 进程
+dingtalk-codex conversation lifecycle `
+  --instance triss `
+  --id '<conversation UUID>' `
+  --lifecycle idle `
+  --idle-minutes 10
+
+# 改为常驻；已保存的空闲分钟数保留，供以后切回 idle
+dingtalk-codex conversation lifecycle `
+  --instance triss `
+  --id '<conversation UUID>' `
+  --lifecycle resident
+```
+
+空闲分钟数允许 `1-35791` 的整数，避免超过 Node.js 单次定时器上限。计时从该会话最近一条新消息重新开始；到期时若主 turn、排队消息或后台 subagent 仍在工作，Host 会等待真正空闲后再释放，不会为了回收资源中断正在实施的任务。`conversation list` 会显示每个会话的 `sessionLifecycle` 和 `idleTimeoutMinutes`。
+
 ## 前台验证与常驻
 
 先在 `shadow` 模式前台运行，看到 `HOST_READY` 后再发一条不含 `@` 的测试消息：
@@ -165,6 +197,7 @@ dingtalk-codex service remove --instance triss
 - `submitted` 只表示 DWS 发送调用成功，不等于对端已读或业务已接受。
 - Host 不会启动第二个网络接收服务；数据面就是当前用户下的一个 DWS owner 加两个共享 bus 的 consumer（全群、全单聊）。
 - conversation 内容属于本地敏感数据。状态命令和运行日志不输出正文、完整 conversation ID 或完整 thread ID；请按用户级敏感目录保护 instance 数据。
+- `idle` 只关闭本机 App Server 进程，SQLite 中的原 thread ID 和 Codex rollout 仍会保留；清理这些持久数据属于另一项显式操作。
 - App Server 的主 thread 与 subagent 使用 `workspaceWrite`，可写范围固定为 instance 配置的 `runtime.cwd`，网络关闭且审批策略为 `never`。请把 `runtime.cwd` 指向专用工作目录；主 thread 直接执行 `commandExecution` 或 `fileChange` 时，本轮 fail closed、不发群回执。
 - App Server 使用 stdio，不开放 experimental WebSocket transport；升级 Codex 前必须更新固定版本和生成 schema SHA，并重新执行测试、doctor、thread resume canary。
 
@@ -177,6 +210,9 @@ npm run verify
 
 $canaryRoot = Join-Path $env:LOCALAPPDATA 'dingtalk-codex-host\delegation-canary'
 node docs/acceptance/group-onboarding-delegation/scripts/app-server-delegation-canary.mjs $canaryRoot
+
+$resumeRoot = Join-Path $env:LOCALAPPDATA 'dingtalk-codex-host\resume-canary'
+node docs/acceptance/conversation-lifecycle/scripts/app-server-resume-canary.mjs $resumeRoot
 ```
 
-测试覆盖 SQLite admission/去重/sequence、outbox 双重 freshness、单 owner lease、首次群历史与介绍状态机、DWS 参数契约、active turn 中断、固定 session 上的新 turn、后台 subagent 决策证据、用户级 service 计划和 CLI init/status。最后一条 canary 会真实派发一个延迟 worker，证明主 turn 先返回、worker 后完成，但不连接或发送钉钉。真实 DWS 收发必须使用专用测试群/账号单独授权执行；`verify` 用于本机固定会话 App Server canary。
+测试覆盖 SQLite admission/去重/sequence、outbox 双重 freshness、单 owner lease、每会话生命周期默认值与迁移、空闲计时/忙碌保护、首次群历史与介绍状态机、DWS 参数契约、active turn 中断、固定 session 上的新 turn、后台 subagent 决策证据、用户级 service 计划和 CLI init/status。委派 canary 会真实派发一个延迟 worker；生命周期 canary 会实际执行 start → stop → resume 并核对 thread ID，但二者都不连接或发送钉钉。真实 DWS 收发必须使用专用测试群/账号单独授权执行；`verify` 用于本机固定会话 App Server canary。

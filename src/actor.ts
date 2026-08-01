@@ -11,6 +11,7 @@ export interface ResidentSession {
   interruptActive(): Promise<boolean>;
   stop(): Promise<void>;
   readonly currentThreadId: string | null;
+  hasBackgroundWork?(): boolean;
 }
 
 export class ConversationActor {
@@ -97,6 +98,10 @@ export class ConversationActor {
     this.queue.push(event);
     if (this.draining) void this.session.interruptActive().catch((error) => this.onError(error as Error, event));
     else this.startDrain();
+  }
+
+  isBusy(): boolean {
+    return this.queue.length > 0 || this.draining !== null || Boolean(this.session.hasBackgroundWork?.());
   }
 
   private startDrain(): void {

@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { MAX_IDLE_TIMEOUT_MINUTES } from './types.js';
 import type {
   AdmittedEvent,
   Conversation,
   ConversationKind,
+  ConversationLifecycle,
   ConversationMode,
   Decision,
   GroupOnboardingRecord,
@@ -127,6 +129,17 @@ export class Store {
         PRAGMA user_version=2;
       `);
     }
+    const upgradedVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (upgradedVersion < 3) {
+      this.db.exec(`
+        ALTER TABLE conversations ADD COLUMN session_lifecycle TEXT NOT NULL DEFAULT 'resident'
+          CHECK(session_lifecycle IN ('resident','idle'));
+        ALTER TABLE conversations ADD COLUMN idle_timeout_minutes INTEGER NOT NULL DEFAULT 5
+          CHECK(idle_timeout_minutes BETWEEN 1 AND ${MAX_IDLE_TIMEOUT_MINUTES});
+        UPDATE conversations SET session_lifecycle='idle' WHERE kind='direct';
+        PRAGMA user_version=3;
+      `);
+    }
   }
 
   addConversation(input: {
@@ -135,15 +148,25 @@ export class Store {
     title: string;
     responsibility: string;
     mode: ConversationMode;
+    sessionLifecycle?: ConversationLifecycle;
+    idleTimeoutMinutes?: number;
   }): Conversation {
     const now = new Date().toISOString();
     const id = randomUUID();
+    const sessionLifecycle = input.sessionLifecycle ?? (input.kind === 'group' ? 'resident' : 'idle');
+    const idleTimeoutMinutes = input.idleTimeoutMinutes ?? 5;
+    assertIdleTimeoutMinutes(idleTimeoutMinutes);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare(`
-        INSERT INTO conversations(id,kind,external_id,title,responsibility,mode,enabled,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,1,?,?)
-      `).run(id, input.kind, input.externalId, input.title, input.responsibility, input.mode, now, now);
+        INSERT INTO conversations(
+          id,kind,external_id,title,responsibility,mode,session_lifecycle,idle_timeout_minutes,
+          enabled,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,1,?,?)
+      `).run(
+        id, input.kind, input.externalId, input.title, input.responsibility, input.mode,
+        sessionLifecycle, idleTimeoutMinutes, now, now,
+      );
       if (input.kind === 'group') {
         this.db.prepare(`
           INSERT INTO group_onboarding(conversation_id,state,created_at,updated_at) VALUES(?,'pending',?,?)
@@ -166,6 +189,25 @@ export class Store {
   setConversationMode(id: string, mode: ConversationMode): boolean {
     const result = this.db.prepare('UPDATE conversations SET mode=?,updated_at=? WHERE id=?')
       .run(mode, new Date().toISOString(), id);
+    return Number(result.changes) === 1;
+  }
+
+  setConversationLifecycle(
+    id: string,
+    sessionLifecycle: ConversationLifecycle,
+    idleTimeoutMinutes?: number,
+  ): boolean {
+    if (idleTimeoutMinutes !== undefined) assertIdleTimeoutMinutes(idleTimeoutMinutes);
+    const current = this.getConversation(id);
+    if (!current) return false;
+    const result = this.db.prepare(`
+      UPDATE conversations SET session_lifecycle=?,idle_timeout_minutes=?,updated_at=? WHERE id=?
+    `).run(
+      sessionLifecycle,
+      idleTimeoutMinutes ?? current.idleTimeoutMinutes,
+      new Date().toISOString(),
+      id,
+    );
     return Number(result.changes) === 1;
   }
 
@@ -444,8 +486,16 @@ function mapConversation(row: Row | undefined): Conversation | null {
   return {
     id: String(row.id), kind: row.kind as ConversationKind, externalId: String(row.external_id),
     title: String(row.title), responsibility: String(row.responsibility), mode: row.mode as ConversationMode,
+    sessionLifecycle: row.session_lifecycle as ConversationLifecycle,
+    idleTimeoutMinutes: Number(row.idle_timeout_minutes),
     enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
+}
+
+function assertIdleTimeoutMinutes(value: number): void {
+  if (!Number.isInteger(value) || value <= 0 || value > MAX_IDLE_TIMEOUT_MINUTES) {
+    throw new Error(`idleTimeoutMinutes 必须是 1-${MAX_IDLE_TIMEOUT_MINUTES} 的正整数`);
+  }
 }
 
 function mapSession(row: Row | undefined): SessionRecord | null {

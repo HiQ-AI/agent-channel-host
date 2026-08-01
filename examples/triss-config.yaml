@@ -8,7 +8,6 @@ runtime:
   cwd: D:\agent-workspaces\triss
   dwsCommand: dws
   codexCommand: codex
-  directMessageIdleMinutes: 30
   startupTimeoutSeconds: 120
   turnTimeoutSeconds: 180
 protocol:

@@ -10,6 +10,7 @@ import { verifyCodexProtocol } from './protocol.js';
 import { runHost } from './host.js';
 import { installUserService, removeUserService, windowsServicePlan } from './service.js';
 import { AppServerSession } from './app-server.js';
+import { MAX_IDLE_TIMEOUT_MINUTES } from './types.js';
 
 const program = new Command();
 program
@@ -72,10 +73,15 @@ conversation.command('add')
   .requiredOption('--title <title>', '显示名称；group 时用于精确搜索')
   .option('--responsibility <text>', '该会话的职责边界；省略时使用 identity.role')
   .option('--mode <mode>', 'shadow 或 reply', 'shadow')
+  .option('--lifecycle <lifecycle>', 'resident 或 idle；默认 group=resident、direct=idle')
+  .option('--idle-minutes <minutes>', 'idle 模式空闲释放分钟数，默认 5', parsePositiveInteger)
   .option('--open-dingtalk-id <id>', 'direct 对端的 openDingTalkId')
   .action(async (options) => {
     if (!['group', 'direct'].includes(options.kind)) throw new Error('--kind 必须是 group 或 direct');
     if (!['shadow', 'reply'].includes(options.mode)) throw new Error('--mode 必须是 shadow 或 reply');
+    if (options.lifecycle !== undefined && !['resident', 'idle'].includes(options.lifecycle)) {
+      throw new Error('--lifecycle 必须是 resident 或 idle');
+    }
     const config = await loadConfig(options.instance);
     const externalId = options.kind === 'group'
       ? (await resolveExactGroup(config, options.title)).openConversationId
@@ -89,6 +95,8 @@ conversation.command('add')
         title: options.title,
         responsibility: options.responsibility ?? config.identity.role,
         mode: options.mode,
+        sessionLifecycle: options.lifecycle,
+        idleTimeoutMinutes: options.idleMinutes,
       });
       print(publicConversation(created));
     } finally {
@@ -141,6 +149,28 @@ conversation.command('mode')
     }
   });
 
+conversation.command('lifecycle')
+  .description('设置 resident/idle 生命周期；运行中的 Host 需重启后生效')
+  .requiredOption('--instance <name>', 'instance 名称')
+  .requiredOption('--id <id>', 'conversation UUID')
+  .requiredOption('--lifecycle <lifecycle>', 'resident 或 idle')
+  .option('--idle-minutes <minutes>', 'idle 模式空闲释放分钟数；省略时保留当前值', parsePositiveInteger)
+  .action(async (options) => {
+    if (!['resident', 'idle'].includes(options.lifecycle)) {
+      throw new Error('--lifecycle 必须是 resident 或 idle');
+    }
+    await loadConfig(options.instance);
+    const store = new Store(statePath(options.instance));
+    try {
+      if (!store.setConversationLifecycle(options.id, options.lifecycle, options.idleMinutes)) {
+        throw new Error(`conversation 不存在：${options.id}`);
+      }
+      print({ ...publicConversation(store.getConversation(options.id)!), restartRequired: true });
+    } finally {
+      store.close();
+    }
+  });
+
 program.command('status')
   .description('查看脱敏后的本地持久化状态')
   .requiredOption('--instance <name>', 'instance 名称')
@@ -155,7 +185,7 @@ program.command('status')
   });
 
 program.command('run')
-  .description('前台运行唯一 DWS owner 和每会话常驻 Codex session')
+  .description('前台运行唯一 DWS owner 和每会话独立生命周期的 Codex session')
   .requiredOption('--instance <name>', 'instance 名称')
   .action(async (options) => runHost(await loadConfig(options.instance)));
 
@@ -225,7 +255,8 @@ function print(value: unknown): void {
 }
 
 function publicConversation(value: {
-  id: string; kind: string; externalId: string; title: string; responsibility: string; mode: string; enabled: boolean;
+  id: string; kind: string; externalId: string; title: string; responsibility: string; mode: string;
+  sessionLifecycle: string; idleTimeoutMinutes: number; enabled: boolean;
 }): Record<string, unknown> {
   return {
     id: value.id,
@@ -234,6 +265,16 @@ function publicConversation(value: {
     title: value.title,
     responsibility: value.responsibility,
     mode: value.mode,
+    sessionLifecycle: value.sessionLifecycle,
+    idleTimeoutMinutes: value.idleTimeoutMinutes,
     enabled: value.enabled,
   };
+}
+
+function parsePositiveInteger(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > MAX_IDLE_TIMEOUT_MINUTES) {
+    throw new Error(`分钟数必须是 1-${MAX_IDLE_TIMEOUT_MINUTES} 的正整数`);
+  }
+  return parsed;
 }
