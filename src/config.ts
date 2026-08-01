@@ -6,6 +6,9 @@ import { configPath } from './paths.js';
 
 export const CURRENT_CODEX_VERSION = 'codex-cli 0.145.0';
 export const CURRENT_SCHEMA_SHA256 = '1f66700d1cc3de4a5004e5614a6098878b405c7e7c5f8c9be97fc900d0ad6c68';
+export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
+export const DEFAULT_CODEX_EFFORT = 'low';
+export const CODEX_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 
 const configSchema = z.object({
   version: z.literal(1),
@@ -19,6 +22,8 @@ const configSchema = z.object({
     cwd: z.string().min(1),
     dwsCommand: z.string().min(1).default('dws'),
     codexCommand: z.string().min(1).default('codex'),
+    codexModel: z.string().trim().min(1).default(DEFAULT_CODEX_MODEL),
+    codexEffort: z.enum(CODEX_REASONING_EFFORTS).default(DEFAULT_CODEX_EFFORT),
     dwsProfile: z.string().optional(),
     startupTimeoutSeconds: z.number().int().positive().default(120),
     turnTimeoutSeconds: z.number().int().positive().default(180),
@@ -44,6 +49,8 @@ export function defaultConfig(instance: string, cwd: string, name: string, role:
       cwd: resolve(cwd),
       dwsCommand: 'dws',
       codexCommand: 'codex',
+      codexModel: DEFAULT_CODEX_MODEL,
+      codexEffort: DEFAULT_CODEX_EFFORT,
       startupTimeoutSeconds: 120,
       turnTimeoutSeconds: 180,
     },
@@ -57,6 +64,11 @@ export function defaultConfig(instance: string, cwd: string, name: string, role:
 export async function writeInitialConfig(config: HostConfig, path = configPath(config.instance)): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, YAML.stringify(config), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+}
+
+export async function writeConfig(config: HostConfig, path = configPath(config.instance)): Promise<void> {
+  const validated = configSchema.parse(config);
+  await writeFile(path, YAML.stringify(validated), { encoding: 'utf8', mode: 0o600 });
 }
 
 export async function loadConfig(instance: string, path = configPath(instance)): Promise<HostConfig> {

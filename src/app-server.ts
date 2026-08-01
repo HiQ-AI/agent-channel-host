@@ -99,6 +99,7 @@ export class AppServerSession {
       clientInfo: { name: 'dingtalk-codex-host', title: 'DingTalk Codex Host', version: '0.1.0' },
     });
     this.notify('initialized', {});
+    await this.assertModelAvailable();
 
     const existing = this.store.getSession(this.conversation.id);
     if (existing) return this.resume(existing);
@@ -116,6 +117,7 @@ export class AppServerSession {
     }
     const result = await this.request('thread/resume', {
       threadId: existing.threadId,
+      model: this.config.runtime.codexModel,
       cwd: this.config.runtime.cwd,
       approvalPolicy: 'never',
       sandbox: 'workspace-write',
@@ -132,6 +134,7 @@ export class AppServerSession {
 
   private async provision(): Promise<{ mode: 'started'; threadId: string; bootstrapPerformed: true }> {
     const result = await this.request('thread/start', {
+      model: this.config.runtime.codexModel,
       cwd: this.config.runtime.cwd,
       approvalPolicy: 'never',
       sandbox: 'workspace-write',
@@ -191,7 +194,8 @@ export class AppServerSession {
         writableRoots: [this.config.runtime.cwd],
         networkAccess: false,
       },
-      effort: 'low',
+      model: this.config.runtime.codexModel,
+      effort: this.config.runtime.codexEffort,
       outputSchema: DECISION_SCHEMA,
     }) as JsonObject;
     const turn = started.turn as JsonObject | undefined;
@@ -227,6 +231,11 @@ export class AppServerSession {
     validateDecision(decision, this.config.identity.signature, evidence);
     const subagentThreadId = evidence.spawnedSubagentThreadIds[0] ?? null;
     return { turnId, status: 'completed', decision, subagentThreadId };
+  }
+
+  private async assertModelAvailable(): Promise<void> {
+    const result = await this.request('model/list', { limit: 100, includeHidden: true }) as JsonObject;
+    validateModelSelection(this.config.runtime.codexModel, this.config.runtime.codexEffort, result.data);
   }
 
   async interruptActive(): Promise<boolean> {
@@ -367,6 +376,24 @@ export class AppServerSession {
     this.stderr?.close();
     this.child = null;
     this.backgroundThreadIds.clear();
+  }
+}
+
+export function validateModelSelection(model: string, effort: string, rawModels: unknown): void {
+  if (!Array.isArray(rawModels)) throw new Error('Codex model/list 未返回模型目录');
+  const selected = rawModels.find((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const value = entry as JsonObject;
+    return value.model === model || value.id === model;
+  }) as JsonObject | undefined;
+  if (!selected) throw new Error(`Codex 当前不可用模型：${model}`);
+  const supported = Array.isArray(selected.supportedReasoningEfforts)
+    ? selected.supportedReasoningEfforts
+      .map((item) => item && typeof item === 'object' ? (item as JsonObject).reasoningEffort : null)
+      .filter((value): value is string => typeof value === 'string')
+    : [];
+  if (!supported.includes(effort)) {
+    throw new Error(`Codex 模型 ${model} 不支持推理强度 ${effort}；可用值：${supported.join(', ') || '未报告'}`);
   }
 }
 

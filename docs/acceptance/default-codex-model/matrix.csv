@@ -1,0 +1,5 @@
+case,round-1
+默认值与旧配置兼容,PASS
+配置修改命令与非法强度,PASS
+实时模型目录校验,PASS
+真实 App Server start resume turn,PASS

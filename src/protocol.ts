@@ -36,7 +36,7 @@ export async function verifyCodexProtocol(config: HostConfig, protocolRoot: stri
       throw new Error(`Codex App Server schema SHA 不匹配：要求 ${config.protocol.schemaSha256}，实际 ${schemaSha256}`);
     }
     const schemaText = schema.toString('utf8');
-    for (const method of ['thread/start', 'thread/resume', 'thread/loaded/list', 'turn/start', 'turn/interrupt']) {
+    for (const method of ['model/list', 'thread/start', 'thread/resume', 'thread/loaded/list', 'turn/start', 'turn/interrupt']) {
       if (!schemaText.includes(`\"${method}\"`)) throw new Error(`Codex schema 缺少 ${method}`);
     }
     return { codexVersion: actualVersion, schemaSha256, schemaPath: `${actualVersion}/${SCHEMA_FILE}`, command };

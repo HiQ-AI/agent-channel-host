@@ -8,6 +8,8 @@ runtime:
   cwd: D:\agent-workspaces\triss
   dwsCommand: dws
   codexCommand: codex
+  codexModel: gpt-5.6-sol
+  codexEffort: low
   startupTimeoutSeconds: 120
   turnTimeoutSeconds: 180
 protocol:

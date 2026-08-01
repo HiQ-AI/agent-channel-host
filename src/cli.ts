@@ -2,7 +2,9 @@
 import { Command } from 'commander';
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
-import { defaultConfig, loadConfig, writeInitialConfig } from './config.js';
+import {
+  CODEX_REASONING_EFFORTS, defaultConfig, loadConfig, writeConfig, writeInitialConfig,
+} from './config.js';
 import { configPath, instanceDir, statePath } from './paths.js';
 import { Store } from './store.js';
 import { dwsDoctor, resolveExactGroup } from './dws.js';
@@ -26,6 +28,8 @@ program.command('init')
   .option('--role <role>', '默认角色定位', '在授权会话内提供职责范围内的分析和答复')
   .option('--dws-command <path>', 'DWS 命令或绝对路径', 'dws')
   .option('--codex-command <path>', 'Codex 命令或绝对路径', 'codex')
+  .option('--model <model>', '默认 Codex 模型', 'gpt-5.6-sol')
+  .option('--effort <effort>', '默认推理强度', 'low')
   .option('--dws-profile <profile>', '可选的 DWS corpId:userId profile')
   .action(async (options) => {
     const path = configPath(options.instance);
@@ -36,11 +40,40 @@ program.command('init')
     const config = defaultConfig(options.instance, options.cwd, options.name, options.role);
     config.runtime.dwsCommand = options.dwsCommand;
     config.runtime.codexCommand = options.codexCommand;
+    config.runtime.codexModel = options.model;
+    config.runtime.codexEffort = parseReasoningEffort(options.effort);
     if (options.dwsProfile) config.runtime.dwsProfile = options.dwsProfile;
     await writeInitialConfig(config, path);
     const store = new Store(statePath(options.instance));
     store.close();
     print({ ok: true, instance: options.instance, configPath: path, statePath: statePath(options.instance) });
+  });
+
+const configCommand = program.command('config').description('管理 Host instance 运行配置');
+configCommand.command('model')
+  .description('设置默认 Codex 模型和推理强度；运行中的 Host 需重启后生效')
+  .requiredOption('--instance <name>', 'instance 名称')
+  .option('--model <model>', '默认 Codex 模型')
+  .option('--effort <effort>', '默认推理强度')
+  .action(async (options) => {
+    if (options.model === undefined && options.effort === undefined) {
+      throw new Error('--model 和 --effort 至少提供一项');
+    }
+    const config = await loadConfig(options.instance);
+    if (options.model !== undefined) {
+      const model = String(options.model).trim();
+      if (!model) throw new Error('--model 不能为空');
+      config.runtime.codexModel = model;
+    }
+    if (options.effort !== undefined) config.runtime.codexEffort = parseReasoningEffort(options.effort);
+    await writeConfig(config);
+    print({
+      ok: true,
+      instance: options.instance,
+      model: config.runtime.codexModel,
+      effort: config.runtime.codexEffort,
+      restartRequired: true,
+    });
   });
 
 program.command('doctor')
@@ -63,6 +96,8 @@ program.command('doctor')
       dwsSubscriptions: Array.isArray(eventStatus?.subscriptions) ? eventStatus.subscriptions.length : 0,
       codexVersion: protocol.codexVersion,
       protocolSchemaSha256: protocol.schemaSha256,
+      codexModel: config.runtime.codexModel,
+      codexEffort: config.runtime.codexEffort,
     });
   });
 
@@ -219,6 +254,8 @@ program.command('verify')
         bootstrapPerformed: startup.bootstrapPerformed,
         canaryTurnIdPrefix: canary.turnId.slice(0, 12),
         action: canary.decision.action,
+        model: config.runtime.codexModel,
+        effort: config.runtime.codexEffort,
       });
     } finally {
       await session?.stop().catch(() => undefined);
@@ -277,4 +314,11 @@ function parsePositiveInteger(value: string): number {
     throw new Error(`分钟数必须是 1-${MAX_IDLE_TIMEOUT_MINUTES} 的正整数`);
   }
   return parsed;
+}
+
+function parseReasoningEffort(value: string): typeof CODEX_REASONING_EFFORTS[number] {
+  if (!CODEX_REASONING_EFFORTS.includes(value as typeof CODEX_REASONING_EFFORTS[number])) {
+    throw new Error(`--effort 必须是 ${CODEX_REASONING_EFFORTS.join('、')}`);
+  }
+  return value as typeof CODEX_REASONING_EFFORTS[number];
 }

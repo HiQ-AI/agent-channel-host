@@ -28,6 +28,7 @@ flowchart LR
 
 - 一个 instance 只持有一个 DWS bus owner；同一个 DWS profile 由跨 instance 文件锁防止重复 owner。
 - 每个群/私聊保存自己的 conversation 记录、Codex App Server 子进程和完整 thread ID，彼此不共享 transcript。
+- instance 可配置默认 Codex 模型和推理强度；未配置时使用 `gpt-5.6-sol + low`。每次启动 App Server 都先用 `model/list` 校验组合可用，再将模型用于 thread 创建/恢复和每轮 turn。
 - 每个群聊/私聊独立配置 `resident` 或 `idle`。默认群聊常驻，私聊空闲 5 分钟释放 App Server 子进程；超时可按会话修改。释放不删除 thread，下一条消息仍以原 ID 精确 `thread/resume`。
 - 群首次由 Host 启动时，先只读拉取最近 50 条消息并按时间顺序交给固定主 thread，再生成一次自我介绍。`shadow` 只准备并持久化介绍；切为 `reply`、重启 Host 后使用同一 UUID 发送，成功后不再重复介绍。
 - 新消息先提交 SQLite WAL，再中断当前 active turn；等 `turn/completed.status=interrupted` 后，在同一个 thread 上为新消息启动独立 turn。实现不使用 `turn/steer`。
@@ -68,6 +69,23 @@ dingtalk-codex init `
 
 dingtalk-codex doctor --instance triss
 ```
+
+默认模型是 `gpt-5.6-sol`，默认推理强度是 `low`。初始化时可覆盖，已有 instance 可单独修改；运行中的 Host 需重启后生效：
+
+```powershell
+dingtalk-codex init `
+  --instance triss-terra `
+  --cwd 'D:\agent-workspaces\triss-terra' `
+  --model gpt-5.6-terra `
+  --effort medium
+
+dingtalk-codex config model `
+  --instance triss `
+  --model gpt-5.6-sol `
+  --effort low
+```
+
+模型名称不使用静态白名单，以便 Codex 后续增加模型；推理强度接受 `low / medium / high / xhigh / max / ultra`。真正启动会话前，Host 读取当前 Codex App Server 的 `model/list`，模型不存在或不支持所选强度时直接失败，不会悄悄回退。
 
 Windows 默认数据目录为：
 
@@ -199,6 +217,7 @@ dingtalk-codex service remove --instance triss
 - conversation 内容属于本地敏感数据。状态命令和运行日志不输出正文、完整 conversation ID 或完整 thread ID；请按用户级敏感目录保护 instance 数据。
 - `idle` 只关闭本机 App Server 进程，SQLite 中的原 thread ID 和 Codex rollout 仍会保留；清理这些持久数据属于另一项显式操作。
 - App Server 的主 thread 与 subagent 使用 `workspaceWrite`，可写范围固定为 instance 配置的 `runtime.cwd`，网络关闭且审批策略为 `never`。请把 `runtime.cwd` 指向专用工作目录；主 thread 直接执行 `commandExecution` 或 `fileChange` 时，本轮 fail closed、不发群回执。
+- 修改默认模型会作用于新 thread、恢复的旧 thread 和后续每个 turn。恢复既有 thread 时如果模型不同，Codex 会按 App Server 契约记录一次模型切换提示；Host 不会因此另建 thread。
 - App Server 使用 stdio，不开放 experimental WebSocket transport；升级 Codex 前必须更新固定版本和生成 schema SHA，并重新执行测试、doctor、thread resume canary。
 
 ## 开发与验收
@@ -213,6 +232,9 @@ node docs/acceptance/group-onboarding-delegation/scripts/app-server-delegation-c
 
 $resumeRoot = Join-Path $env:LOCALAPPDATA 'dingtalk-codex-host\resume-canary'
 node docs/acceptance/conversation-lifecycle/scripts/app-server-resume-canary.mjs $resumeRoot
+
+$modelRoot = Join-Path $env:LOCALAPPDATA 'dingtalk-codex-host\model-canary'
+node docs/acceptance/default-codex-model/scripts/default-model-canary.mjs $modelRoot
 ```
 
-测试覆盖 SQLite admission/去重/sequence、outbox 双重 freshness、单 owner lease、每会话生命周期默认值与迁移、空闲计时/忙碌保护、首次群历史与介绍状态机、DWS 参数契约、active turn 中断、固定 session 上的新 turn、后台 subagent 决策证据、用户级 service 计划和 CLI init/status。委派 canary 会真实派发一个延迟 worker；生命周期 canary 会实际执行 start → stop → resume 并核对 thread ID，但二者都不连接或发送钉钉。真实 DWS 收发必须使用专用测试群/账号单独授权执行；`verify` 用于本机固定会话 App Server canary。
+测试覆盖 SQLite admission/去重/sequence、outbox 双重 freshness、单 owner lease、默认模型旧配置兼容与修改命令、模型目录 fail closed、每会话生命周期默认值与迁移、空闲计时/忙碌保护、首次群历史与介绍状态机、DWS 参数契约、active turn 中断、固定 session 上的新 turn、后台 subagent 决策证据、用户级 service 计划和 CLI init/status。委派 canary 会真实派发一个延迟 worker；生命周期 canary 会实际执行 start → stop → resume 并核对 thread ID；默认模型 canary 会用全新 instance 实跑 `gpt-5.6-sol + low` 的 start/resume/turn，但都不连接或发送钉钉。真实 DWS 收发必须使用专用测试群/账号单独授权执行；`verify` 用于本机固定会话 App Server canary。
