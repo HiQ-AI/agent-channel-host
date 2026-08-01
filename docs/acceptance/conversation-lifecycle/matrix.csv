@@ -1,0 +1,10 @@
+case_id,case,round-1
+L01,新群默认resident且新私聊默认idle五分钟,PASS
+L02,既有v2群聊和私聊迁移为各自默认策略,PASS
+L03,add和lifecycle命令可设置策略与正整数超时,PASS
+L04,resident会话启动时预热且不建立空闲定时器,PASS
+L05,idle会话新消息重置计时并在真正空闲后释放,PASS
+L06,主turn队列或后台subagent活跃时不释放,PASS
+L07,释放后新消息精确resume原threadId,PASS
+R01,现有onboarding委派可靠性和CLI回归通过,PASS
+D01,README示例和安全边界同步,PASS

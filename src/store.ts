@@ -2,12 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { MAX_IDLE_TIMEOUT_MINUTES } from './types.js';
 import type {
   AdmittedEvent,
   Conversation,
   ConversationKind,
+  ConversationLifecycle,
   ConversationMode,
   Decision,
+  GroupOnboardingRecord,
   NormalizedEvent,
   OutboxRecord,
   SessionRecord,
@@ -102,8 +105,41 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_inbound_conversation_sequence
         ON inbound_events(conversation_id, sequence DESC);
       CREATE INDEX IF NOT EXISTS idx_outbox_state ON outbox(state, created_at);
-      PRAGMA user_version=1;
     `);
+    const version = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (version < 2) {
+      this.db.exec(`
+        ALTER TABLE decisions ADD COLUMN work_type TEXT;
+        ALTER TABLE decisions ADD COLUMN delegation TEXT;
+        ALTER TABLE decisions ADD COLUMN subagent_thread_id TEXT;
+        CREATE TABLE group_onboarding (
+          conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+          state TEXT NOT NULL CHECK(state IN ('pending','prepared','sending','submitted','failed')),
+          history_count INTEGER,
+          history_loaded_at TEXT,
+          intro_turn_id TEXT,
+          intro_text TEXT,
+          intro_uuid TEXT UNIQUE,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO group_onboarding(conversation_id,state,created_at,updated_at)
+          SELECT id,'pending',created_at,updated_at FROM conversations WHERE kind='group';
+        PRAGMA user_version=2;
+      `);
+    }
+    const upgradedVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (upgradedVersion < 3) {
+      this.db.exec(`
+        ALTER TABLE conversations ADD COLUMN session_lifecycle TEXT NOT NULL DEFAULT 'resident'
+          CHECK(session_lifecycle IN ('resident','idle'));
+        ALTER TABLE conversations ADD COLUMN idle_timeout_minutes INTEGER NOT NULL DEFAULT 5
+          CHECK(idle_timeout_minutes BETWEEN 1 AND ${MAX_IDLE_TIMEOUT_MINUTES});
+        UPDATE conversations SET session_lifecycle='idle' WHERE kind='direct';
+        PRAGMA user_version=3;
+      `);
+    }
   }
 
   addConversation(input: {
@@ -112,14 +148,36 @@ export class Store {
     title: string;
     responsibility: string;
     mode: ConversationMode;
+    sessionLifecycle?: ConversationLifecycle;
+    idleTimeoutMinutes?: number;
   }): Conversation {
     const now = new Date().toISOString();
     const id = randomUUID();
-    this.db.prepare(`
-      INSERT INTO conversations(id,kind,external_id,title,responsibility,mode,enabled,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,1,?,?)
-    `).run(id, input.kind, input.externalId, input.title, input.responsibility, input.mode, now, now);
-    return this.getConversation(id)!;
+    const sessionLifecycle = input.sessionLifecycle ?? (input.kind === 'group' ? 'resident' : 'idle');
+    const idleTimeoutMinutes = input.idleTimeoutMinutes ?? 5;
+    assertIdleTimeoutMinutes(idleTimeoutMinutes);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare(`
+        INSERT INTO conversations(
+          id,kind,external_id,title,responsibility,mode,session_lifecycle,idle_timeout_minutes,
+          enabled,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,1,?,?)
+      `).run(
+        id, input.kind, input.externalId, input.title, input.responsibility, input.mode,
+        sessionLifecycle, idleTimeoutMinutes, now, now,
+      );
+      if (input.kind === 'group') {
+        this.db.prepare(`
+          INSERT INTO group_onboarding(conversation_id,state,created_at,updated_at) VALUES(?,'pending',?,?)
+        `).run(id, now, now);
+      }
+      this.db.exec('COMMIT');
+      return this.getConversation(id)!;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   setConversationEnabled(id: string, enabled: boolean): boolean {
@@ -131,6 +189,25 @@ export class Store {
   setConversationMode(id: string, mode: ConversationMode): boolean {
     const result = this.db.prepare('UPDATE conversations SET mode=?,updated_at=? WHERE id=?')
       .run(mode, new Date().toISOString(), id);
+    return Number(result.changes) === 1;
+  }
+
+  setConversationLifecycle(
+    id: string,
+    sessionLifecycle: ConversationLifecycle,
+    idleTimeoutMinutes?: number,
+  ): boolean {
+    if (idleTimeoutMinutes !== undefined) assertIdleTimeoutMinutes(idleTimeoutMinutes);
+    const current = this.getConversation(id);
+    if (!current) return false;
+    const result = this.db.prepare(`
+      UPDATE conversations SET session_lifecycle=?,idle_timeout_minutes=?,updated_at=? WHERE id=?
+    `).run(
+      sessionLifecycle,
+      idleTimeoutMinutes ?? current.idleTimeoutMinutes,
+      new Date().toISOString(),
+      id,
+    );
     return Number(result.changes) === 1;
   }
 
@@ -203,18 +280,28 @@ export class Store {
     }
   }
 
-  recordDecision(eventId: string, turnId: string | null, turnStatus: string, decision: Decision | null): void {
+  recordDecision(
+    eventId: string,
+    turnId: string | null,
+    turnStatus: string,
+    decision: Decision | null,
+    subagentThreadId: string | null = null,
+  ): void {
     this.db.prepare(`
-      INSERT INTO decisions(inbound_event_id,turn_id,turn_status,action,responsibility_match,category,reply_text,reason_code,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?)
+      INSERT INTO decisions(
+        inbound_event_id,turn_id,turn_status,action,responsibility_match,category,reply_text,reason_code,
+        work_type,delegation,subagent_thread_id,created_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(inbound_event_id) DO UPDATE SET
         turn_id=excluded.turn_id,turn_status=excluded.turn_status,action=excluded.action,
         responsibility_match=excluded.responsibility_match,category=excluded.category,
-        reply_text=excluded.reply_text,reason_code=excluded.reason_code,created_at=excluded.created_at
+        reply_text=excluded.reply_text,reason_code=excluded.reason_code,work_type=excluded.work_type,
+        delegation=excluded.delegation,subagent_thread_id=excluded.subagent_thread_id,created_at=excluded.created_at
     `).run(
       eventId, turnId, turnStatus, decision?.action ?? null,
       decision ? (decision.responsibilityMatch ? 1 : 0) : null,
       decision?.category ?? null, decision?.replyText ?? null, decision?.reasonCode ?? null,
+      decision?.workType ?? null, decision?.delegation ?? null, subagentThreadId,
       new Date().toISOString(),
     );
     this.db.prepare('UPDATE inbound_events SET processing_state=? WHERE id=?').run(turnStatus, eventId);
@@ -282,6 +369,54 @@ export class Store {
     return Number(row.sequence);
   }
 
+  getGroupOnboarding(conversationId: string): GroupOnboardingRecord | null {
+    return mapGroupOnboarding(this.db.prepare(
+      'SELECT * FROM group_onboarding WHERE conversation_id=?',
+    ).get(conversationId) as Row | undefined);
+  }
+
+  prepareGroupOnboarding(
+    conversationId: string,
+    historyCount: number,
+    introTurnId: string,
+    introText: string,
+    introUuid: string,
+  ): GroupOnboardingRecord {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE group_onboarding SET
+        state='prepared',history_count=?,history_loaded_at=?,intro_turn_id=?,intro_text=?,intro_uuid=?,
+        error=NULL,updated_at=?
+      WHERE conversation_id=? AND state<>'submitted'
+    `).run(historyCount, now, introTurnId, introText, introUuid, now, conversationId);
+    const record = this.getGroupOnboarding(conversationId);
+    if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
+    return record;
+  }
+
+  claimGroupOnboardingIntro(conversationId: string): GroupOnboardingRecord | null {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.getGroupOnboarding(conversationId);
+      if (!current || current.state === 'submitted' || !current.introText || !current.introUuid) {
+        this.db.exec('COMMIT');
+        return null;
+      }
+      this.db.prepare("UPDATE group_onboarding SET state='sending',error=NULL,updated_at=? WHERE conversation_id=?")
+        .run(new Date().toISOString(), conversationId);
+      this.db.exec('COMMIT');
+      return this.getGroupOnboarding(conversationId);
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  finishGroupOnboardingIntro(conversationId: string, state: 'submitted' | 'failed', error: string | null): void {
+    this.db.prepare('UPDATE group_onboarding SET state=?,error=?,updated_at=? WHERE conversation_id=?')
+      .run(state, error, new Date().toISOString(), conversationId);
+  }
+
   acquireLease(key: string, ownerId: string, nowMs: number, ttlMs: number): boolean {
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -321,7 +456,8 @@ export class Store {
         (SELECT COUNT(*) FROM inbound_events) AS received,
         (SELECT COUNT(*) FROM decisions WHERE turn_status='completed') AS processed,
         (SELECT COUNT(*) FROM outbox WHERE state='submitted') AS submitted,
-        (SELECT COUNT(*) FROM outbox WHERE state IN ('pending','sending')) AS pending_outbox
+        (SELECT COUNT(*) FROM outbox WHERE state IN ('pending','sending')) AS pending_outbox,
+        (SELECT COUNT(*) FROM group_onboarding WHERE state<>'submitted') AS pending_group_onboarding
     `).get() as Row;
     const sessions = this.db.prepare(`
       SELECT c.title,c.kind,s.thread_id,s.lifecycle,s.updated_at
@@ -350,8 +486,16 @@ function mapConversation(row: Row | undefined): Conversation | null {
   return {
     id: String(row.id), kind: row.kind as ConversationKind, externalId: String(row.external_id),
     title: String(row.title), responsibility: String(row.responsibility), mode: row.mode as ConversationMode,
+    sessionLifecycle: row.session_lifecycle as ConversationLifecycle,
+    idleTimeoutMinutes: Number(row.idle_timeout_minutes),
     enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
+}
+
+function assertIdleTimeoutMinutes(value: number): void {
+  if (!Number.isInteger(value) || value <= 0 || value > MAX_IDLE_TIMEOUT_MINUTES) {
+    throw new Error(`idleTimeoutMinutes 必须是 1-${MAX_IDLE_TIMEOUT_MINUTES} 的正整数`);
+  }
 }
 
 function mapSession(row: Row | undefined): SessionRecord | null {
@@ -372,5 +516,21 @@ function mapOutbox(row: Row | undefined): OutboxRecord | null {
     inputSequence: Number(row.input_sequence), uuid: String(row.uuid), text: String(row.text),
     state: row.state as OutboxRecord['state'], error: row.error ? String(row.error) : null,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
+}
+
+function mapGroupOnboarding(row: Row | undefined): GroupOnboardingRecord | null {
+  if (!row) return null;
+  return {
+    conversationId: String(row.conversation_id),
+    state: row.state as GroupOnboardingRecord['state'],
+    historyCount: row.history_count === null ? null : Number(row.history_count),
+    historyLoadedAt: row.history_loaded_at ? String(row.history_loaded_at) : null,
+    introTurnId: row.intro_turn_id ? String(row.intro_turn_id) : null,
+    introText: row.intro_text ? String(row.intro_text) : null,
+    introUuid: row.intro_uuid ? String(row.intro_uuid) : null,
+    error: row.error ? String(row.error) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
   };
 }

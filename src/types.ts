@@ -1,5 +1,7 @@
 export type ConversationKind = 'group' | 'direct';
 export type ConversationMode = 'shadow' | 'reply';
+export type ConversationLifecycle = 'resident' | 'idle';
+export const MAX_IDLE_TIMEOUT_MINUTES = 35_791;
 
 export interface Conversation {
   id: string;
@@ -8,6 +10,8 @@ export interface Conversation {
   title: string;
   responsibility: string;
   mode: ConversationMode;
+  sessionLifecycle: ConversationLifecycle;
+  idleTimeoutMinutes: number;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -41,6 +45,8 @@ export interface Decision {
   category: string;
   replyText: string;
   reasonCode: string;
+  workType: 'discussion' | 'implementation';
+  delegation: 'not_required' | 'started';
 }
 
 export interface ProtocolIdentity {
@@ -70,6 +76,19 @@ export interface OutboxRecord {
   uuid: string;
   text: string;
   state: 'pending' | 'sending' | 'submitted' | 'failed' | 'suppressed';
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GroupOnboardingRecord {
+  conversationId: string;
+  state: 'pending' | 'prepared' | 'sending' | 'submitted' | 'failed';
+  historyCount: number | null;
+  historyLoadedAt: string | null;
+  introTurnId: string | null;
+  introText: string | null;
+  introUuid: string | null;
   error: string | null;
   createdAt: string;
   updatedAt: string;

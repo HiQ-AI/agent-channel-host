@@ -7,7 +7,65 @@ import { OwnerLock } from './owner-lock.js';
 import { DwsEventOwner, DwsSender, normalizeDwsEvent } from './dws.js';
 import { AppServerSession } from './app-server.js';
 import { ConversationActor } from './actor.js';
-import type { Conversation } from './types.js';
+import type { Conversation, GroupOnboardingRecord } from './types.js';
+
+type IdleReleaseResult = 'released' | 'busy';
+
+export class ConversationIdleController {
+  private timers = new Map<string, NodeJS.Timeout>();
+  private generations = new Map<string, number>();
+
+  constructor(
+    private readonly release: (conversationId: string) => Promise<IdleReleaseResult>,
+    private readonly minuteMs = 60_000,
+  ) {}
+
+  touch(conversation: Conversation): void {
+    const generation = (this.generations.get(conversation.id) ?? 0) + 1;
+    this.generations.set(conversation.id, generation);
+    this.clearTimer(conversation.id);
+    if (conversation.sessionLifecycle === 'idle') {
+      this.schedule(conversation, generation, conversation.idleTimeoutMinutes * this.minuteMs);
+    }
+  }
+
+  stop(): void {
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
+    this.generations.clear();
+  }
+
+  private schedule(conversation: Conversation, generation: number, delayMs: number): void {
+    const timer = setTimeout(() => void this.attempt(conversation, generation), delayMs);
+    timer.unref();
+    this.timers.set(conversation.id, timer);
+  }
+
+  private async attempt(conversation: Conversation, generation: number): Promise<void> {
+    if (this.generations.get(conversation.id) !== generation) return;
+    this.timers.delete(conversation.id);
+    const result = await this.release(conversation.id);
+    if (result === 'busy' && this.generations.get(conversation.id) === generation) {
+      this.schedule(conversation, generation, Math.min(1_000, this.minuteMs));
+    }
+  }
+
+  private clearTimer(conversationId: string): void {
+    const timer = this.timers.get(conversationId);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(conversationId);
+  }
+}
+
+export function shouldStartConversationAtBoot(
+  conversation: Conversation,
+  onboarding: GroupOnboardingRecord | null,
+): boolean {
+  if (conversation.sessionLifecycle === 'resident') return true;
+  if (conversation.kind !== 'group' || !onboarding) return false;
+  if (!onboarding.introText) return true;
+  return conversation.mode === 'reply' && onboarding.state !== 'submitted';
+}
 
 export async function runHost(config: HostConfig): Promise<void> {
   const store = new Store(statePath(config.instance));
@@ -15,7 +73,6 @@ export async function runHost(config: HostConfig): Promise<void> {
   const actors = new Map<string, ConversationActor>();
   const actorStarts = new Map<string, Promise<ConversationActor>>();
   const actorClosures = new Map<string, Promise<void>>();
-  const directIdleTimers = new Map<string, NodeJS.Timeout>();
   const log = (record: Record<string, unknown>) => {
     process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), instance: config.instance, ...record })}\n`);
   };
@@ -32,6 +89,7 @@ export async function runHost(config: HostConfig): Promise<void> {
   const sender = new DwsSender(config);
   let events: DwsEventOwner | null = null;
   let leaseTimer: NodeJS.Timeout | null = null;
+  let idleController: ConversationIdleController | null = null;
 
   try {
     await lock.acquire();
@@ -67,8 +125,27 @@ export async function runHost(config: HostConfig): Promise<void> {
       return promise;
     };
 
-    for (const conversation of store.listConversations(true).filter((item) => item.kind === 'group')) {
+    const controller = new ConversationIdleController(async (conversationId) => {
+      if (actorStarts.has(conversationId) || actorClosures.has(conversationId)) return 'busy';
+      const current = actors.get(conversationId);
+      if (!current) return 'released';
+      if (current.isBusy()) return 'busy';
+      actors.delete(conversationId);
+      const closing = current.stop()
+        .then(() => log({ type: 'SESSION_IDLE_CLOSED', conversationId }))
+        .catch((error) => requestStop(error as Error))
+        .finally(() => actorClosures.delete(conversationId));
+      actorClosures.set(conversationId, closing);
+      await closing;
+      return 'released';
+    });
+    idleController = controller;
+
+    for (const conversation of store.listConversations(true)) {
+      const onboarding = conversation.kind === 'group' ? store.getGroupOnboarding(conversation.id) : null;
+      if (!shouldStartConversationAtBoot(conversation, onboarding)) continue;
       await ensureActor(conversation);
+      controller.touch(conversation);
     }
 
     events = new DwsEventOwner(config, (raw) => {
@@ -91,25 +168,10 @@ export async function runHost(config: HostConfig): Promise<void> {
         return;
       }
       log({ type: 'EVENT_ADMITTED', conversationId: conversation.id, sequence: admitted.event.sequence });
+      controller.touch(conversation);
       void ensureActor(conversation)
         .then((actor) => {
           actor.submit(admitted.event!);
-          if (conversation.kind === 'direct') {
-            const existingTimer = directIdleTimers.get(conversation.id);
-            if (existingTimer) clearTimeout(existingTimer);
-            const timer = setTimeout(() => {
-              directIdleTimers.delete(conversation.id);
-              const current = actors.get(conversation.id);
-              if (!current) return;
-              actors.delete(conversation.id);
-              const closing = current.stop()
-                .then(() => log({ type: 'DIRECT_SESSION_IDLE_CLOSED', conversationId: conversation.id }))
-                .catch((error) => requestStop(error as Error))
-                .finally(() => actorClosures.delete(conversation.id));
-              actorClosures.set(conversation.id, closing);
-            }, config.runtime.directMessageIdleMinutes * 60_000);
-            directIdleTimers.set(conversation.id, timer);
-          }
         })
         .catch((error) => requestStop(error as Error));
     }, (error) => requestStop(error));
@@ -124,8 +186,7 @@ export async function runHost(config: HostConfig): Promise<void> {
     process.removeListener('SIGTERM', signalHandler);
   } finally {
     if (leaseTimer) clearInterval(leaseTimer);
-    for (const timer of directIdleTimers.values()) clearTimeout(timer);
-    directIdleTimers.clear();
+    idleController?.stop();
     await events?.stop().catch((error) => log({ type: 'DWS_STOP_ERROR', error: (error as Error).message }));
     await Promise.all([...actors.values()].map((actor) => actor.stop().catch((error) => {
       log({ type: 'ACTOR_STOP_ERROR', conversationId: actor.conversation.id, error: (error as Error).message });

@@ -1,0 +1,12 @@
+case_id,case,round-1
+G01,首次群启动使用当前时间向前拉最近50条消息,PASS
+G02,历史消息进入固定主thread且介绍只准备一次,PASS
+G03,shadow不发送且切reply重启后发送已准备介绍,PASS
+G04,发送失败使用同一UUID恢复重试且成功后不再发送,PASS
+G05,v1已有群迁移为待onboarding,PASS
+S01,实施请求必须产生真实spawn_agent子thread证据,PASS
+S02,主thread直接commandExecution或fileChange时fail closed,PASS
+S03,派发后主turn立即回执且不等待worker完成,PASS
+S04,后台worker运行时下一条群消息仍可被主actor处理,PASS
+R01,原有去重freshness单owner与CLI行为回归通过,PASS
+D01,README和SECURITY同步新行为与可靠性边界,PASS
