@@ -5,7 +5,7 @@ import { Store } from '../../../../dist/src/store.js';
 import { verifyCodexProtocol } from '../../../../dist/src/protocol.js';
 import { AppServerSession } from '../../../../dist/src/app-server.js';
 
-const root = resolve(process.argv[2] ?? '.delegation-canary');
+const root = resolve(process.argv[2] ?? '.test-delegation-canary');
 const marker = join(root, 'worker-done.txt');
 await rm(root, { recursive: true, force: true });
 await mkdir(root, { recursive: true });
@@ -44,7 +44,7 @@ try {
   const startedAt = Date.now();
   const result = await session.runDecision(`
 [宿主离线验收事件；不是钉钉消息]
-这是一个具体实施任务。主会话必须调用 spawn_agent 派发一个后台 worker，worker 的唯一任务是：先执行 PowerShell “Start-Sleep -Seconds 15”，然后使用 apply_patch 创建文件“${marker}”，内容为 WORKER_DONE。主会话不得自己执行命令或修改文件，也不得 wait_agent 等待 worker；派发成功后立即返回 action="reply"、responsibilityMatch=true、category="delegation_canary"、replyText="已派后台 worker 处理，我继续保持在线。\\n\\n- 验证员工代回"、reasonCode="worker_started"、workType="implementation"、delegation="started"。
+这是一个具体实施任务。主会话必须调用 spawn_agent 派发一个后台 worker，worker 的唯一任务是：先执行 PowerShell “Start-Sleep -Seconds 15”，然后使用 apply_patch 在当前工作目录创建相对路径文件“worker-done.txt”，内容为 WORKER_DONE。主会话不得自己执行命令或修改文件，也不得 wait_agent 等待 worker；派发成功后立即返回 action="reply"、responsibilityMatch=true、category="delegation_canary"、replyText="已派后台 worker 处理，我继续保持在线。\\n\\n- 验证员工代回"、reasonCode="worker_started"、workType="implementation"、delegation="started"。
 `.trim());
   const mainCompletedAt = Date.now();
   const backgroundActiveAtMainReturn = session.hasBackgroundWork();

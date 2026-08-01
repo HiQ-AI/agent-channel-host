@@ -18,11 +18,10 @@ npm run verify
 命令：
 
 ```powershell
-$canaryRoot = Join-Path $env:LOCALAPPDATA 'dingtalk-codex-host\delegation-canary'
-node docs/acceptance/group-onboarding-delegation/scripts/app-server-delegation-canary.mjs $canaryRoot
+node docs/acceptance/group-onboarding-delegation/scripts/app-server-delegation-canary.mjs
 ```
 
-结果：最终代码复跑退出码 0。固定 Codex CLI 0.145.0 的主 turn 返回真实 `subAgentActivity(kind=started)` 子 thread ID；主 turn 用时 18062ms，后台 worker 在主 turn 返回 25735ms 后才写入 `WORKER_DONE`。因此本轮同时证明了真实派发和“不等待 worker 完成”。
+结果：最新 HEAD 以默认 `gpt-5.6-sol + low` 复跑退出码 0。固定 Codex CLI 0.145.0 的主 turn 返回真实 `subAgentActivity(kind=started)` 子 thread ID；主 turn 用时 21968ms，后台 worker 在主 turn 返回 26648ms 后才写入 `WORKER_DONE`。因此本轮同时证明了真实派发和“不等待 worker 完成”。
 
 独立只读回查：marker 文件为 12 字节，内容为 `WORKER_DONE`。
 

@@ -227,8 +227,7 @@ npm ci
 npm test
 npm run verify
 
-$canaryRoot = Join-Path $env:LOCALAPPDATA 'dingtalk-codex-host\delegation-canary'
-node docs/acceptance/group-onboarding-delegation/scripts/app-server-delegation-canary.mjs $canaryRoot
+node docs/acceptance/group-onboarding-delegation/scripts/app-server-delegation-canary.mjs
 
 $resumeRoot = Join-Path $env:LOCALAPPDATA 'dingtalk-codex-host\resume-canary'
 node docs/acceptance/conversation-lifecycle/scripts/app-server-resume-canary.mjs $resumeRoot
