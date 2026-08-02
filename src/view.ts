@@ -64,6 +64,10 @@ export function shouldStartHostForView(once: boolean, snapshot: Record<string, u
   return !once && snapshot.hostState !== 'running';
 }
 
+export function shouldUseColor(isTTY: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
+  return isTTY && env.NO_COLOR === undefined && env.TERM !== 'dumb';
+}
+
 export async function runView(instances: ViewInstance[], options: ViewOptions): Promise<void> {
   assertInteractiveView(options);
   if (options.once) {
@@ -77,6 +81,7 @@ export async function runView(instances: ViewInstance[], options: ViewOptions): 
   let inputBusy = false;
   let resolveStop!: () => void;
   const stopped = new Promise<void>((resolve) => { resolveStop = resolve; });
+  const color = shouldUseColor(Boolean(process.stdout.isTTY));
   const render = () => {
     normalizeSelection(state, instances);
     const selectedInstance = instances[state.selectedInstance] ?? null;
@@ -99,6 +104,7 @@ export async function runView(instances: ViewInstance[], options: ViewOptions): 
       settings,
       process.stdout.columns ?? 120,
       options.showContent,
+      color,
     );
   };
   const paint = () => process.stdout.write(`\u001b[2J\u001b[H${render()}\n`);
@@ -355,6 +361,7 @@ export function renderManagementView(
   settings: SettingEntry[],
   width = 120,
   showContent = false,
+  color = false,
 ): string {
   normalizeSelection(state, instances);
   const selectedInstance = instances[state.selectedInstance] ?? null;
@@ -363,23 +370,25 @@ export function renderManagementView(
     : null;
   const snapshots = instances.map((instance) => ({ instance, snapshot: instance.store.status(showContent) }));
   const running = snapshots.filter(({ snapshot }) => text(object(snapshot.host).state) === 'running').length;
-  const tabs = state.tab === 'overview' ? '[ 总览 ]   设置' : '  总览   [ 设置 ]';
+  const tabs = state.tab === 'overview'
+    ? `${ansi('[ 总览 ]', 'cyan-bold', color)}   ${ansi('设置', 'dim', color)}`
+    : `  ${ansi('总览', 'dim', color)}   ${ansi('[ 设置 ]', 'cyan-bold', color)}`;
   const lines = [
-    `${CLI_NAME}  instances=${instances.length}  running=${running}  refreshed=${new Date().toISOString()}`,
+    `${ansi(CLI_NAME, 'cyan-bold', color)}  instances=${instances.length}  running=${ansi(String(running), running > 0 ? 'green-bold' : 'dim', color)}  ${ansi(`refreshed=${new Date().toISOString()}`, 'dim', color)}`,
     tabs,
-    '─'.repeat(Math.min(width, 120)),
+    ansi('─'.repeat(Math.min(width, 120)), 'dim', color),
   ];
-  if (state.tab === 'settings') lines.push(...renderSettings(selectedInstance, detail, settings, state, width, instances.length));
-  else if (state.detailConversationId) lines.push(...renderConversationDetail(detail, width));
-  else if (detailInstance) lines.push(...renderInstanceOverview(detailInstance, detailInstance.store.status(showContent), state, width));
-  else lines.push(...renderGlobalOverview(snapshots, state, width));
+  if (state.tab === 'settings') lines.push(...renderSettings(selectedInstance, detail, settings, state, width, instances.length, color));
+  else if (state.detailConversationId) lines.push(...renderConversationDetail(detail, width, color));
+  else if (detailInstance) lines.push(...renderInstanceOverview(detailInstance, detailInstance.store.status(showContent), state, width, color));
+  else lines.push(...renderGlobalOverview(snapshots, state, width, color));
   const notice = state.notice ?? selectedInstance?.notices.at(-1) ?? null;
-  if (notice) lines.push('', `提示：${notice}`);
+  if (notice) lines.push('', ansi(`提示：${notice}`, 'yellow-bold', color));
   lines.push('', state.editing
-    ? `编辑 ${state.editing.label}：${state.editing.value}█  Enter 保存 / Esc 取消`
+    ? ansi(`编辑 ${state.editing.label}：${state.editing.value}█  Enter 保存 / Esc 取消`, 'cyan-bold', color)
     : state.tab === 'settings'
-      ? 'Tab/←/→ 切换  [/ ] 选择 instance  ↑/↓ 选择  Enter 编辑  Esc 返回  q 退出'
-      : 'Tab/←/→ 切换  ↑/↓ 选择  Enter 下钻  Esc 返回  q 退出');
+      ? ansi('Tab/←/→ 切换  [ / ] 选择 instance  ↑/↓ 选择  Enter 编辑  Esc 返回  q 退出', 'dim', color)
+      : ansi('Tab/←/→ 切换  ↑/↓ 选择  Enter 下钻  Esc 返回  q 退出', 'dim', color));
   return lines.join('\n');
 }
 
@@ -387,17 +396,18 @@ function renderGlobalOverview(
   snapshots: Array<{ instance: ViewInstance; snapshot: Record<string, unknown> }>,
   state: ManagementViewState,
   width: number,
+  color: boolean,
 ): string[] {
   if (snapshots.length === 0) {
     return [
-      'INSTANCES',
-      '  (none)',
+      heading('INSTANCES', color),
+      ansi('  (none)', 'dim', color),
       '',
-      '尚未初始化 instance。请先运行：',
-      'agent-channel init --instance <name> --cwd <path>',
+      ansi('尚未初始化 instance。请先运行：', 'yellow-bold', color),
+      ansi('agent-channel init --instance <name> --cwd <path>', 'cyan', color),
     ];
   }
-  const lines = ['INSTANCES'];
+  const lines = [heading('INSTANCES', color)];
   lines.push(...table(
     ['', 'INSTANCE', 'AGENT', 'HOST', 'PID', 'CHANNELS', 'CONVERSATIONS', 'PENDING', 'RUNTIMES', 'OWNER'],
     snapshots.map(({ instance, snapshot }, index) => {
@@ -410,14 +420,16 @@ function renderGlobalOverview(
       ];
     }),
     width,
+    semanticTable(color, state.selectedInstance, 2),
   ));
 
   const channels = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.channels));
-  lines.push('', 'CHANNELS');
+  lines.push('', heading('CHANNELS', color));
   lines.push(...table(
     ['INSTANCE', 'CHANNEL', 'PROFILE', 'STATE', 'PID', 'LAST EVENT', 'ERROR'],
     channels.map((row) => [row.instance, row.channelId, row.profileId, row.state, row.pid, age(row.lastEventAt), row.error ?? '-']),
     width,
+    semanticTable(color),
   ));
 
   const totals = snapshots.reduce((result, { snapshot }) => ({
@@ -430,20 +442,17 @@ function renderGlobalOverview(
     submitted: result.submitted + number(snapshot.submitted),
   }), { received: 0, pending: 0, claimed: 0, processed: 0, failed: 0, outbox: 0, submitted: 0 });
   const messages = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.messages));
-  lines.push('',
-    `MESSAGES received=${totals.received} pending=${totals.pending} claimed=${totals.claimed}`
-    + ` processed=${totals.processed} failed=${totals.failed} outbox=${totals.outbox}/${totals.submitted}`,
-  );
+  lines.push('', messageSummary(totals, color));
   const messageHeaders = ['INSTANCE', 'CHANNEL', 'CONVERSATION', 'SEQ', 'SENDER', 'STATE', 'ACTION', 'AGE'];
   if (messages.some((row) => row.preview !== undefined)) messageHeaders.push('PREVIEW');
   lines.push(...table(messageHeaders, messages.map((row) => {
     const values: unknown[] = [row.instance, row.channelId, row.title, row.sequence, row.sender ?? '-', row.state, row.action ?? '-', age(row.receivedAt)];
     if (messageHeaders.includes('PREVIEW')) values.push(row.preview ?? '-');
     return values;
-  }), width));
+  }), width, semanticTable(color)));
 
   const conversations = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.conversations));
-  lines.push('', 'CONVERSATIONS');
+  lines.push('', heading('CONVERSATIONS', color));
   lines.push(...table(
     ['INSTANCE', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'WORKER', 'SESSION', 'CONTEXT', 'RUNTIME'],
     conversations.map((row) => [
@@ -451,62 +460,78 @@ function renderGlobalOverview(
       row.sessionState, `v${row.contextVersion ?? 0}@${row.contextThroughSequence ?? 0}`, row.runtimeId,
     ]),
     width,
+    semanticTable(color),
   ));
 
   const runtimes = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.runtimeAdapters));
-  lines.push('', 'RUNTIMES');
+  lines.push('', heading('RUNTIMES', color));
   lines.push(...table(
     ['INSTANCE', 'RUNTIME', 'LABEL', 'STATE', 'MODEL', 'RECOVERY', 'ERROR'],
     runtimes.map((row) => [row.instance, row.runtimeId, row.label, row.state, row.model ?? '-', row.contextRecovery ?? '-', row.error ?? '-']),
     width,
+    semanticTable(color),
   ));
   const alerts = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.alerts));
   if (alerts.length > 0) {
-    lines.push('', 'ALERTS', ...alerts.map((row) => `- ${row.instance}/${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`));
+    lines.push('', heading('ALERTS', color), ...alerts.map((row) => ansi(`- ${row.instance}/${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`, 'red-bold', color)));
   }
   return lines;
 }
 
-function renderInstanceOverview(instance: ViewInstance, snapshot: Record<string, unknown>, state: ManagementViewState, width: number): string[] {
+function renderInstanceOverview(
+  instance: ViewInstance,
+  snapshot: Record<string, unknown>,
+  state: ManagementViewState,
+  width: number,
+  color: boolean,
+): string[] {
   const channels = array(snapshot.channels);
   const conversations = array(snapshot.conversations);
   const runtimeAdapters = array(snapshot.runtimeAdapters);
   const alerts = array(snapshot.alerts);
   const host = object(snapshot.host);
   const lines = [
-    `实例详情 / ${instance.name}  Agent=${instance.config.identity.name}  host=${text(host.state) ?? 'unknown'}  pid=${text(host.pid) ?? '-'}  ${instance.hostOwnership}`,
-    '', 'CHANNELS',
+    `${heading(`实例详情 / ${instance.name}`, color)}  Agent=${instance.config.identity.name}  host=${statusText(text(host.state) ?? 'unknown', color)}  pid=${text(host.pid) ?? '-'}  ${statusText(instance.hostOwnership, color)}`,
+    '', heading('CHANNELS', color),
   ];
   lines.push(...table(
     ['CHANNEL', 'PROFILE', 'STATE', 'PID', 'LAST EVENT', 'ERROR'],
     channels.map((row) => [row.channelId, row.profileId, row.state, row.pid, age(row.lastEventAt), row.error ?? '-']),
     width,
+    semanticTable(color),
   ));
-  lines.push('',
-    `MESSAGES received=${number(snapshot.received)} pending=${number(snapshot.pending_messages)}`
-    + ` claimed=${number(snapshot.claimed_messages)} processed=${number(snapshot.processed)}`
-    + ` failed=${number(snapshot.failed_messages)} outbox=${number(snapshot.pending_outbox)}/${number(snapshot.submitted)}`,
-    '', 'CONVERSATIONS');
+  lines.push('', messageSummary({
+    received: number(snapshot.received),
+    pending: number(snapshot.pending_messages),
+    claimed: number(snapshot.claimed_messages),
+    processed: number(snapshot.processed),
+    failed: number(snapshot.failed_messages),
+    outbox: number(snapshot.pending_outbox),
+    submitted: number(snapshot.submitted),
+  }, color), '', heading('CONVERSATIONS', color));
   lines.push(...table(
     ['', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'WORKER', 'SESSION', 'CONTEXT', 'MEMBERS', 'RUNTIME'],
     conversations.map((row, index) => [
       index === state.selectedConversation ? '>' : ' ', row.channelId, row.title, row.mode, row.pending,
       row.workerState, row.sessionState, `v${row.contextVersion ?? 0}@${row.contextThroughSequence ?? 0}`,
       row.memberCount ?? 0, row.runtimeId,
-    ]), width,
+    ]), width, semanticTable(color, state.selectedConversation, 2),
   ));
-  lines.push('', 'RUNTIMES');
+  lines.push('', heading('RUNTIMES', color));
   lines.push(...table(
     ['RUNTIME', 'LABEL', 'STATE', 'MODEL', 'RECOVERY', 'ERROR'],
     runtimeAdapters.map((row) => [row.runtimeId, row.label, row.state, row.model ?? '-', row.contextRecovery ?? '-', row.error ?? '-']),
     width,
+    semanticTable(color),
   ));
-  if (alerts.length > 0) lines.push('', 'ALERTS', ...alerts.map((row) => `- ${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`));
+  if (alerts.length > 0) {
+    lines.push('', heading('ALERTS', color), ...alerts.map((row) => ansi(`- ${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`, 'red-bold', color)));
+  }
   return lines;
 }
 
-function renderConversationDetail(detail: Record<string, unknown> | null, width: number): string[] {
-  if (!detail) return ['会话不存在或已删除'];
+function renderConversationDetail(detail: Record<string, unknown> | null, width: number, color: boolean): string[] {
+  if (!detail) return [ansi('会话不存在或已删除', 'red-bold', color)];
   const conversation = object(detail.conversation);
   const session = object(detail.session);
   const worker = object(detail.worker);
@@ -514,30 +539,31 @@ function renderConversationDetail(detail: Record<string, unknown> | null, width:
   const members = array(detail.members);
   const messages = array(detail.messages);
   const lines = [
-    `会话详情 / ${text(conversation.title) ?? '-'}`,
-    `Channel ${text(conversation.channelId)}/${text(conversation.channelProfileId)}  kind=${text(conversation.kind)}  enabled=${text(conversation.enabled)}`,
-    `mode=${text(conversation.mode)}  runtime=${text(conversation.runtimeId)}  policy=v${text(conversation.policyVersion)}  warm=${text(conversation.workerWarmSeconds)}s`,
+    heading(`会话详情 / ${text(conversation.title) ?? '-'}`, color),
+    `Channel ${text(conversation.channelId)}/${text(conversation.channelProfileId)}  kind=${text(conversation.kind)}  enabled=${statusText(text(conversation.enabled) ?? 'false', color)}`,
+    `mode=${statusText(text(conversation.mode) ?? 'unknown', color)}  runtime=${text(conversation.runtimeId)}  policy=v${text(conversation.policyVersion)}  warm=${text(conversation.workerWarmSeconds)}s`,
     `职责：${text(conversation.responsibility) ?? '-'}`,
-    `Session ${text(session.lifecycle) ?? 'unprovisioned'}  id=${text(session.providerSessionPrefix) ?? '-'}  generation=${text(session.generation) ?? '-'}`,
-    `Worker ${text(worker.state) ?? 'stopped'}  pid=${text(worker.processId) ?? '-'}  error=${text(worker.error) ?? '-'}`,
-    `Checkpoint v${text(context.version) ?? '0'} @ seq ${text(context.throughSequence) ?? '0'}  facts=${text(context.facts) ?? '0'} decisions=${text(context.decisions) ?? '0'} commitments=${text(context.commitments) ?? '0'} open=${text(context.openQuestions) ?? '0'}`,
-    '', 'MEMBERS',
+    `Session ${statusText(text(session.lifecycle) ?? 'unprovisioned', color)}  id=${text(session.providerSessionPrefix) ?? '-'}  generation=${text(session.generation) ?? '-'}`,
+    `Worker ${statusText(text(worker.state) ?? 'stopped', color)}  pid=${text(worker.processId) ?? '-'}  error=${errorText(text(worker.error) ?? '-', color)}`,
+    ansi(`Checkpoint v${text(context.version) ?? '0'} @ seq ${text(context.throughSequence) ?? '0'}  facts=${text(context.facts) ?? '0'} decisions=${text(context.decisions) ?? '0'} commitments=${text(context.commitments) ?? '0'} open=${text(context.openQuestions) ?? '0'}`, 'cyan', color),
+    '', heading('MEMBERS', color),
   ];
   lines.push(...table(
     ['NAME', 'ORG ROLE', 'CHANNEL ROLE', 'BOUNDARY', 'SOURCE', 'VER'],
     members.map((row) => [row.displayName, row.organizationRole || '-', row.conversationRole || '-', row.responsibilityBoundary || '-', row.source, row.version]),
     width,
+    semanticTable(color),
   ));
-  lines.push('', 'RECENT MESSAGES');
+  lines.push('', heading('RECENT MESSAGES', color));
   const headers = ['SEQ', 'SENDER', 'STATE', 'AGE'];
   if (messages.some((row) => row.preview !== undefined)) headers.push('PREVIEW');
   lines.push(...table(headers, messages.map((row) => {
     const values: unknown[] = [row.sequence, row.sender, row.state, age(row.receivedAt)];
     if (headers.includes('PREVIEW')) values.push(row.preview ?? '-');
     return values;
-  }), width));
+  }), width, semanticTable(color)));
   if (context.currentTopic !== undefined) {
-    lines.push('', `当前主题：${text(context.currentTopic) || '无'}`);
+    lines.push('', ansi(`当前主题：${text(context.currentTopic) || '无'}`, 'cyan-bold', color));
     for (const [label, key] of [['事实', 'factItems'], ['决定', 'decisionItems'], ['承诺', 'commitmentItems'], ['未决', 'openQuestionItems']] as const) {
       const values = Array.isArray(context[key]) ? context[key] as unknown[] : [];
       if (values.length > 0) lines.push(`${label}：${values.map(String).join('；')}`);
@@ -553,24 +579,25 @@ function renderSettings(
   state: ManagementViewState,
   width: number,
   instanceCount: number,
+  color: boolean,
 ): string[] {
   if (!instance) {
     return [
-      '设置',
+      heading('设置', color),
       '',
-      '尚未初始化 instance，当前没有可修改的配置。',
-      '请先运行 agent-channel init --instance <name> --cwd <path>。',
+      ansi('尚未初始化 instance，当前没有可修改的配置。', 'yellow-bold', color),
+      ansi('请先运行 agent-channel init --instance <name> --cwd <path>。', 'cyan', color),
     ];
   }
   const conversation = object(detail?.conversation);
   const lines = [
-    `设置  instance=${instance.name} (${state.selectedInstance + 1}/${instanceCount})  Agent=${instance.config.identity.name}`,
+    `${heading('设置', color)}  instance=${ansi(instance.name, 'cyan-bold', color)} (${state.selectedInstance + 1}/${instanceCount})  Agent=${instance.config.identity.name}`,
     `Runtime=${instance.config.runtime.id}  Channel=${instance.config.channel.id}/${instance.config.channel.profileId}`,
-    instance.hostOwnership === 'attached'
+    ansi(instance.hostOwnership === 'attached'
       ? '当前连接到外部 Host；conversation/member 设置下一 turn 生效，config.yaml 设置建议重启 Host。'
       : instance.hostOwnership === 'view'
         ? '当前 Host 由 view 启动；配置在后续 turn/batch 生效。'
-        : '当前为只读快照；未启动或 attach Host。',
+        : '当前为只读快照；未启动或 attach Host。', instance.hostOwnership === 'view' ? 'yellow' : 'dim', color),
     `当前会话：${text(conversation.title) ?? '未选择'}`,
     '',
   ];
@@ -578,6 +605,12 @@ function renderSettings(
     ['', 'SETTING', 'VALUE', 'EFFECT'],
     settings.map((entry, index) => [index === state.selectedSetting ? '>' : ' ', entry.label, entry.value || '(空)', entry.hint]),
     width,
+    {
+      separator: ' │ ',
+      dividerSeparator: '─┼─',
+      dividerFill: '─',
+      decorate: tableDecorator(color, state.selectedSetting, 1),
+    },
   ));
   return lines;
 }
@@ -587,7 +620,7 @@ export function renderStatusView(instances: ViewInstance[], showContent = false,
   const snapshots = instances.map((instance) => ({ instance, snapshot: instance.store.status(showContent) }));
   const lines = [
     `${CLI_NAME} view  instances=${instances.length}  refreshed=${new Date().toISOString()}`,
-    ...renderGlobalOverview(snapshots, state, width),
+    ...renderGlobalOverview(snapshots, state, width, false),
     '',
     '只读聚合快照；交互模式会逐 instance 启动或 attach Host，并提供下钻详情和设置 tab',
   ];
@@ -611,11 +644,21 @@ function normalizeSelection(state: ManagementViewState, instances: ViewInstance[
   }
 }
 
-function table(headers: string[], rows: unknown[][], width: number): string[] {
+type AnsiStyle = 'cyan' | 'cyan-bold' | 'green' | 'green-bold' | 'yellow' | 'yellow-bold' | 'red-bold' | 'dim' | 'bold';
+
+interface TableOptions {
+  separator?: string;
+  dividerSeparator?: string;
+  dividerFill?: string;
+  decorate?: (value: string, rowIndex: number, columnIndex: number, header: boolean) => string;
+}
+
+function table(headers: string[], rows: unknown[][], width: number, options: TableOptions = {}): string[] {
   if (rows.length === 0) return ['  (none)'];
+  const separator = options.separator ?? '  ';
   const usable = Math.max(60, width - 2);
   const natural = headers.map((header, index) => Math.max(header.length, ...rows.map((row) => cell(row[index]).length)));
-  const separatorWidth = (headers.length - 1) * 2;
+  const separatorWidth = (headers.length - 1) * separator.length;
   let total = natural.reduce((sum, value) => sum + value, 0) + separatorWidth;
   const widths = [...natural];
   while (total > usable) {
@@ -624,8 +667,74 @@ function table(headers: string[], rows: unknown[][], width: number): string[] {
     widths[index]!--;
     total--;
   }
-  const render = (row: unknown[]) => row.map((value, index) => pad(truncate(cell(value), widths[index]!), widths[index]!)).join('  ').trimEnd();
-  return [render(headers), render(widths.map((value) => '-'.repeat(value))), ...rows.map(render)];
+  const render = (row: unknown[], rowIndex: number, header = false) => {
+    const values = row.map((value, index) => pad(truncate(cell(value), widths[index]!), widths[index]!));
+    if (values.length > 0) values[values.length - 1] = values.at(-1)!.trimEnd();
+    return values.map((value, columnIndex) => options.decorate?.(value, rowIndex, columnIndex, header) ?? value).join(separator);
+  };
+  const divider = widths
+    .map((value) => (options.dividerFill ?? '-').repeat(value))
+    .join(options.dividerSeparator ?? separator);
+  return [render(headers, -1, true), divider, ...rows.map((row, index) => render(row, index))];
+}
+
+function semanticTable(color: boolean, selectedRow = -1, selectedThroughColumn = -1): TableOptions {
+  return { decorate: tableDecorator(color, selectedRow, selectedThroughColumn) };
+}
+
+function tableDecorator(color: boolean, selectedRow = -1, selectedThroughColumn = -1): TableOptions['decorate'] {
+  return (value, rowIndex, columnIndex, header) => {
+    if (header) return ansi(value, 'bold', color);
+    if (rowIndex === selectedRow && columnIndex <= selectedThroughColumn) return ansi(value, 'cyan-bold', color);
+    return statusText(value, color);
+  };
+}
+
+function heading(value: string, color: boolean): string {
+  return ansi(value, 'cyan-bold', color);
+}
+
+function messageSummary(
+  values: { received: number; pending: number; claimed: number; processed: number; failed: number; outbox: number; submitted: number },
+  color: boolean,
+): string {
+  return `${heading('MESSAGES', color)} received=${values.received}`
+    + ` pending=${ansi(String(values.pending), values.pending > 0 ? 'yellow-bold' : 'dim', color)}`
+    + ` claimed=${ansi(String(values.claimed), values.claimed > 0 ? 'yellow' : 'dim', color)}`
+    + ` processed=${ansi(String(values.processed), values.processed > 0 ? 'green' : 'dim', color)}`
+    + ` failed=${ansi(String(values.failed), values.failed > 0 ? 'red-bold' : 'dim', color)}`
+    + ` outbox=${ansi(`${values.outbox}/${values.submitted}`, values.outbox > 0 ? 'yellow-bold' : 'dim', color)}`;
+}
+
+function statusText(value: string, color: boolean): string {
+  const token = value.trim().toLowerCase();
+  if (/^(error|failed|fatal|unknown)$/.test(token)) return ansi(value, 'red-bold', color);
+  if (/^(running|ready|completed|success|reply|enabled|true)$/.test(token)) return ansi(value, 'green-bold', color);
+  if (/^(starting|pending|claimed|processing|warm|view|shadow|provisioning|held|interrupted)$/.test(token)) {
+    return ansi(value, 'yellow', color);
+  }
+  if (/^(stopped|idle|silent|readonly|attached|unprovisioned|disabled|false|-)$/.test(token)) return ansi(value, 'dim', color);
+  return value;
+}
+
+function errorText(value: string, color: boolean): string {
+  return value === '-' ? ansi(value, 'dim', color) : ansi(value, 'red-bold', color);
+}
+
+function ansi(value: string, style: AnsiStyle, enabled: boolean): string {
+  if (!enabled) return value;
+  const code: Record<AnsiStyle, string> = {
+    cyan: '36',
+    'cyan-bold': '1;36',
+    green: '32',
+    'green-bold': '1;32',
+    yellow: '33',
+    'yellow-bold': '1;33',
+    'red-bold': '1;31',
+    dim: '2',
+    bold: '1',
+  };
+  return `\u001b[${code[style]}m${value}\u001b[0m`;
 }
 
 function object(value: unknown): Json {

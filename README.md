@@ -186,6 +186,13 @@ agent-channel view
 
 `view` 会从用户状态目录发现全部已初始化 instance。默认先进入聚合 instance、Channel、conversation、runtime 和消息状态的“总览”tab，而不是某个 instance 或单群页面。上下键选择 instance，`Enter` 先进入实例详情，再选择 conversation 下钻；`Esc` 逐层返回。`Tab` 或左右键切到相邻的“设置”tab，使用 `[` / `]` 选择目标 instance，再修改 Agent 身份、runtime model/effort、合批参数、当前会话职责/mode/warm TTL，以及已观察成员的角色和职责边界。
 
+交互式终端会用少量语义颜色突出当前选中项、正常/等待/异常状态和告警；表格宽度仍按纯文本计算，不影响列对齐。设置 tab 的 `SETTING │ VALUE │ EFFECT` 三列使用竖线分隔并统一左对齐。`view --once` 和非交互输出始终不带 ANSI；需要在交互终端禁用颜色时设置 `NO_COLOR`：
+
+```powershell
+$env:NO_COLOR = '1'
+agent-channel view
+```
+
 - 某个 instance 的 Host 未运行：`view` 在当前进程内为该 instance 启动唯一 Host；退出时只停止由本次 view 启动的 Host。
 - 某个 instance 的 Host 已运行：`view` 只 attach 该 instance 状态，不创建第二个 Channel owner；退出不停止原有 Host。
 - 尚无 instance：仍进入空总览并显示 `init` 引导，不报“缺少 instance”。
