@@ -31,7 +31,7 @@ async function resolveCommandUncached(command: string): Promise<ResolvedCommand>
     if (codexJs) return { kind: 'node-script', file: process.execPath, target: codexJs };
   }
   if (['.ps1', '.cmd', '.bat'].includes(extension)) {
-    throw new Error(`不支持通过 ${extension} shim 启动常驻 JSONL 进程；请提供原生 .exe（Codex npm launcher 会自动解析 codex.js）`);
+    throw new Error(`不支持通过 ${extension} shim 启动 JSONL 子进程；请提供原生 .exe（Codex npm launcher 会自动解析 codex.js）`);
   }
   if (extension === '.exe') {
     await access(command);

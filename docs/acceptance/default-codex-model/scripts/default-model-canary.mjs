@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const root = resolve(process.argv[2] ?? '.default-model-canary');
 const cli = join(process.cwd(), 'dist', 'src', 'cli.js');
-const env = { ...process.env, DINGTALK_CODEX_HOME: root };
+const env = { ...process.env, AGENT_CHANNEL_HOME: root };
 
 await rm(root, { recursive: true, force: true });
 try {

@@ -1,17 +1,22 @@
-version: 1
+version: 2
 instance: triss
 identity:
   name: 翠丝
-  role: 公司数字化员工；按自身角色与每个会话单独配置的职责边界参与讨论
-  signature: "- 翠丝代回"
+  role: 公司数字化员工；按自身角色与各会话职责边界参与讨论
+  signature: '- 翠丝代回'
+channel:
+  id: dingtalk
+  profileId: default
+  command: dws
 runtime:
+  id: codex
+  command: codex
+  version: codex-cli 0.145.0
+  model: gpt-5.6-sol
+  effort: low
   cwd: D:\agent-workspaces\triss
-  dwsCommand: dws
-  codexCommand: codex
-  codexModel: gpt-5.6-sol
-  codexEffort: low
   startupTimeoutSeconds: 120
   turnTimeoutSeconds: 180
-protocol:
-  codexVersion: codex-cli 0.145.0
-  schemaSha256: 1f66700d1cc3de4a5004e5614a6098878b405c7e7c5f8c9be97fc900d0ad6c68
+scheduling:
+  quietWindowMilliseconds: 300
+  maxBatchMessages: 20

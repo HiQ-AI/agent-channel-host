@@ -30,25 +30,59 @@ test('授权会话才可持久化，事件按会话单调编号并去重', () =>
   store.close();
 });
 
-test('新群默认常驻，新私聊默认空闲五分钟，且生命周期可按会话修改', () => {
+test('conversation 使用中立 channel/runtime binding，并可设置 Worker warm TTL', () => {
   const store = new Store(':memory:');
   const group = store.addConversation({
-    kind: 'group', externalId: 'cid-lifecycle-group', title: '常驻群', responsibility: '参与讨论', mode: 'shadow',
+    kind: 'group', externalId: 'shared-id', title: '钉钉群', responsibility: '参与讨论', mode: 'shadow',
   });
-  const direct = store.addConversation({
-    kind: 'direct', externalId: 'user-lifecycle', title: '空闲私聊', responsibility: '回答问题', mode: 'shadow',
+  const otherChannel = store.addConversation({
+    channelId: 'slack', channelProfileId: 'workspace-a', runtimeId: 'claude',
+    kind: 'group', externalId: 'shared-id', title: 'Slack 群', responsibility: '参与讨论', mode: 'shadow',
+    workerWarmSeconds: 12,
   });
-  assert.equal(group.sessionLifecycle, 'resident');
-  assert.equal(group.idleTimeoutMinutes, 5);
-  assert.equal(direct.sessionLifecycle, 'idle');
-  assert.equal(direct.idleTimeoutMinutes, 5);
-  assert.equal(store.setConversationLifecycle(group.id, 'idle', 12), true);
-  assert.equal(store.getConversation(group.id)?.sessionLifecycle, 'idle');
-  assert.equal(store.getConversation(group.id)?.idleTimeoutMinutes, 12);
-  assert.equal(store.setConversationLifecycle(group.id, 'resident'), true);
-  assert.equal(store.getConversation(group.id)?.idleTimeoutMinutes, 12);
-  assert.throws(() => store.setConversationLifecycle(group.id, 'idle', 0), /正整数/);
-  assert.throws(() => store.setConversationLifecycle(group.id, 'idle', 35_792), /1-35791/);
+  assert.equal(group.channelId, 'dingtalk');
+  assert.equal(group.channelProfileId, 'default');
+  assert.equal(group.runtimeId, 'codex');
+  assert.equal(group.workerWarmSeconds, 30);
+  assert.equal(otherChannel.runtimeId, 'claude');
+  assert.equal(otherChannel.workerWarmSeconds, 12);
+  assert.equal(store.findEnabledConversation('dingtalk', 'default', 'group', 'shared-id')?.id, group.id);
+  assert.equal(store.findEnabledConversation('slack', 'workspace-a', 'group', 'shared-id')?.id, otherChannel.id);
+  const dingtalkEvent = normalizeDwsEvent({
+    type: 'user_im_message_receive_group_all', event_id: 'same-event', conversation_id: 'shared-id', content: 'same',
+  }, 'dingtalk', 'default')!;
+  const slackEvent = normalizeDwsEvent({
+    type: 'user_im_message_receive_group_all', event_id: 'same-event', conversation_id: 'shared-id', content: 'same',
+  }, 'slack', 'workspace-a')!;
+  assert.notEqual(dingtalkEvent.fingerprint, slackEvent.fingerprint);
+  assert.equal(store.admitEvent(group, dingtalkEvent).admitted, true);
+  assert.equal(store.admitEvent(otherChannel, slackEvent).admitted, true);
+  assert.equal(store.setWorkerWarmSeconds(group.id, 0), true);
+  assert.equal(store.getConversation(group.id)?.workerWarmSeconds, 0);
+  assert.throws(() => store.setWorkerWarmSeconds(group.id, -1), /0-2147483/);
+  assert.throws(() => store.setWorkerWarmSeconds(group.id, 2_147_484), /0-2147483/);
+  store.close();
+});
+
+test('pending message 可事务 claim、释放并在 Host 重启时 reconciliation', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'claim-user', title: 'Claim 私聊', responsibility: '回答问题', mode: 'shadow',
+  });
+  const makeEvent = (id: string) => normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: id,
+    sender_open_dingtalk_id: 'claim-user', content: id,
+  })!;
+  store.admitEvent(conversation, makeEvent('claim-1'));
+  store.admitEvent(conversation, makeEvent('claim-2'));
+  const claimed = store.claimPendingEvents(conversation, 'worker-a', 20);
+  assert.deepEqual(claimed.map((event) => event.sequence), [1, 2]);
+  assert.deepEqual(store.claimPendingEvents(conversation, 'worker-b', 20), []);
+  store.releaseClaimedEvents(claimed, 'worker-a');
+  assert.equal(store.claimPendingEvents(conversation, 'worker-b', 1).length, 1);
+  assert.deepEqual(store.recoverPendingWork(), [conversation.id]);
+  assert.equal(store.status().pending_messages, 2);
+  assert.equal(store.status().claimed_messages, 0);
   store.close();
 });
 
@@ -80,7 +114,7 @@ test('lease 只允许一个存活 owner', () => {
 
 test('DWS consumer 参数固定读取 flatten NDJSON stdout', () => {
   const config = defaultConfig('test', '.', 'Agent', 'role');
-  config.runtime.dwsProfile = 'corp:user';
+  config.channel.profile = 'corp:user';
   assert.deepEqual(consumerArgs('user_im_message_receive_group_all', config), [
     'event', 'consume', 'user_im_message_receive_group_all', '--ephemeral', '--flatten', '--format', 'ndjson',
     '--profile', 'corp:user',
@@ -160,17 +194,17 @@ test('v1 会话迁移后补 onboarding 和每类生命周期默认值', () => {
     const migrated = new Store(path);
     assert.equal(migrated.getGroupOnboarding('group-v1')?.state, 'pending');
     assert.equal(migrated.status().pending_group_onboarding, 1);
-    assert.equal(migrated.getConversation('group-v1')?.sessionLifecycle, 'resident');
-    assert.equal(migrated.getConversation('direct-v1')?.sessionLifecycle, 'idle');
-    assert.equal(migrated.getConversation('direct-v1')?.idleTimeoutMinutes, 5);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3);
+    assert.equal(migrated.getConversation('group-v1')?.channelId, 'dingtalk');
+    assert.equal(migrated.getConversation('direct-v1')?.runtimeId, 'codex');
+    assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 30);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
   }
 });
 
-test('v2 会话迁移到 v3 时群常驻且私聊空闲五分钟', () => {
+test('v2 会话迁移到 v4 时得到固定逻辑 session 和按需 Worker 默认值', () => {
   const path = resolve('.test-v2-lifecycle-state', 'state.sqlite3');
   rmSync(dirname(path), { recursive: true, force: true });
   mkdirSync(dirname(path), { recursive: true });
@@ -193,10 +227,62 @@ test('v2 会话迁移到 v3 时群常驻且私聊空闲五分钟', () => {
   old.close();
   try {
     const migrated = new Store(path);
-    assert.equal(migrated.getConversation('group-v2')?.sessionLifecycle, 'resident');
-    assert.equal(migrated.getConversation('direct-v2')?.sessionLifecycle, 'idle');
-    assert.equal(migrated.getConversation('direct-v2')?.idleTimeoutMinutes, 5);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3);
+    assert.equal(migrated.getConversation('group-v2')?.channelId, 'dingtalk');
+    assert.equal(migrated.getConversation('direct-v2')?.runtimeId, 'codex');
+    assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 30);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4);
+    migrated.close();
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
+test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不变', () => {
+  const path = resolve('.test-v3-runtime-session-state', 'state.sqlite3');
+  rmSync(dirname(path), { recursive: true, force: true });
+  mkdirSync(dirname(path), { recursive: true });
+  const old = new DatabaseSync(path);
+  old.exec(`
+    CREATE TABLE conversations (
+      id TEXT PRIMARY KEY,kind TEXT NOT NULL,external_id TEXT NOT NULL,title TEXT NOT NULL,
+      responsibility TEXT NOT NULL,mode TEXT NOT NULL,enabled INTEGER NOT NULL,
+      created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+      session_lifecycle TEXT NOT NULL,idle_timeout_minutes INTEGER NOT NULL,
+      UNIQUE(kind,external_id)
+    );
+    CREATE TABLE sessions (
+      conversation_id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,lifecycle TEXT NOT NULL,
+      codex_version TEXT NOT NULL,schema_sha256 TEXT NOT NULL,runtime_cwd TEXT NOT NULL,
+      bootstrap_turn_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+    );
+    CREATE TABLE group_onboarding (
+      conversation_id TEXT PRIMARY KEY,state TEXT NOT NULL,history_count INTEGER,history_loaded_at TEXT,
+      intro_turn_id TEXT,intro_text TEXT,intro_uuid TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+    );
+    INSERT INTO conversations VALUES(
+      'group-v3','group','cid-v3','v3群','参与讨论','shadow',1,
+      '2026-01-01','2026-01-01','resident',5
+    );
+    INSERT INTO sessions VALUES(
+      'group-v3','thread-complete-v3','ready','codex-cli 0.145.0','schema-v3','D:/agent',
+      'bootstrap-v3','2026-01-01','2026-01-02'
+    );
+    INSERT INTO group_onboarding VALUES(
+      'group-v3','submitted',0,'2026-01-01','intro','hello','uuid',NULL,'2026-01-01','2026-01-01'
+    );
+    PRAGMA user_version=3;
+  `);
+  old.close();
+  try {
+    const migrated = new Store(path);
+    const session = migrated.getSession('group-v3');
+    assert.equal(session?.runtimeId, 'codex');
+    assert.equal(session?.providerSessionId, 'thread-complete-v3');
+    assert.equal(session?.generation, 1);
+    assert.equal(session?.protocolFingerprint, 'codex-cli 0.145.0:schema-v3');
+    assert.equal(migrated.getConversation('group-v3')?.workerWarmSeconds, 30);
+    assert.deepEqual(migrated.db.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });

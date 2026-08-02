@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "responsibilityMatch",
+    "category",
+    "replyText",
+    "reasonCode",
+    "workType",
+    "delegation"
+  ],
+  "properties": {
+    "action": { "type": "string", "enum": ["silent", "reply", "escalate"] },
+    "responsibilityMatch": { "type": "boolean" },
+    "category": { "type": "string" },
+    "replyText": { "type": "string" },
+    "reasonCode": { "type": "string" },
+    "workType": { "type": "string", "enum": ["discussion", "implementation"] },
+    "delegation": { "type": "string", "enum": ["not_required", "started"] }
+  }
+}

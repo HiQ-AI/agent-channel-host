@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
 import type { HostConfig } from './config.js';
+import type { ChannelAdapter, ChannelHandlers } from './contracts.js';
 import type { Conversation, ConversationKind, NormalizedEvent, OutboxRecord } from './types.js';
 import { delay, stopChild, withTimeout } from './process-utils.js';
 import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from './command.js';
@@ -20,7 +21,7 @@ export interface RecentGroupHistory {
 
 export async function runDwsJson(config: HostConfig, args: string[], timeoutMs = 30_000): Promise<unknown> {
   const fullArgs = [...args, '--format', 'json', ...profileArgs(config)];
-  const command = await resolveCommand(config.runtime.dwsCommand);
+  const command = await resolveCommand(config.channel.command);
   const result = await execResolved(command, fullArgs, {
     cwd: config.runtime.cwd,
     encoding: 'utf8',
@@ -103,7 +104,7 @@ export function formatDwsLocalTime(value: Date): string {
 }
 
 export async function dwsDoctor(config: HostConfig): Promise<Record<string, unknown>> {
-  const command = await resolveCommand(config.runtime.dwsCommand);
+  const command = await resolveCommand(config.channel.command);
   const version = await execResolved(command, ['--version'], {
     cwd: config.runtime.cwd,
     encoding: 'utf8',
@@ -114,7 +115,11 @@ export async function dwsDoctor(config: HostConfig): Promise<Record<string, unkn
   return { version: version.stdout.trim(), eventStatus: status };
 }
 
-export function normalizeDwsEvent(value: unknown): NormalizedEvent | null {
+export function normalizeDwsEvent(
+  value: unknown,
+  channelId = 'dingtalk',
+  channelProfileId = 'default',
+): NormalizedEvent | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const source = value as Record<string, unknown>;
   const eventType = text(source.event_type) ?? text(source.type);
@@ -132,9 +137,12 @@ export function normalizeDwsEvent(value: unknown): NormalizedEvent | null {
   const messageId = text(source.message_id) ?? text(source.msg_id);
   if (!eventId && !messageId) return null;
   const fingerprintSource = [
-    eventId, messageId, externalId, source.timestamp, source.create_time, source.content,
+    channelId, channelProfileId, eventId, messageId, externalId,
+    source.timestamp, source.create_time, source.content,
   ].map((part) => safeJson(part)).join('|');
   return {
+    channelId,
+    channelProfileId,
     fingerprint: createHash('sha256').update(fingerprintSource).digest('hex'),
     eventId,
     messageId,
@@ -172,7 +180,7 @@ export class DwsEventOwner {
   ) {}
 
   async start(): Promise<void> {
-    this.command = await resolveCommand(this.config.runtime.dwsCommand);
+    this.command = await resolveCommand(this.config.channel.command);
     const busArgs = [
       'event', 'consume', GROUP_EVENT, '--foreground', '--format', 'ndjson', ...profileArgs(this.config),
     ];
@@ -278,8 +286,46 @@ export class DwsSender {
   }
 }
 
+export class DwsChannelAdapter implements ChannelAdapter {
+  readonly descriptor;
+  private owner: DwsEventOwner | null = null;
+  private readonly sender: DwsSender;
+
+  constructor(private readonly config: HostConfig) {
+    this.descriptor = {
+      channelId: config.channel.id,
+      profileId: config.channel.profileId,
+      label: 'DingTalk DWS',
+    };
+    this.sender = new DwsSender(config);
+  }
+
+  async start(handlers: ChannelHandlers): Promise<void> {
+    if (this.owner) throw new Error('DWS ChannelAdapter 已启动');
+    this.owner = new DwsEventOwner(
+      this.config,
+      (raw) => {
+        const event = normalizeDwsEvent(raw, this.descriptor.channelId, this.descriptor.profileId);
+        if (!event) return;
+        handlers.onEvent(event);
+      },
+      handlers.onFatal,
+    );
+    await this.owner.start();
+  }
+
+  async stop(): Promise<void> {
+    await this.owner?.stop();
+    this.owner = null;
+  }
+
+  send(conversation: Conversation, record: Pick<OutboxRecord, 'text' | 'uuid'>): Promise<void> {
+    return this.sender.send(conversation, record);
+  }
+}
+
 function profileArgs(config: HostConfig): string[] {
-  return config.runtime.dwsProfile ? ['--profile', config.runtime.dwsProfile] : [];
+  return config.channel.profile ? ['--profile', config.channel.profile] : [];
 }
 
 function text(value: unknown): string | null {

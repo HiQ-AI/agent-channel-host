@@ -12,8 +12,11 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   const cli = join(process.cwd(), 'dist', 'src', 'cli.js');
-  const env = { ...process.env, DINGTALK_CODEX_HOME: root };
+  const env = { ...process.env, AGENT_CHANNEL_HOME: root };
   try {
+    const help = await execFileAsync(process.execPath, [cli, '--help'], { encoding: 'utf8', env });
+    assert.match(help.stdout, /^Usage: agent-channel /);
+    assert.doesNotMatch(help.stdout, /dingtalk-codex/);
     const initialized = await execFileAsync(process.execPath, [
       cli, 'init', '--instance', 'test', '--cwd', process.cwd(), '--name', '测试员工', '--role', '测试角色',
     ], { encoding: 'utf8', env });
@@ -21,7 +24,8 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     const status = await execFileAsync(process.execPath, [cli, 'status', '--instance', 'test'], { encoding: 'utf8', env });
     const body = JSON.parse(status.stdout);
     assert.equal(body.enabled_conversations, 0);
-    assert.deepEqual(body.sessions, []);
+    assert.deepEqual(body.conversations, []);
+    assert.deepEqual(body.runtimes, []);
     assert.doesNotMatch(status.stdout, /threadId"/);
 
     const modelChanged = await execFileAsync(process.execPath, [
@@ -31,8 +35,8 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
       ok: true, instance: 'test', model: 'gpt-5.6-terra', effort: 'medium', restartRequired: true,
     });
     const configText = await readFile(join(root, 'instances', 'test', 'config.yaml'), 'utf8');
-    assert.match(configText, /codexModel: gpt-5\.6-terra/);
-    assert.match(configText, /codexEffort: medium/);
+    assert.match(configText, /model: gpt-5\.6-terra/);
+    assert.match(configText, /effort: medium/);
 
     await assert.rejects(execFileAsync(process.execPath, [
       cli, 'config', 'model', '--instance', 'test', '--effort', 'light',
@@ -43,38 +47,50 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
       '--model', 'gpt-5.6-terra', '--effort', 'high',
     ], { encoding: 'utf8', env });
     const customConfig = await readFile(join(root, 'instances', 'custom-model', 'config.yaml'), 'utf8');
-    assert.match(customConfig, /codexModel: gpt-5\.6-terra/);
-    assert.match(customConfig, /codexEffort: high/);
+    assert.match(customConfig, /model: gpt-5\.6-terra/);
+    assert.match(customConfig, /effort: high/);
 
     const added = await execFileAsync(process.execPath, [
       cli, 'conversation', 'add', '--instance', 'test', '--kind', 'direct', '--title', '测试私聊',
       '--open-dingtalk-id', 'open-test-user',
     ], { encoding: 'utf8', env });
     const addedBody = JSON.parse(added.stdout);
-    assert.equal(addedBody.sessionLifecycle, 'idle');
-    assert.equal(addedBody.idleTimeoutMinutes, 5);
+    assert.equal(addedBody.channelId, 'dingtalk');
+    assert.equal(addedBody.runtimeId, 'codex');
+    assert.equal(addedBody.workerWarmSeconds, 30);
 
     const changed = await execFileAsync(process.execPath, [
-      cli, 'conversation', 'lifecycle', '--instance', 'test', '--id', addedBody.id,
-      '--lifecycle', 'resident', '--idle-minutes', '9',
+      cli, 'conversation', 'worker', '--instance', 'test', '--id', addedBody.id,
+      '--warm-seconds', '9',
     ], { encoding: 'utf8', env });
     const changedBody = JSON.parse(changed.stdout);
-    assert.equal(changedBody.sessionLifecycle, 'resident');
-    assert.equal(changedBody.idleTimeoutMinutes, 9);
+    assert.equal(changedBody.workerWarmSeconds, 9);
     assert.equal(changedBody.restartRequired, true);
 
     const custom = await execFileAsync(process.execPath, [
-      cli, 'conversation', 'add', '--instance', 'test', '--kind', 'direct', '--title', '常驻私聊',
-      '--open-dingtalk-id', 'open-resident-user', '--lifecycle', 'resident', '--idle-minutes', '11',
+      cli, 'conversation', 'add', '--instance', 'test', '--kind', 'direct', '--title', '保温私聊',
+      '--open-dingtalk-id', 'open-warm-user', '--warm-seconds', '11',
     ], { encoding: 'utf8', env });
     const customBody = JSON.parse(custom.stdout);
-    assert.equal(customBody.sessionLifecycle, 'resident');
-    assert.equal(customBody.idleTimeoutMinutes, 11);
+    assert.equal(customBody.workerWarmSeconds, 11);
 
     await assert.rejects(execFileAsync(process.execPath, [
-      cli, 'conversation', 'lifecycle', '--instance', 'test', '--id', addedBody.id,
-      '--lifecycle', 'idle', '--idle-minutes', '0',
-    ], { encoding: 'utf8', env }), /1-35791 的正整数/);
+      cli, 'conversation', 'worker', '--instance', 'test', '--id', addedBody.id,
+      '--warm-seconds', '-1',
+    ], { encoding: 'utf8', env }), /0-2147483 的整数/);
+
+    const viewed = await execFileAsync(process.execPath, [
+      cli, 'view', '--instance', 'test', '--once',
+    ], { encoding: 'utf8', env });
+    assert.match(viewed.stdout, /CHANNELS/);
+    assert.match(viewed.stdout, /MESSAGES received=0 pending=0/);
+    assert.match(viewed.stdout, /CONVERSATIONS/);
+    assert.match(viewed.stdout, /RUNTIMES/);
+    assert.match(viewed.stdout, /^agent-channel view /);
+    assert.doesNotMatch(viewed.stdout, /open-test-user|open-warm-user/);
+    await assert.rejects(execFileAsync(process.execPath, [
+      cli, 'view', '--instance', 'test', '--interval', '0.2',
+    ], { encoding: 'utf8', env }), /持续 view 需要交互式终端/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
