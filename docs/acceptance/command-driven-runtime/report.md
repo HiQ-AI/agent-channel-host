@@ -14,7 +14,7 @@
 - JSONL、structured decision、主 session 实施证据、异常退出、timeout 和 cancel 均有自动化测试。
 - active turn 被新消息取消后，既有 Host 逻辑释放旧 claim 并重新合批；正常路径不轮询 DWS 或 SQLite。
 - `doctor / verify / status / view` 和 npm package/README/SECURITY 已使用命令 runtime 语义。
-- 本机真实 Codex adapter canary 和最终用户 CLI canary 都证明 `new → resumed` 使用同一 provider session，结构化结果为严格 `silent`。
+- 本机真实 Codex adapter canary 证明 `new → resumed(active) → interrupt → resumed(recovery)` 始终使用同一 provider session，恢复轮能回忆 seed 轮 marker，且结构化结果为严格 `silent`；最终用户 CLI canary 也证明两次独立 verify 精确 resume。
 - `npm run verify` 本地 32/32 通过，pack dry-run 通过；GitHub Actions run `30748888122` 的 Windows/Ubuntu job 均成功。
 
 ## 未包含
@@ -29,4 +29,5 @@
 
 - 本地实现、32/32 测试、pack、真实 adapter/CLI canary：`round-1.md`
 - 提交、PR 与双平台 CI：`round-2.md`
+- 真实 Codex active command 终止、同 session 恢复和上下文 marker 回忆：`round-3.md`
 - 前置方案与边界：`plan.md`、`../../spec/command-driven-runtime.md`
