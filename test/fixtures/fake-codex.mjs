@@ -24,6 +24,7 @@ function complete() {
     reasonCode: 'fake',
     workType: 'discussion',
     delegation: 'not_required',
+    contextUpdate: null,
   });
   process.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } })}\n`);
   process.stdout.write(`${JSON.stringify({ type: 'turn.completed' })}\n`);

@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_WORKER_WARM_SECONDS, MAX_WORKER_WARM_SECONDS } from './types.js';
 import type {
   AdmittedEvent,
   Conversation,
+  ConversationContext,
   ConversationKind,
+  ConversationMember,
   ConversationMode,
   Decision,
   GroupOnboardingRecord,
@@ -15,14 +17,17 @@ import type {
   RuntimeWorkerRecord,
   SessionRecord,
 } from './types.js';
+import { safeName } from './paths.js';
 
 type Row = Record<string, unknown>;
 const LEGACY_MAX_IDLE_TIMEOUT_MINUTES = 35_791;
 
 export class Store {
   readonly db: DatabaseSync;
+  readonly path: string;
 
   constructor(path: string) {
+    this.path = path;
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
@@ -32,6 +37,11 @@ export class Store {
 
   close(): void {
     this.db.close();
+  }
+
+  recoveryContextFile(conversationId: string): string {
+    if (this.path === ':memory:') throw new Error('内存数据库没有 recovery context 文件');
+    return join(dirname(this.path), 'recovery', `${safeName(conversationId)}.json`);
   }
 
   private migrate(): void {
@@ -248,6 +258,42 @@ export class Store {
         this.db.exec('PRAGMA foreign_keys=ON');
       }
     }
+    const eventWorkerVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (eventWorkerVersion < 5) {
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE conversations ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1
+          CHECK(policy_version > 0);
+        ALTER TABLE runtime_adapters ADD COLUMN context_recovery TEXT;
+        CREATE TABLE conversation_context (
+          conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+          version INTEGER NOT NULL CHECK(version > 0),
+          through_sequence INTEGER NOT NULL CHECK(through_sequence >= 0),
+          current_topic TEXT NOT NULL,
+          facts_json TEXT NOT NULL,
+          decisions_json TEXT NOT NULL,
+          commitments_json TEXT NOT NULL,
+          open_questions_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE conversation_members (
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          external_user_id TEXT NOT NULL,
+          display_name TEXT,
+          organization_role TEXT NOT NULL DEFAULT '',
+          conversation_role TEXT NOT NULL DEFAULT '',
+          responsibility_boundary TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL CHECK(source IN ('message','manual')),
+          version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(conversation_id,external_user_id)
+        );
+        CREATE INDEX idx_conversation_members_name
+          ON conversation_members(conversation_id,display_name);
+        PRAGMA user_version=5;
+        COMMIT;
+      `);
+    }
   }
 
   addConversation(input: {
@@ -273,8 +319,8 @@ export class Store {
       this.db.prepare(`
         INSERT INTO conversations(
           id,channel_id,channel_profile_id,kind,external_id,title,responsibility,mode,runtime_id,
-          worker_warm_seconds,enabled,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?)
+          worker_warm_seconds,policy_version,enabled,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,1,1,?,?)
       `).run(
         id, channelId, channelProfileId, input.kind, input.externalId, input.title,
         input.responsibility, input.mode, runtimeId, workerWarmSeconds, now, now,
@@ -296,14 +342,23 @@ export class Store {
   }
 
   setConversationEnabled(id: string, enabled: boolean): boolean {
-    const result = this.db.prepare('UPDATE conversations SET enabled=?,updated_at=? WHERE id=?')
+    const result = this.db.prepare('UPDATE conversations SET enabled=?,policy_version=policy_version+1,updated_at=? WHERE id=?')
       .run(enabled ? 1 : 0, new Date().toISOString(), id);
     return Number(result.changes) === 1;
   }
 
   setConversationMode(id: string, mode: ConversationMode): boolean {
-    const result = this.db.prepare('UPDATE conversations SET mode=?,updated_at=? WHERE id=?')
+    const result = this.db.prepare('UPDATE conversations SET mode=?,policy_version=policy_version+1,updated_at=? WHERE id=?')
       .run(mode, new Date().toISOString(), id);
+    return Number(result.changes) === 1;
+  }
+
+  setConversationResponsibility(id: string, responsibility: string): boolean {
+    const value = responsibility.trim();
+    if (!value) throw new Error('responsibility 不能为空');
+    const result = this.db.prepare(`
+      UPDATE conversations SET responsibility=?,policy_version=policy_version+1,updated_at=? WHERE id=?
+    `).run(value, new Date().toISOString(), id);
     return Number(result.changes) === 1;
   }
 
@@ -333,6 +388,70 @@ export class Store {
   listConversations(enabledOnly = false): Conversation[] {
     const sql = `SELECT * FROM conversations${enabledOnly ? ' WHERE enabled=1' : ''} ORDER BY kind,title`;
     return (this.db.prepare(sql).all() as Row[]).map((row) => mapConversation(row)!);
+  }
+
+  getConversationContext(conversationId: string): ConversationContext | null {
+    return mapConversationContext(this.db.prepare(
+      'SELECT * FROM conversation_context WHERE conversation_id=?',
+    ).get(conversationId) as Row | undefined);
+  }
+
+  listConversationMembers(conversationId: string): ConversationMember[] {
+    return (this.db.prepare(`
+      SELECT * FROM conversation_members WHERE conversation_id=?
+      ORDER BY COALESCE(display_name,external_user_id)
+    `).all(conversationId) as Row[]).map(mapConversationMember);
+  }
+
+  findRelevantMembers(conversationId: string, events: AdmittedEvent[]): ConversationMember[] {
+    const senderIds = new Set(events.map((event) => event.senderId).filter((value): value is string => Boolean(value)));
+    const senderNames = new Set(events.map((event) => event.senderName).filter((value): value is string => Boolean(value)));
+    const body = events.map((event) => safeSearchText([
+      event.content, event.quotedMessage, event.forwardedMessages,
+    ])).join('\n').toLocaleLowerCase();
+    return this.listConversationMembers(conversationId).filter((member) => {
+      if (senderIds.has(member.externalUserId)) return true;
+      if (member.displayName && senderNames.has(member.displayName)) return true;
+      return Boolean(member.displayName && member.displayName.length >= 2
+        && body.includes(member.displayName.toLocaleLowerCase()));
+    }).slice(0, 20);
+  }
+
+  updateConversationMember(
+    conversationId: string,
+    externalUserId: string,
+    patch: Partial<Pick<ConversationMember,
+      'displayName' | 'organizationRole' | 'conversationRole' | 'responsibilityBoundary'>>,
+  ): ConversationMember {
+    if (!this.getConversation(conversationId)) throw new Error(`conversation 不存在：${conversationId}`);
+    const existing = this.db.prepare(`
+      SELECT * FROM conversation_members WHERE conversation_id=? AND external_user_id=?
+    `).get(conversationId, externalUserId) as Row | undefined;
+    const current = existing ? mapConversationMember(existing) : null;
+    const displayName = patch.displayName === undefined ? current?.displayName ?? null : cleanOptional(patch.displayName, 200, 'displayName');
+    const organizationRole = patch.organizationRole === undefined
+      ? current?.organizationRole ?? '' : cleanText(patch.organizationRole, 300, 'organizationRole');
+    const conversationRole = patch.conversationRole === undefined
+      ? current?.conversationRole ?? '' : cleanText(patch.conversationRole, 300, 'conversationRole');
+    const responsibilityBoundary = patch.responsibilityBoundary === undefined
+      ? current?.responsibilityBoundary ?? '' : cleanText(patch.responsibilityBoundary, 1_000, 'responsibilityBoundary');
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO conversation_members(
+        conversation_id,external_user_id,display_name,organization_role,conversation_role,
+        responsibility_boundary,source,version,updated_at
+      ) VALUES(?,?,?,?,?,?,'manual',1,?)
+      ON CONFLICT(conversation_id,external_user_id) DO UPDATE SET
+        display_name=excluded.display_name,organization_role=excluded.organization_role,
+        conversation_role=excluded.conversation_role,responsibility_boundary=excluded.responsibility_boundary,
+        source='manual',version=conversation_members.version+1,updated_at=excluded.updated_at
+    `).run(
+      conversationId, externalUserId, displayName, organizationRole, conversationRole,
+      responsibilityBoundary, now,
+    );
+    return mapConversationMember(this.db.prepare(`
+      SELECT * FROM conversation_members WHERE conversation_id=? AND external_user_id=?
+    `).get(conversationId, externalUserId) as Row);
   }
 
   getSession(conversationId: string): SessionRecord | null {
@@ -392,6 +511,23 @@ export class Store {
         id, conversation.id, sequence, event.fingerprint, event.eventId, event.messageId,
         event.senderId, event.senderName, body, event.occurredAt, event.receivedAt,
       );
+      if (event.senderId) {
+        this.db.prepare(`
+          INSERT INTO conversation_members(
+            conversation_id,external_user_id,display_name,source,version,updated_at
+          ) VALUES(?,?,?,'message',1,?)
+          ON CONFLICT(conversation_id,external_user_id) DO UPDATE SET
+            display_name=COALESCE(excluded.display_name,conversation_members.display_name),
+            source=CASE WHEN conversation_members.source='manual' THEN 'manual' ELSE 'message' END,
+            version=conversation_members.version + CASE
+              WHEN excluded.display_name IS NOT NULL
+                AND excluded.display_name<>COALESCE(conversation_members.display_name,'') THEN 1 ELSE 0 END,
+            updated_at=CASE
+              WHEN excluded.display_name IS NOT NULL
+                AND excluded.display_name<>COALESCE(conversation_members.display_name,'')
+              THEN excluded.updated_at ELSE conversation_members.updated_at END
+        `).run(conversation.id, event.senderId, event.senderName, event.receivedAt);
+      }
       this.db.exec('COMMIT');
       return { admitted: true, event: { ...event, id, conversationId: conversation.id, sequence } };
     } catch (error) {
@@ -497,6 +633,34 @@ export class Store {
           now,
         );
         complete.run(turnStatus, event.id, workerId);
+      }
+      if (turnStatus === 'completed' && decision?.contextUpdate) {
+        const current = this.db.prepare(`
+          SELECT version FROM conversation_context WHERE conversation_id=?
+        `).get(events[0]!.conversationId) as Row | undefined;
+        const version = current ? Number(current.version) + 1 : 1;
+        const update = decision.contextUpdate;
+        this.db.prepare(`
+          INSERT INTO conversation_context(
+            conversation_id,version,through_sequence,current_topic,facts_json,decisions_json,
+            commitments_json,open_questions_json,updated_at
+          ) VALUES(?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(conversation_id) DO UPDATE SET
+            version=excluded.version,through_sequence=excluded.through_sequence,
+            current_topic=excluded.current_topic,facts_json=excluded.facts_json,
+            decisions_json=excluded.decisions_json,commitments_json=excluded.commitments_json,
+            open_questions_json=excluded.open_questions_json,updated_at=excluded.updated_at
+        `).run(
+          events[0]!.conversationId,
+          version,
+          events.at(-1)!.sequence,
+          update.currentTopic,
+          JSON.stringify(update.facts),
+          JSON.stringify(update.decisions),
+          JSON.stringify(update.commitments),
+          JSON.stringify(update.openQuestions),
+          now,
+        );
       }
       this.db.exec('COMMIT');
     } catch (error) {
@@ -810,17 +974,19 @@ export class Store {
     state: 'starting' | 'ready' | 'stopped' | 'error';
     model: string | null;
     protocolFingerprint?: string | null;
+    contextRecovery?: string | null;
     error?: string | null;
   }): void {
     const now = new Date().toISOString();
     const current = this.db.prepare('SELECT * FROM runtime_adapters WHERE runtime_id=?')
       .get(input.runtimeId) as Row | undefined;
     this.db.prepare(`
-      INSERT INTO runtime_adapters(runtime_id,label,state,model,protocol_fingerprint,error,updated_at)
-      VALUES(?,?,?,?,?,?,?)
+      INSERT INTO runtime_adapters(runtime_id,label,state,model,protocol_fingerprint,context_recovery,error,updated_at)
+      VALUES(?,?,?,?,?,?,?,?)
       ON CONFLICT(runtime_id) DO UPDATE SET
         label=excluded.label,state=excluded.state,model=excluded.model,
-        protocol_fingerprint=excluded.protocol_fingerprint,error=excluded.error,updated_at=excluded.updated_at
+        protocol_fingerprint=excluded.protocol_fingerprint,context_recovery=excluded.context_recovery,
+        error=excluded.error,updated_at=excluded.updated_at
     `).run(
       input.runtimeId,
       input.label,
@@ -829,9 +995,78 @@ export class Store {
       input.protocolFingerprint !== undefined
         ? input.protocolFingerprint
         : current?.protocol_fingerprint ? String(current.protocol_fingerprint) : null,
+      input.contextRecovery !== undefined
+        ? input.contextRecovery
+        : current?.context_recovery ? String(current.context_recovery) : null,
       input.error ?? null,
       now,
     );
+  }
+
+  conversationDetail(conversationId: string, includeContent = false): Record<string, unknown> | null {
+    const conversation = this.getConversation(conversationId);
+    if (!conversation) return null;
+    const session = this.getSession(conversationId);
+    const worker = this.getWorker(conversationId);
+    const context = this.getConversationContext(conversationId);
+    const members = this.listConversationMembers(conversationId);
+    const messages = this.db.prepare(`
+      SELECT sequence,received_at,processing_state,sender_name,sender_id,body_json
+      FROM inbound_events WHERE conversation_id=? ORDER BY sequence DESC LIMIT 12
+    `).all(conversationId) as Row[];
+    return {
+      conversation: {
+        id: conversation.id,
+        channelId: conversation.channelId,
+        channelProfileId: conversation.channelProfileId,
+        kind: conversation.kind,
+        title: conversation.title,
+        responsibility: conversation.responsibility,
+        policyVersion: conversation.policyVersion,
+        mode: conversation.mode,
+        runtimeId: conversation.runtimeId,
+        workerWarmSeconds: conversation.workerWarmSeconds,
+        enabled: conversation.enabled,
+      },
+      session: session ? {
+        runtimeId: session.runtimeId,
+        providerSessionPrefix: session.providerSessionId.slice(0, 12),
+        generation: session.generation,
+        lifecycle: session.lifecycle,
+      } : null,
+      worker,
+      context: context ? {
+        version: context.version,
+        throughSequence: context.throughSequence,
+        updatedAt: context.updatedAt,
+        facts: context.facts.length,
+        decisions: context.decisions.length,
+        commitments: context.commitments.length,
+        openQuestions: context.openQuestions.length,
+        ...(includeContent ? {
+          currentTopic: context.currentTopic,
+          factItems: context.facts,
+          decisionItems: context.decisions,
+          commitmentItems: context.commitments,
+          openQuestionItems: context.openQuestions,
+        } : {}),
+      } : null,
+      members: members.map((member) => ({
+        displayName: redactSender(member.displayName ?? member.externalUserId),
+        organizationRole: member.organizationRole,
+        conversationRole: member.conversationRole,
+        responsibilityBoundary: member.responsibilityBoundary,
+        source: member.source,
+        version: member.version,
+      })),
+      messages: messages.map((row) => ({
+        sequence: Number(row.sequence),
+        sender: redactSender(row.sender_name ?? row.sender_id),
+        state: String(row.processing_state),
+        receivedAt: String(row.received_at),
+        ...(includeContent ? { preview: bodyPreview(row.body_json) } : {}),
+      })),
+    };
   }
 
   status(includeContent = false): Record<string, unknown> {
@@ -853,25 +1088,28 @@ export class Store {
       FROM channel_connections ORDER BY channel_id,profile_id
     `).all() as Row[];
     const runtimeAdapters = this.db.prepare(`
-      SELECT runtime_id,label,state,model,protocol_fingerprint,error,updated_at
+      SELECT runtime_id,label,state,model,protocol_fingerprint,context_recovery,error,updated_at
       FROM runtime_adapters ORDER BY runtime_id
     `).all() as Row[];
     const conversations = this.db.prepare(`
       SELECT c.*,w.worker_id,w.state AS worker_state,w.process_id,w.claimed_from_sequence,
         w.claimed_to_sequence,w.last_signal_at,w.warm_until,w.error AS worker_error,w.updated_at AS worker_updated_at,
         s.provider_session_id,s.lifecycle AS session_state,s.generation,s.protocol_fingerprint,
+        x.version AS context_version,x.through_sequence AS context_through_sequence,
         r.label AS runtime_label,r.model AS runtime_model,r.state AS runtime_adapter_state,
         (SELECT COUNT(*) FROM inbound_events e
           WHERE e.conversation_id=c.id AND e.processing_state IN ('admitted','claimed')) AS pending_count,
-        (SELECT COALESCE(MAX(sequence),0) FROM inbound_events e WHERE e.conversation_id=c.id) AS latest_sequence
+        (SELECT COALESCE(MAX(sequence),0) FROM inbound_events e WHERE e.conversation_id=c.id) AS latest_sequence,
+        (SELECT COUNT(*) FROM conversation_members m WHERE m.conversation_id=c.id) AS member_count
       FROM conversations c
       LEFT JOIN runtime_workers w ON w.conversation_id=c.id
       LEFT JOIN runtime_sessions s ON s.conversation_id=c.id
+      LEFT JOIN conversation_context x ON x.conversation_id=c.id
       LEFT JOIN runtime_adapters r ON r.runtime_id=c.runtime_id
       ORDER BY c.channel_id,c.title
     `).all() as Row[];
     const messages = this.db.prepare(`
-      SELECT e.sequence,e.received_at,e.processing_state,e.sender_name,e.sender_id,e.body_json,
+      SELECT e.conversation_id,e.sequence,e.received_at,e.processing_state,e.sender_name,e.sender_id,e.body_json,
         c.title,c.kind,c.channel_id,c.runtime_id,d.action,o.state AS outbox_state
       FROM inbound_events e
       JOIN conversations c ON c.id=e.conversation_id
@@ -934,12 +1172,14 @@ export class Store {
         runtimeId: String(row.runtime_id), label: String(row.label), state: String(row.state),
         model: row.model ? String(row.model) : null,
         protocolFingerprintPrefix: row.protocol_fingerprint ? String(row.protocol_fingerprint).slice(0, 20) : null,
+        contextRecovery: row.context_recovery ? String(row.context_recovery) : 'unavailable',
         error: row.error ? String(row.error) : null,
         updatedAt: String(row.updated_at),
       })),
       conversations: conversations.map((row) => ({
-        idPrefix: String(row.id).slice(0, 8), channelId: String(row.channel_id),
+        id: String(row.id), idPrefix: String(row.id).slice(0, 8), channelId: String(row.channel_id),
         channelProfileId: String(row.channel_profile_id), kind: String(row.kind), title: String(row.title),
+        responsibility: String(row.responsibility), policyVersion: Number(row.policy_version),
         mode: String(row.mode), runtimeId: String(row.runtime_id), enabled: Boolean(row.enabled),
         workerWarmSeconds: Number(row.worker_warm_seconds), pending: Number(row.pending_count),
         latestSequence: Number(row.latest_sequence), workerState: String(row.worker_state ?? 'stopped'),
@@ -951,8 +1191,13 @@ export class Store {
         sessionState: row.session_state ? String(row.session_state) : 'unprovisioned',
         providerSessionPrefix: row.provider_session_id ? String(row.provider_session_id).slice(0, 12) : null,
         generation: row.generation === null || row.generation === undefined ? null : Number(row.generation),
+        contextVersion: row.context_version === null || row.context_version === undefined ? 0 : Number(row.context_version),
+        contextThroughSequence: row.context_through_sequence === null || row.context_through_sequence === undefined
+          ? 0 : Number(row.context_through_sequence),
+        memberCount: Number(row.member_count),
       })),
       messages: messages.map((row) => ({
+        conversationId: row.conversation_id,
         title: row.title,
         kind: row.kind,
         channelId: row.channel_id,
@@ -988,6 +1233,7 @@ function mapConversation(row: Row | undefined): Conversation | null {
     kind: row.kind as ConversationKind, externalId: String(row.external_id),
     title: String(row.title), responsibility: String(row.responsibility), mode: row.mode as ConversationMode,
     runtimeId: String(row.runtime_id), workerWarmSeconds: Number(row.worker_warm_seconds),
+    policyVersion: Number(row.policy_version ?? 1),
     enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }
@@ -1007,6 +1253,35 @@ function mapSession(row: Row | undefined): SessionRecord | null {
     runtimeCwd: String(row.runtime_cwd),
     bootstrapTurnId: row.bootstrap_turn_id ? String(row.bootstrap_turn_id) : null,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
+}
+
+function mapConversationContext(row: Row | undefined): ConversationContext | null {
+  if (!row) return null;
+  return {
+    conversationId: String(row.conversation_id),
+    version: Number(row.version),
+    throughSequence: Number(row.through_sequence),
+    currentTopic: String(row.current_topic),
+    facts: stringArray(row.facts_json),
+    decisions: stringArray(row.decisions_json),
+    commitments: stringArray(row.commitments_json),
+    openQuestions: stringArray(row.open_questions_json),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function mapConversationMember(row: Row): ConversationMember {
+  return {
+    conversationId: String(row.conversation_id),
+    externalUserId: String(row.external_user_id),
+    displayName: row.display_name ? String(row.display_name) : null,
+    organizationRole: String(row.organization_role ?? ''),
+    conversationRole: String(row.conversation_role ?? ''),
+    responsibilityBoundary: String(row.responsibility_boundary ?? ''),
+    source: row.source as ConversationMember['source'],
+    version: Number(row.version),
+    updatedAt: String(row.updated_at),
   };
 }
 
@@ -1094,4 +1369,31 @@ function mapGroupOnboarding(row: Row | undefined): GroupOnboardingRecord | null 
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+function stringArray(value: unknown): string[] {
+  const parsed = JSON.parse(String(value)) as unknown;
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
+    throw new Error('conversation context JSON 无效');
+  }
+  return parsed;
+}
+
+function safeSearchText(values: unknown[]): string {
+  return values.map((value) => {
+    if (value === null || value === undefined) return '';
+    return typeof value === 'string' ? value : JSON.stringify(value);
+  }).join('\n').slice(0, 120_000);
+}
+
+function cleanText(value: string, max: number, field: string): string {
+  const text = value.trim();
+  if (text.length > max) throw new Error(`${field} 长度不能超过 ${max}`);
+  return text;
+}
+
+function cleanOptional(value: string | null, max: number, field: string): string | null {
+  if (value === null) return null;
+  const text = cleanText(value, max, field);
+  return text || null;
 }

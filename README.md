@@ -28,6 +28,8 @@ flowchart LR
 - 常驻的是 Host、DWS 长连接和 SQLite 状态，不是每个 conversation 的 provider 进程。消息到达后才启动一轮 runtime CLI；该轮完成后进程退出。
 - 每个群聊/私聊持久化自己的 `(channel, profile, conversation) → runtime + provider session ID + generation`，彼此不共享 transcript。
 - 新 Codex 会话执行 `codex exec --json --output-schema`；已有会话执行 `codex exec resume <原 ID>`。每次 resume 都校验 `thread.started.thread_id` 必须等于原 ID，否则 fail closed，不创建第二条 session。
+- 正常 turn 依赖 runtime 自己的 transcript，不重复注入整段历史。Host 只维护短小、版本化的 conversation checkpoint；Codex 自动压缩后由本包内置的 `SessionStart(source=compact)` hook 在下一次模型请求前恢复必要状态。
+- 群成员、组织角色、会话角色和职责边界保存在独立成员资料中。每批只提供本批发送者与正文明确提到的已知成员，不把完整群成员表长期塞入 session。
 - 每条消息先写 SQLite WAL，提交后才发进程内 ready signal。Worker 不轮询 DWS 或 SQLite；Host 重启时只 reconciliation 未完成工作。
 - quiet window 默认 300 ms，一次最多合并 20 条消息；每条消息仍保留 sender、时间和 sequence。active turn 期间的新消息会终止旧 CLI 进程，释放旧 claim，再与新消息合并处理。
 - 群首次 onboarding 是持久工作：只读拉取最近 50 条消息进入该群独立 session，再准备一次自我介绍。`shadow` 只保存不发送；切换 `reply` 并重启后用同一 UUID 发送。
@@ -96,6 +98,8 @@ Windows 默认数据目录：
 %LOCALAPPDATA%\agent-channel-host\instances\triss\
 ├── config.yaml
 ├── state.sqlite3
+├── recovery\
+│   └── <conversation UUID>.json
 ├── run-host.cmd
 └── service.log
 ```
@@ -106,7 +110,7 @@ Windows 默认数据目录：
 
 0.3 配置版本为 `version: 2`，删除 `protocol` 块，并把原来混在 `runtime` 中的 DWS、调度与 Codex 字段拆开。项目尚未正式部署，因此不保留两套加载路径；读取 `version: 1` 会明确失败。
 
-旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。SQLite v4 表结构继续复用，但旧 App Server session 的协议指纹与 command runtime 不兼容；请为测试 conversation 使用新 instance 或显式清理对应预览状态，Host 不会偷偷创建第二个 provider session。
+旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v5，旧表会原地增加 checkpoint、成员资料、policy version 和 runtime recovery capability；旧 App Server session 的协议指纹与 command runtime 不兼容，请为测试 conversation 使用新 instance 或显式清理对应预览状态，Host 不会偷偷创建第二个 provider session。
 
 ## 添加授权会话
 
@@ -160,25 +164,44 @@ agent-channel conversation worker `
 
 `--warm-seconds 0` 表示处理完成后立即释放。新消息仍会创建 Worker，并对原 session ID 执行 resume。
 
-## 前台验证与状态视图
+## 长会话与上下文压缩
 
-先在 `shadow` 模式前台运行，看到 `HOST_READY` 后，再在专用测试群发一条不含 `@` 的消息：
+Host 把自然讨论过程和必要工作状态分开管理：
+
+- Runtime transcript 保存对话过程，由各 runtime 自己 resume 和压缩。
+- Conversation checkpoint 只保存当前主题、仍有效事实、决定、承诺和未决问题，并记录覆盖到的入站 sequence。
+- Runtime 没有长期状态变化时返回 `contextUpdate: null`；有变化时返回完整的当前 checkpoint。Host 将它和本轮决定放在同一 SQLite 事务中提交。
+- Codex 每轮开始前原子发布最新 recovery 文件。新 session 会恢复已有 checkpoint；普通 resume 不重复注入；发生自动 compaction 时，内置 hook 才重新注入。
+- 成员资料独立版本化，观察到的新名称自动更新；角色和职责边界可在 `view` 的设置 tab 修改，并按当前消息相关性提供给 runtime。
+
+Prompt 固定采用“身份、会话职责、决策规则、权限边界、当前输入、输出要求”的顺序。指令使用明确动作，不使用“尽量、酌情、视情况”等模糊表述。
+
+## 前台启动与管理视图
+
+交互使用时，`view` 是首选启动命令：
 
 ```powershell
-agent-channel run --instance triss
+agent-channel view --instance triss
 ```
 
-另一个 PowerShell 查看脱敏状态：
+默认先进入跨 Channel、conversation、runtime 和消息状态的“总览”tab，而不是某个单群页面。上下键选择 conversation，`Enter` 查看详情，`Esc` 返回；`Tab` 或左右键切到相邻的“设置”tab，可修改 Agent 身份、runtime model/effort、合批参数、当前会话职责/mode/warm TTL，以及已观察成员的角色和职责边界。
+
+- Host 未运行：`view` 在当前进程内启动唯一 Host；退出界面时同时停止这个 Host。
+- Host 已运行：`view` 只 attach 状态，不创建第二个 Channel owner；退出只关闭界面。
+- `--once`：只输出一次脱敏快照，绝不启动 Host。
+- 非交互式服务：继续使用 `agent-channel run`。
+
+常用状态命令：
 
 ```powershell
 agent-channel status --instance triss
-agent-channel view --instance triss
 agent-channel view --instance triss --once
+agent-channel run --instance triss
 ```
 
-`status` 输出机器可读 JSON；`view` 像 `top` 一样刷新，用 `q` 或 `Ctrl+C` 退出。默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。
+`status` 输出机器可读 JSON；交互 `view` 用 `q` 或 `Ctrl+C` 退出。总览和详情默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。设置先通过与启动相同的 schema 校验，再原子保存；标记“重启后生效”的配置不会伪装成已即时应用。
 
-确认 `received/processed`、固定 provider session 前缀、重启 resume 和职责判断后，才切到发送模式：
+先在 `shadow` 模式确认 `received/processed`、固定 provider session 前缀、重启 resume 和职责判断，才切到发送模式：
 
 ```powershell
 agent-channel conversation mode --instance triss --id '<conversation UUID>' --mode reply
@@ -199,6 +222,7 @@ agent-channel service remove --instance triss
 - `submitted` 只表示 DWS 发送调用成功，不等于对端已读或业务已接受。
 - Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner 加群聊/私聊两个共享 bus consumer。
 - Codex 每轮固定 `approval_policy=never`、`sandbox_mode=workspace-write`、network disabled，额外 writable roots 为空；`runtime.cwd` 必须指向专用工作目录。
+- Codex compaction hook 由 Host 为每个子进程内联配置，命令和恢复文件均由本包控制。自动化使用固定版本已审查的 hook 配置，不修改用户级 Codex 配置。
 - 主 session 的命令执行或文件修改一旦出现在 JSONL 证据中，本轮 fail closed，不发送回复。该门禁不替代操作系统账号隔离。
 - 用户配置中的外部 MCP/skills 仍由 Codex CLI 自身加载；部署者必须按其权限模型审计。Host 的 prompt 禁止 runtime 自行调用 Channel 发送工具。
 - 命令模式可观察 provider session 与当前 CLI PID，但不承诺后台 subagent 能在父 CLI 退出后继续运行；这项能力由具体 runtime adapter 决定。
@@ -214,6 +238,6 @@ $canaryRoot = 'D:\baibu-agent\scratchpad\agent-channel-host-command-canary'
 node docs/acceptance/command-driven-runtime/scripts/codex-command-resume-canary.mjs $canaryRoot
 ```
 
-自动化测试覆盖 SQLite admission/去重/sequence、claim/release/reconciliation、跨 Channel 路由、runtime session 迁移、outbox freshness、lease、ready signal、quiet-window burst、active command cancel、warm TTL、群 onboarding、DWS 参数、结构化决定、命令新建/resume、错误/超时、`status/view` 脱敏、service plan 和 CLI 实跑。
+自动化测试覆盖 SQLite admission/去重/sequence、checkpoint 与成员资料、claim/release/reconciliation、跨 Channel 路由、runtime session 迁移、compaction recovery、outbox freshness、lease、ready signal、quiet-window burst、active command cancel、warm TTL、群 onboarding、DWS 参数、结构化决定、命令新建/resume、错误/超时、`status/view` 脱敏、管理 tab 与设置保存、service plan 和 CLI 实跑。
 
 真实 Codex canary 只验证 runtime CLI 与固定 session 恢复，不连接或发送 DingTalk。真实 DWS 收发必须在专用测试群/账号获得单独授权后执行。

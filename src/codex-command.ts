@@ -6,10 +6,12 @@ import { createInterface, type Interface } from 'node:readline';
 import type { HostConfig } from './config.js';
 import type { AgentSession } from './contracts.js';
 import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from './command.js';
-import { developerInstructions, emptyTurnEvidence, validateDecision, type TurnEvidence } from './decision.js';
+import { emptyTurnEvidence, validateDecision, type TurnEvidence } from './decision.js';
+import { developerInstructions, recoveryContext } from './prompts.js';
+import { publishRecoveryContext } from './recovery-context.js';
 import { withTimeout } from './process-utils.js';
 import type { Store } from './store.js';
-import type { Conversation, Decision, DecisionRun, SessionRecord } from './types.js';
+import type { Conversation, ConversationContext, Decision, DecisionRun, SessionRecord } from './types.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -25,8 +27,9 @@ export interface SessionStartup {
   providerSessionId: string | null;
 }
 
-const DRIVER_PROTOCOL = 'exec-jsonl-v1';
+const DRIVER_PROTOCOL = 'exec-jsonl-v2-compaction-recovery';
 const DECISION_SCHEMA_PATH = fileURLToPath(new URL('../../schemas/decision-output.schema.json', import.meta.url));
+const COMPACTION_HOOK_PATH = fileURLToPath(new URL('./codex-compaction-hook.js', import.meta.url));
 
 export async function verifyCodexCommand(config: HostConfig): Promise<CodexCommandIdentity> {
   const command = await resolveCommand(config.runtime.command);
@@ -49,7 +52,7 @@ export async function verifyCodexCommand(config: HostConfig): Promise<CodexComma
     }),
     readFile(DECISION_SCHEMA_PATH),
   ]);
-  for (const token of ['--json', '--output-schema']) {
+  for (const token of ['--json', '--output-schema', '--dangerously-bypass-hook-trust']) {
     if (!execHelp.stdout.includes(token)) throw new Error(`Codex exec 缺少能力：${token}`);
     if (!resumeHelp.stdout.includes(token)) throw new Error(`Codex exec resume 缺少能力：${token}`);
   }
@@ -70,7 +73,11 @@ export function buildCodexExecArgs(
   prompt: string,
   providerSessionId: string | null,
 ): string[] {
+  const hook = `[{ matcher = "^compact$", hooks = [{ type = "command", command = ${tomlString(commandLine([
+    process.execPath, COMPACTION_HOOK_PATH,
+  ]))}, additionalContextLimit = 2500 }] }]`;
   const common = [
+    '--dangerously-bypass-hook-trust',
     '--json',
     '--output-schema', schemaPath,
     '--model', config.runtime.model,
@@ -80,10 +87,21 @@ export function buildCodexExecArgs(
     '-c', 'sandbox_mode="workspace-write"',
     '-c', 'sandbox_workspace_write.network_access=false',
     '-c', 'sandbox_workspace_write.writable_roots=[]',
+    '-c', `hooks.SessionStart=${hook}`,
     '-c', `developer_instructions=${tomlString(developerInstructions(config, conversation))}`,
   ];
   if (providerSessionId) return ['exec', 'resume', ...common, providerSessionId, prompt];
   return ['exec', ...common, '--sandbox', 'workspace-write', '-C', config.runtime.cwd, prompt];
+}
+
+export function promptForSession(
+  config: HostConfig,
+  conversation: Conversation,
+  context: ConversationContext | null,
+  prompt: string,
+  providerSessionId: string | null,
+): string {
+  return providerSessionId || !context ? prompt : `${recoveryContext(config, conversation, context)}\n\n${prompt}`;
 }
 
 export class CodexJsonlCollector {
@@ -190,19 +208,26 @@ export class CodexCommandSession implements AgentSession {
     if (!this.started) throw new Error('Codex command session 尚未 start');
     if (this.child) throw new Error('同一 conversation 已有活动 Codex command');
     const expectedSessionId = this.providerSessionId;
+    const conversation = this.store.getConversation(this.conversation.id);
+    if (!conversation) throw new Error(`conversation 不存在：${this.conversation.id}`);
+    const recoveryPath = await publishRecoveryContext(this.config, conversation, this.store);
+    const existingContext = this.store.getConversationContext(conversation.id);
+    const effectivePrompt = promptForSession(this.config, conversation, existingContext, prompt, expectedSessionId);
+    const expectedSignature = this.config.identity.signature;
     const collector = new CodexJsonlCollector(expectedSessionId);
     const turnId = randomUUID();
     const args = buildCodexExecArgs(
       this.config,
-      this.conversation,
+      conversation,
       this.identity.decisionSchemaPath,
-      prompt,
+      effectivePrompt,
       expectedSessionId,
     );
     const child = spawn(this.identity.command.file, commandArgs(this.identity.command, args), {
       cwd: this.config.runtime.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      env: { ...process.env, AGENT_CHANNEL_RECOVERY_CONTEXT: recoveryPath },
     });
     this.child = child;
     this.interruptRequested = false;
@@ -263,7 +288,7 @@ export class CodexCommandSession implements AgentSession {
     } catch (error) {
       throw new Error(`Codex 决策不是合法 JSON：${(error as Error).message}`);
     }
-    validateDecision(decision, this.config.identity.signature, collector.evidence);
+    validateDecision(decision, expectedSignature, collector.evidence);
     this.persistReady(collector.providerSessionId, turnId);
     return {
       turnId,
@@ -321,6 +346,10 @@ export class CodexCommandSession implements AgentSession {
 
 function tomlString(value: string): string {
   return JSON.stringify(value);
+}
+
+function commandLine(args: string[]): string {
+  return args.map((value) => `"${value.replaceAll('"', '\\"')}"`).join(' ');
 }
 
 function normalizeToken(value: unknown): string {

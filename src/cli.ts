@@ -11,14 +11,14 @@ import { CodexCommandSession, verifyCodexCommand } from './codex-command.js';
 import { runHost } from './host.js';
 import { installUserService, removeUserService, windowsServicePlan } from './service.js';
 import { MAX_WORKER_WARM_SECONDS } from './types.js';
-import { runView } from './view.js';
+import { assertInteractiveView, runView, shouldStartHostForView } from './view.js';
 import { CLI_NAME } from './product.js';
 
 const program = new Command();
 program
   .name(CLI_NAME)
   .description('将 Channel 消息路由到每个会话独立、可恢复的 Agent runtime session')
-  .version('0.3.0');
+  .version('0.4.0');
 
 program.command('init')
   .description('初始化一个不含凭据的用户级 Host instance')
@@ -51,7 +51,7 @@ program.command('init')
     });
     store.setRuntimeAdapter({
       runtimeId: config.runtime.id, label: 'Codex CLI', state: 'stopped',
-      model: config.runtime.model,
+      model: config.runtime.model, contextRecovery: 'session-start-hook',
     });
     store.close();
     print({ ok: true, instance: options.instance, configPath: path, statePath: statePath(options.instance) });
@@ -226,24 +226,50 @@ program.command('status')
   });
 
 program.command('view')
-  .description('像 top 一样查看 Host、Channel、消息、conversation 和 runtime Worker')
+  .description('启动或 attach Host，并打开总览、会话详情和设置管理界面')
   .requiredOption('--instance <name>', 'instance 名称')
   .option('--interval <seconds>', '刷新间隔秒数', parseViewInterval, 1)
-  .option('--once', '只渲染一次后退出；管道和脚本必须使用此模式', false)
+  .option('--once', '只读渲染一次且不启动 Host；管道和脚本必须使用此模式', false)
   .option('--show-content', '在当前用户本地显示截断消息正文预览', false)
   .action(async (options) => {
-    await loadConfig(options.instance);
+    const config = await loadConfig(options.instance);
     const store = new Store(statePath(options.instance));
+    const viewOptions = {
+      instance: options.instance,
+      intervalSeconds: options.interval,
+      once: options.once,
+      showContent: options.showContent,
+    };
+    assertInteractiveView(viewOptions);
+    let hostAbort: AbortController | null = null;
+    let hostPromise: Promise<void> | null = null;
+    let hostFailure: Error | null = null;
+    const notices: string[] = [];
     try {
-      await runView(store, {
-        instance: options.instance,
-        intervalSeconds: options.interval,
-        once: options.once,
-        showContent: options.showContent,
-      });
+      const initialSnapshot = store.status();
+      const startHost = shouldStartHostForView(options.once, initialSnapshot);
+      const attached = !options.once && !startHost;
+      if (startHost) {
+        hostAbort = new AbortController();
+        hostPromise = runHost(config, {
+          signal: hostAbort.signal,
+          handleProcessSignals: false,
+          log: (record) => {
+            notices.push(hostNotice(record));
+            if (notices.length > 50) notices.shift();
+          },
+        }).catch((error) => {
+          hostFailure = error as Error;
+          notices.push(`Host 异常：${(error as Error).message}`);
+        });
+      }
+      await runView(store, config, { ...viewOptions, attachedToExistingHost: attached, notices });
     } finally {
+      hostAbort?.abort();
+      await hostPromise;
       store.close();
     }
+    if (hostFailure) throw hostFailure;
   });
 
 program.command('run')
@@ -269,6 +295,7 @@ program.command('verify')
         state: 'stopped',
         model: config.runtime.model,
         protocolFingerprint: runtime.fingerprint,
+        contextRecovery: 'session-start-hook',
       });
       session = new CodexCommandSession(config, target, runtime, store);
       const startup = await session.start();
@@ -276,6 +303,7 @@ program.command('verify')
 [宿主离线验证事件；不是钉钉消息]
 当前没有待处理消息，禁止发言。返回 action="silent"、responsibilityMatch=false、category="verify"、replyText=""、reasonCode="offline_canary"。
 同时返回 workType="discussion"、delegation="not_required"。
+返回 contextUpdate=null。
 `.trim());
       if (canary.status !== 'completed' || canary.decision?.action !== 'silent' || canary.decision.replyText !== '') {
         throw new Error('离线 canary 未返回严格 silent 决策');
@@ -364,4 +392,10 @@ function parseReasoningEffort(value: string): typeof CODEX_REASONING_EFFORTS[num
     throw new Error(`--effort 必须是 ${CODEX_REASONING_EFFORTS.join('、')}`);
   }
   return value as typeof CODEX_REASONING_EFFORTS[number];
+}
+
+function hostNotice(record: Record<string, unknown>): string {
+  const type = String(record.type ?? 'HOST_EVENT');
+  const error = record.error ? `：${String(record.error)}` : '';
+  return `${type}${error}`;
 }

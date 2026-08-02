@@ -1,0 +1,18 @@
+case_id,area,case,round_1,status
+CTX-001,store,SQLite migration creates versioned checkpoint and member tables,PASS,PASS
+CTX-002,store,context update and batch decision commit atomically with through sequence,PASS,PASS
+CTX-003,members,inbound sender upsert and relevant member lookup do not inject full roster,PASS,PASS
+CTX-004,prompt,prompts use fixed concise sections and explicit contextUpdate contract,PASS,PASS
+CTX-005,recovery,new provider session receives existing checkpoint while ordinary resume does not duplicate it,PASS,PASS
+CTX-006,recovery,Codex SessionStart compact hook returns current recovery version and bounded context,PASS,PASS
+CTX-007,recovery,real Codex fixed version accepts bundled hook configuration during verify,PASS,PASS
+VIEW-001,lifecycle,interactive view starts embedded Host only when no active owner exists,PASS,PASS
+VIEW-002,lifecycle,quitting view stops only the Host started by that view,PASS,PASS
+VIEW-003,overview,default tab shows all channels conversations messages runtimes workers and alerts,PASS,PASS
+VIEW-004,detail,selection opens one conversation detail without exposing raw IDs or content by default,PASS,PASS
+VIEW-005,settings,settings tab validates and saves global config atomically,PASS,PASS
+VIEW-006,settings,conversation responsibility mode and warm TTL changes are read on the next turn or send gate,PASS,PASS
+VIEW-007,settings,observed member role and boundary can be updated without adding the full roster to prompts,PASS,PASS
+VIEW-008,cli,--once remains read only and non TTY interactive view fails before Host side effects,PASS,PASS
+DOC-001,docs,README describes view as foreground startup and management entry while run remains headless,PASS,PASS
+REG-001,regression,npm run verify pack dry run and isolated CLI smoke pass without DWS send,PASS,PASS

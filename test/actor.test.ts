@@ -28,6 +28,7 @@ class FakeSession implements AgentSession {
         action: 'reply', responsibilityMatch: true, category: 'question',
         replyText: '第二条消息的答复\n\n- Agent代回', reasonCode: 'within_responsibility',
         workType: 'discussion', delegation: 'not_required',
+        contextUpdate: null,
       },
       subagentThreadId: null,
     });
@@ -95,6 +96,7 @@ class OnboardingSession implements AgentSession {
         action: 'reply', responsibilityMatch: true, category: 'group_onboarding',
         replyText: '大家好，我会持续关注本群讨论。\n\n- Agent代回', reasonCode: 'first_join',
         workType: 'discussion', delegation: 'not_required',
+        contextUpdate: null,
       },
       subagentThreadId: null,
     };
@@ -210,12 +212,14 @@ test('实施任务派发回执不占用 actor，可继续处理下一条群消�
         decision: {
           action: 'reply', responsibilityMatch: true, category: 'implementation', replyText: '已派后台处理\n\n- Agent代回',
           reasonCode: 'worker_started', workType: 'implementation', delegation: 'started',
+          contextUpdate: null,
         },
       } : {
         turnId: 'discussion-turn', status: 'completed', subagentThreadId: null,
         decision: {
           action: 'silent', responsibilityMatch: true, category: 'discussion', replyText: '',
           reasonCode: 'observed', workType: 'discussion', delegation: 'not_required',
+          contextUpdate: null,
         },
       };
     },

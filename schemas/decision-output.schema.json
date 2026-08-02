@@ -8,7 +8,8 @@
     "replyText",
     "reasonCode",
     "workType",
-    "delegation"
+    "delegation",
+    "contextUpdate"
   ],
   "properties": {
     "action": { "type": "string", "enum": ["silent", "reply", "escalate"] },
@@ -17,6 +18,23 @@
     "replyText": { "type": "string" },
     "reasonCode": { "type": "string" },
     "workType": { "type": "string", "enum": ["discussion", "implementation"] },
-    "delegation": { "type": "string", "enum": ["not_required", "started"] }
+    "delegation": { "type": "string", "enum": ["not_required", "started"] },
+    "contextUpdate": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["currentTopic", "facts", "decisions", "commitments", "openQuestions"],
+          "properties": {
+            "currentTopic": { "type": "string", "maxLength": 300 },
+            "facts": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 500 } },
+            "decisions": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 500 } },
+            "commitments": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 500 } },
+            "openQuestions": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 500 } }
+          }
+        }
+      ]
+    }
   }
 }
