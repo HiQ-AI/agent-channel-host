@@ -14,10 +14,11 @@ import { installUserService, removeUserService, windowsServicePlan } from './ser
 import { AppServerSession } from './app-server.js';
 import { MAX_WORKER_WARM_SECONDS } from './types.js';
 import { runView } from './view.js';
+import { CLI_NAME } from './product.js';
 
 const program = new Command();
 program
-  .name('dingtalk-codex')
+  .name(CLI_NAME)
   .description('将 Channel 消息路由到每个会话独立、可恢复的 Agent runtime session')
   .version('0.2.0');
 

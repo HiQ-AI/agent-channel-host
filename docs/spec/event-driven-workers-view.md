@@ -5,7 +5,7 @@
 1. 只让 Channel owner 常驻。消息完成 SQLite durable admission 后发出 conversation ready signal；provider Worker 按需创建、恢复固定逻辑 session，并在 warm TTL 到期且无工作时退出。
 2. 同一 conversation 只能有一个 Worker claim/运行。连续消息在 quiet window 内合并为一个结构化 batch；active turn 期间只请求一次 cancel，取消完成后把原 batch 与新增消息重新合并。
 3. Host 重启时对持久化 pending/claimed work 做一次 reconciliation，不依赖 Worker 轮询消息源或 SQLite。
-4. 新增 `dingtalk-codex view`。默认像 `top` 一样持续刷新，`q`/`Ctrl+C` 退出；`--once` 输出稳定快照，便于脚本和验收。
+4. 新增 `agent-channel view`。默认像 `top` 一样持续刷新，`q`/`Ctrl+C` 退出；`--once` 输出稳定快照，便于脚本和验收。
 5. 首版仍只实现 DingTalk + Codex，但 Host scheduler、持久状态 DTO 和 view 只依赖中立的 Channel/runtime 契约。
 
 ## 当前根因
@@ -100,7 +100,7 @@ ReadyQueue 对同一 conversation 去重；多个 signal 只表示“状态可�
 命令：
 
 ```text
-dingtalk-codex view --instance <name> [--interval <seconds>] [--once] [--show-content]
+agent-channel view --instance <name> [--interval <seconds>] [--once] [--show-content]
 ```
 
 - TTY 默认 ANSI 原位刷新，`q`/`Ctrl+C` 退出；非 TTY 必须显式 `--once`，防止管道永久挂住。

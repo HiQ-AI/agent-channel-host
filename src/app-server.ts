@@ -5,6 +5,7 @@ import type { CodexProtocolIdentity, Conversation, Decision, DecisionRun, Sessio
 import type { Store } from './store.js';
 import { stopChild, withTimeout } from './process-utils.js';
 import { commandArgs } from './command.js';
+import { PRODUCT_ID, PRODUCT_TITLE } from './product.js';
 
 type JsonObject = Record<string, unknown>;
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void };
@@ -99,7 +100,7 @@ export class AppServerSession {
     });
 
     await this.request('initialize', {
-      clientInfo: { name: 'dingtalk-codex-host', title: 'DingTalk Codex Host', version: '0.2.0' },
+      clientInfo: { name: PRODUCT_ID, title: PRODUCT_TITLE, version: '0.2.0' },
     });
     this.notify('initialized', {});
     await this.assertModelAvailable();
@@ -141,7 +142,7 @@ export class AppServerSession {
       cwd: this.config.runtime.cwd,
       approvalPolicy: 'never',
       sandbox: 'workspace-write',
-      serviceName: 'dingtalk-codex-host',
+      serviceName: PRODUCT_ID,
       developerInstructions: developerInstructions(this.config, this.conversation),
     }) as JsonObject;
     const thread = result.thread as JsonObject | undefined;

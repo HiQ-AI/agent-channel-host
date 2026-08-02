@@ -1,4 +1,5 @@
 import type { Store } from './store.js';
+import { CLI_NAME } from './product.js';
 
 type Json = Record<string, unknown>;
 
@@ -58,7 +59,7 @@ export function renderStatusView(instance: string, snapshot: Record<string, unkn
   const runtimes = array(snapshot.runtimes);
   const alerts = array(snapshot.alerts);
   const lines: string[] = [];
-  lines.push(`dingtalk-codex view  instance=${instance}  refreshed=${text(snapshot.generatedAt) ?? '-'}`);
+  lines.push(`${CLI_NAME} view  instance=${instance}  refreshed=${text(snapshot.generatedAt) ?? '-'}`);
   lines.push(`Host ${text(host.state) ?? 'unknown'}  pid=${text(host.pid) ?? '-'}  heartbeat=${age(host.heartbeatAt)}`);
   lines.push('');
   lines.push('CHANNELS');

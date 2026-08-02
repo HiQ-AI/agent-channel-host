@@ -12,8 +12,11 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   const cli = join(process.cwd(), 'dist', 'src', 'cli.js');
-  const env = { ...process.env, DINGTALK_CODEX_HOME: root };
+  const env = { ...process.env, AGENT_CHANNEL_HOME: root };
   try {
+    const help = await execFileAsync(process.execPath, [cli, '--help'], { encoding: 'utf8', env });
+    assert.match(help.stdout, /^Usage: agent-channel /);
+    assert.doesNotMatch(help.stdout, /dingtalk-codex/);
     const initialized = await execFileAsync(process.execPath, [
       cli, 'init', '--instance', 'test', '--cwd', process.cwd(), '--name', '测试员工', '--role', '测试角色',
     ], { encoding: 'utf8', env });
@@ -83,6 +86,7 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     assert.match(viewed.stdout, /MESSAGES received=0 pending=0/);
     assert.match(viewed.stdout, /CONVERSATIONS/);
     assert.match(viewed.stdout, /RUNTIMES/);
+    assert.match(viewed.stdout, /^agent-channel view /);
     assert.doesNotMatch(viewed.stdout, /open-test-user|open-warm-user/);
     await assert.rejects(execFileAsync(process.execPath, [
       cli, 'view', '--instance', 'test', '--interval', '0.2',

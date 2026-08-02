@@ -1,14 +1,14 @@
 {
-  "name": "@hiq-ai/dingtalk-codex-host",
+  "name": "@hiq-ai/agent-channel-host",
   "version": "0.2.0",
   "description": "An event-driven Channel host for isolated, resumable agent runtime conversations.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/HiQ-AI/dingtalk-codex-host.git"
+    "url": "git+https://github.com/HiQ-AI/agent-channel-host.git"
   },
-  "homepage": "https://github.com/HiQ-AI/dingtalk-codex-host#readme",
+  "homepage": "https://github.com/HiQ-AI/agent-channel-host#readme",
   "bugs": {
-    "url": "https://github.com/HiQ-AI/dingtalk-codex-host/issues"
+    "url": "https://github.com/HiQ-AI/agent-channel-host/issues"
   },
   "keywords": ["dingtalk", "channel", "codex", "agent", "app-server"],
   "type": "module",
@@ -17,7 +17,7 @@
     "node": ">=22.13.0"
   },
   "bin": {
-    "dingtalk-codex": "dist/src/cli.js"
+    "agent-channel": "dist/src/cli.js"
   },
   "files": [
     "dist/src",

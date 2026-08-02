@@ -5,6 +5,7 @@ import type { AdmittedEvent, Conversation, Decision, DecisionRun } from './types
 import type { Store } from './store.js';
 import { delay } from './process-utils.js';
 import { fetchRecentGroupHistory, type RecentGroupHistory } from './dws.js';
+import { PRODUCT_ID } from './product.js';
 
 export class ConversationWorker {
   readonly workerId = randomUUID();
@@ -350,11 +351,11 @@ function truncate(value: unknown): string {
 }
 
 function deterministicUuid(event: AdmittedEvent): string {
-  const hex = createHash('sha256').update(`dingtalk-codex-host:${event.fingerprint}`).digest('hex');
+  const hex = createHash('sha256').update(`${PRODUCT_ID}:${event.fingerprint}`).digest('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 function deterministicOnboardingUuid(conversation: Conversation): string {
-  const hex = createHash('sha256').update(`dingtalk-codex-host:onboarding:${conversation.channelId}:${conversation.channelProfileId}:${conversation.externalId}`).digest('hex');
+  const hex = createHash('sha256').update(`${PRODUCT_ID}:onboarding:${conversation.channelId}:${conversation.channelProfileId}:${conversation.externalId}`).digest('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }

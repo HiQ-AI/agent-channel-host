@@ -1,0 +1,11 @@
+case_id,领域,用例,round-1
+REN-001,Package,npm package/repository/homepage/bugs/bin 使用新名称,PASS
+REN-002,CLI,agent-channel --help/init/status/view --once 可实跑,PASS
+REN-003,State,AGENT_CHANNEL_HOME 生效且旧环境变量单独存在时 fail-fast,PASS
+REN-004,Service,Windows 计划任务和 launcher 使用新前缀且无凭据,PASS
+REN-005,Runtime,App Server client/service identity 使用新名称且 Codex resume 不退化,PASS
+REN-006,Compatibility,SQLite schema 与 dingtalk/codex adapter ID 不因项目改名变化,PASS
+REN-007,Docs,当前产品文档与可执行脚本不再暴露旧产品标识,PASS
+REN-008,Package,npm pack 产物名和清单使用 agent-channel-host,PASS
+REN-009,Regression,npm run verify 全绿,PASS
+REN-010,GitHub,PR/双平台 CI/远端仓库名/origin URL/本地目录均回读新名称,NOT_RUN

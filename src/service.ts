@@ -3,6 +3,7 @@ import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { instanceDir, safeName } from './paths.js';
+import { PRODUCT_ID } from './product.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -19,7 +20,7 @@ export function windowsServicePlan(instance: string, cliPath: string, nodePath =
   const launcherPath = join(directory, 'run-host.cmd');
   const logPath = join(directory, 'service.log');
   const launcher = `@echo off\r\n"${nodePath}" "${resolve(cliPath)}" run --instance "${instance}" >> "${logPath}" 2>&1\r\n`;
-  const taskName = `dingtalk-codex-host-${instance}`;
+  const taskName = `${PRODUCT_ID}-${instance}`;
   return {
     taskName,
     launcherPath,

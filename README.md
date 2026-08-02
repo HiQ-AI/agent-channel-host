@@ -1,8 +1,8 @@
-# dingtalk-codex-host
+# agent-channel-host
 
-`dingtalk-codex-host` 把当前钉钉用户收到的授权群聊/私聊消息，送入每个会话各自独立、可恢复的 Agent runtime session。它不是一个必须 `@` 才启动的机器人：Host 会观察允许列表内的每条新消息，由固定逻辑会话判断 `silent / reply / escalate`，只有通过本地出站门禁的 `reply` 才会调用 Channel adapter 发送。
+`agent-channel-host` 是事件驱动的 Agent 会话宿主：它从 Channel adapter 接收获授权的群聊/私聊消息，送入每个会话各自独立、可恢复的 Agent runtime session，再通过同一 Channel adapter 受控回复。当前 DingTalk adapter 不以 `@` 作为唯一入口；固定逻辑会话判断 `silent / reply / escalate`，只有通过本地出站门禁的 `reply` 才会发送。
 
-首版只发布 Node.js/TypeScript npm package，命令名为 `dingtalk-codex`。当前可运行组合是 DingTalk DWS + Codex App Server；调度、持久状态和观测面通过 `ChannelAdapter / RuntimeAdapter / AgentSession` 中立契约隔离，为后续 Channel 和 runtime 扩展保留入口。不提供 Windows portable zip/exe。
+首版只发布 Node.js/TypeScript npm package，命令名为 `agent-channel`。当前可运行组合是 DingTalk DWS + Codex App Server；调度、持久状态和观测面通过 `ChannelAdapter / RuntimeAdapter / AgentSession` 中立契约隔离，为后续 Channel 和 runtime 扩展保留入口。不提供 Windows portable zip/exe。
 
 ## 运行机制
 
@@ -48,12 +48,12 @@ flowchart LR
 仓库发布到 GitHub 后，可直接从源码构建并注册全局命令：
 
 ```powershell
-git clone https://github.com/HiQ-AI/dingtalk-codex-host.git
-Set-Location .\dingtalk-codex-host
+git clone https://github.com/HiQ-AI/agent-channel-host.git
+Set-Location .\agent-channel-host
 npm ci
 npm run verify
 npm link
-dingtalk-codex --help
+agent-channel --help
 ```
 
 ## 初始化
@@ -61,25 +61,25 @@ dingtalk-codex --help
 下面只写本地 instance 配置和空 SQLite 数据库，不启动订阅，也不发送消息：
 
 ```powershell
-dingtalk-codex init `
+agent-channel init `
   --instance triss `
   --cwd 'D:\agent-workspaces\triss' `
   --name '翠丝' `
   --role '公司数字化员工；按自身角色与各会话职责边界参与讨论'
 
-dingtalk-codex doctor --instance triss
+agent-channel doctor --instance triss
 ```
 
 默认模型是 `gpt-5.6-sol`，默认推理强度是 `low`。初始化时可覆盖，已有 instance 可单独修改；运行中的 Host 需重启后生效：
 
 ```powershell
-dingtalk-codex init `
+agent-channel init `
   --instance triss-terra `
   --cwd 'D:\agent-workspaces\triss-terra' `
   --model gpt-5.6-terra `
   --effort medium
 
-dingtalk-codex config model `
+agent-channel config model `
   --instance triss `
   --model gpt-5.6-sol `
   --effort low
@@ -90,7 +90,7 @@ dingtalk-codex config model `
 Windows 默认数据目录为：
 
 ```text
-%LOCALAPPDATA%\dingtalk-codex-host\instances\triss\
+%LOCALAPPDATA%\agent-channel-host\instances\triss\
 ├── config.yaml
 ├── state.sqlite3
 ├── protocol\
@@ -98,14 +98,20 @@ Windows 默认数据目录为：
 └── service.log
 ```
 
-也可以用 `DINGTALK_CODEX_HOME` 指向另一个用户级状态根目录。DWS owner lock 始终位于当前操作系统用户的公共运行目录，不随该变量改变，避免两个 instance home 同时占用同一 profile。配置样例见 [`examples/triss-config.yaml`](examples/triss-config.yaml)，其中不包含 conversation ID 或凭据。
+也可以用 `AGENT_CHANNEL_HOME` 指向另一个用户级状态根目录。DWS owner lock 始终位于当前操作系统用户的公共运行目录，不随该变量改变，避免两个 instance home 同时占用同一 profile。配置样例见 [`examples/triss-config.yaml`](examples/triss-config.yaml)，其中不包含 conversation ID 或凭据。
+
+### 从原 0.x 名称迁移
+
+项目原名为 `dingtalk-codex-host`，原 CLI 和状态根环境变量分别是 `dingtalk-codex`、`DINGTALK_CODEX_HOME`。本项目尚未发布 npm 或部署正式 Host，因此 `0.2.0` 采用一次干净改名，不同时保留两套入口。检测到只设置旧环境变量时会 fail-fast，不会静默创建一份新的空状态库。
+
+若已经运行过预览实例，先停止旧 Host/计划任务并备份完整 SQLite/WAL 目录，再把状态目录迁移到 `agent-channel-host` 或改用 `AGENT_CHANNEL_HOME` 指向已确认的目录；新旧 Host 不得并行占用同一个 Channel profile。本版本不会自动移动目录或删除旧计划任务。
 
 ## 添加授权会话
 
 群聊按标题调用 DWS 搜索，并要求唯一精确匹配；不会在多个候选中猜 ID。新会话默认 `shadow`，即正常处理和留证，但不发送：
 
 ```powershell
-dingtalk-codex conversation add `
+agent-channel conversation add `
   --instance triss `
   --kind group `
   --title '广场＆编辑器迭代中...' `
@@ -113,20 +119,20 @@ dingtalk-codex conversation add `
   --mode shadow `
   --warm-seconds 30
 
-dingtalk-codex conversation list --instance triss
+agent-channel conversation list --instance triss
 ```
 
 在连接 DWS 前，可对已登记会话执行离线 App Server canary。它会实际创建或恢复该会话的固定 Codex thread，并运行严格 silent turn，但不会订阅或发送钉钉消息；连续执行两次应分别看到 `startupMode=started` 和 `startupMode=resumed`，且 thread 前缀一致：
 
 ```powershell
-dingtalk-codex verify --instance triss --id '<conversation UUID>'
-dingtalk-codex verify --instance triss --id '<conversation UUID>'
+agent-channel verify --instance triss --id '<conversation UUID>'
+agent-channel verify --instance triss --id '<conversation UUID>'
 ```
 
 私聊使用 DWS 提供的 `openDingTalkId`，不接受姓名猜测：
 
 ```powershell
-dingtalk-codex conversation add `
+agent-channel conversation add `
   --instance triss `
   --kind direct `
   --title '同事私聊' `
@@ -143,7 +149,7 @@ dingtalk-codex conversation add `
 群聊和私聊都保留固定逻辑 session，但 provider Worker 统一按消息事件或 pending onboarding 启动。默认在处理完成后保温 30 秒；热点会话可延长，低频会话可设为 `0`、空闲后立即释放：
 
 ```powershell
-dingtalk-codex conversation add `
+agent-channel conversation add `
   --instance triss `
   --kind group `
   --title '低频项目群' `
@@ -154,7 +160,7 @@ dingtalk-codex conversation add `
 
 ```powershell
 # 空闲 2 分钟后释放本地 provider 进程
-dingtalk-codex conversation worker `
+agent-channel conversation worker `
   --instance triss `
   --id '<conversation UUID>' `
   --warm-seconds 120
@@ -167,20 +173,20 @@ dingtalk-codex conversation worker `
 先在 `shadow` 模式前台运行，看到 `HOST_READY` 后再发一条不含 `@` 的测试消息：
 
 ```powershell
-dingtalk-codex run --instance triss
+agent-channel run --instance triss
 ```
 
 另一个 PowerShell 查看脱敏状态：
 
 ```powershell
-dingtalk-codex status --instance triss
-dingtalk-codex view --instance triss
+agent-channel status --instance triss
+agent-channel view --instance triss
 ```
 
 `status` 输出机器可读 JSON；`view` 默认像 `top` 一样持续刷新，用 `q` 或 `Ctrl+C` 退出。脚本、日志采集和 CI 使用一次性人类可读快照：
 
 ```powershell
-dingtalk-codex view --instance triss --once
+agent-channel view --instance triss --once
 ```
 
 两者读取同一份中立状态快照，区分 Host lease、Channel connection、消息 pending/claimed/processed、conversation、runtime adapter、固定 provider session 与当前 Worker/PID。默认不显示消息正文、完整外部 conversation ID 或完整 provider session ID；仅在当前用户本地排查时显式使用 `--show-content` 查看截断预览。
@@ -188,7 +194,7 @@ dingtalk-codex view --instance triss --once
 确认 `received/processed`、固定 `threadIdPrefix`、重启后的 resume 和职责判断后，才显式切到 `reply`；运行中的 Host 需重启后读取新 mode：
 
 ```powershell
-dingtalk-codex conversation mode --instance triss --id '<conversation UUID>' --mode reply
+agent-channel conversation mode --instance triss --id '<conversation UUID>' --mode reply
 ```
 
 群在 `shadow` 首次启动后，介绍已经准备但不会发送；上述切换后必须重启 Host，启动阶段会先发送这条已准备介绍，再开始消费实时事件。真实历史拉取与发送应只在专用测试群完成。
@@ -196,18 +202,18 @@ dingtalk-codex conversation mode --instance triss --id '<conversation UUID>' --m
 Windows 当前用户常驻使用计划任务，不以 LocalSystem 运行，也不复制登录态：
 
 ```powershell
-dingtalk-codex service plan --instance triss
-dingtalk-codex service install --instance triss
+agent-channel service plan --instance triss
+agent-channel service install --instance triss
 ```
 
 卸载前先做零副作用检查：
 
 ```powershell
-dingtalk-codex service remove --instance triss --check
-dingtalk-codex service remove --instance triss
+agent-channel service remove --instance triss --check
+agent-channel service remove --instance triss
 ```
 
-非 Windows 平台可用 `dingtalk-codex run` 接入 systemd user、launchd 或平台进程管理器；首版不自动写这些平台的 service 文件。
+非 Windows 平台可用 `agent-channel run` 接入 systemd user、launchd 或平台进程管理器；首版不自动写这些平台的 service 文件。
 
 ## Channel 与 runtime 扩展边界
 
@@ -237,10 +243,10 @@ npm run verify
 
 node docs/acceptance/group-onboarding-delegation/scripts/app-server-delegation-canary.mjs
 
-$resumeRoot = Join-Path $env:LOCALAPPDATA 'dingtalk-codex-host\resume-canary'
+$resumeRoot = Join-Path $env:LOCALAPPDATA 'agent-channel-host\resume-canary'
 node docs/acceptance/conversation-lifecycle/scripts/app-server-resume-canary.mjs $resumeRoot
 
-$modelRoot = Join-Path $env:LOCALAPPDATA 'dingtalk-codex-host\model-canary'
+$modelRoot = Join-Path $env:LOCALAPPDATA 'agent-channel-host\model-canary'
 node docs/acceptance/default-codex-model/scripts/default-model-canary.mjs $modelRoot
 ```
 

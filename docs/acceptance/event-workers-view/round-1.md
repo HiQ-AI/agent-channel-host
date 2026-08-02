@@ -16,7 +16,7 @@
 npm run verify
 ```
 
-结果：退出码 0；TypeScript 构建成功；Node Test Runner `27 pass / 0 fail`；`npm pack --dry-run` 成功生成 `hiq-ai-dingtalk-codex-host-0.2.0.tgz` 清单。
+结果：退出码 0；TypeScript 构建成功；Node Test Runner `27 pass / 0 fail`；`npm pack --dry-run` 成功生成当时原名对应的 `hiq-ai-dingtalk-codex-host-0.2.0.tgz` 清单。
 
 覆盖关系：
 
@@ -29,7 +29,7 @@ npm run verify
 
 ## 真实 Codex resume canary
 
-隔离状态目录：`D:\baibu-agent\scratchpad\dingtalk-codex-host-event-workers-view-resume-20260802`。
+隔离状态目录：`D:\baibu-agent\scratchpad\dingtalk-codex-host-event-workers-view-resume-20260802`（当时项目原名）。
 
 执行：
 
@@ -54,7 +54,7 @@ canary 在第二个 App Server 进程中恢复同一完整 thread ID，并在恢
 
 ## CLI view canary
 
-使用隔离 `DINGTALK_CODEX_HOME` 实跑 `init → add synthetic direct → view --once`。输出同时包含：
+使用当时的隔离变量 `DINGTALK_CODEX_HOME` 实跑 `init → add synthetic direct → view --once`。输出同时包含：
 
 - `Host stopped`；
 - `CHANNELS` 中的 `dingtalk/default/stopped`；
