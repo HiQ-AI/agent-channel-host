@@ -1,17 +1,15 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { access } from 'node:fs/promises';
-import { join } from 'node:path';
 import {
   CODEX_REASONING_EFFORTS, defaultConfig, loadConfig, writeConfig, writeInitialConfig,
 } from './config.js';
-import { configPath, instanceDir, statePath } from './paths.js';
+import { configPath, statePath } from './paths.js';
 import { Store } from './store.js';
 import { dwsDoctor, resolveExactGroup } from './dws.js';
-import { verifyCodexProtocol } from './protocol.js';
+import { CodexCommandSession, verifyCodexCommand } from './codex-command.js';
 import { runHost } from './host.js';
 import { installUserService, removeUserService, windowsServicePlan } from './service.js';
-import { AppServerSession } from './app-server.js';
 import { MAX_WORKER_WARM_SECONDS } from './types.js';
 import { runView } from './view.js';
 import { CLI_NAME } from './product.js';
@@ -20,7 +18,7 @@ const program = new Command();
 program
   .name(CLI_NAME)
   .description('将 Channel 消息路由到每个会话独立、可恢复的 Agent runtime session')
-  .version('0.2.0');
+  .version('0.3.0');
 
 program.command('init')
   .description('初始化一个不含凭据的用户级 Host instance')
@@ -40,20 +38,20 @@ program.command('init')
       () => undefined,
     );
     const config = defaultConfig(options.instance, options.cwd, options.name, options.role);
-    config.runtime.dwsCommand = options.dwsCommand;
-    config.runtime.codexCommand = options.codexCommand;
-    config.runtime.codexModel = options.model;
-    config.runtime.codexEffort = parseReasoningEffort(options.effort);
-    if (options.dwsProfile) config.runtime.dwsProfile = options.dwsProfile;
+    config.channel.command = options.dwsCommand;
+    config.runtime.command = options.codexCommand;
+    config.runtime.model = options.model;
+    config.runtime.effort = parseReasoningEffort(options.effort);
+    if (options.dwsProfile) config.channel.profile = options.dwsProfile;
     await writeInitialConfig(config, path);
     const store = new Store(statePath(options.instance));
     store.setChannelConnection({
-      channelId: 'dingtalk', profileId: 'default', label: 'DingTalk DWS',
+      channelId: config.channel.id, profileId: config.channel.profileId, label: 'DingTalk DWS',
       state: 'stopped', ownerPid: null,
     });
     store.setRuntimeAdapter({
-      runtimeId: 'codex', label: 'Codex App Server', state: 'stopped',
-      model: config.runtime.codexModel,
+      runtimeId: config.runtime.id, label: 'Codex CLI', state: 'stopped',
+      model: config.runtime.model,
     });
     store.close();
     print({ ok: true, instance: options.instance, configPath: path, statePath: statePath(options.instance) });
@@ -73,27 +71,27 @@ configCommand.command('model')
     if (options.model !== undefined) {
       const model = String(options.model).trim();
       if (!model) throw new Error('--model 不能为空');
-      config.runtime.codexModel = model;
+      config.runtime.model = model;
     }
-    if (options.effort !== undefined) config.runtime.codexEffort = parseReasoningEffort(options.effort);
+    if (options.effort !== undefined) config.runtime.effort = parseReasoningEffort(options.effort);
     await writeConfig(config);
     print({
       ok: true,
       instance: options.instance,
-      model: config.runtime.codexModel,
-      effort: config.runtime.codexEffort,
+      model: config.runtime.model,
+      effort: config.runtime.effort,
       restartRequired: true,
     });
   });
 
 program.command('doctor')
-  .description('只读验证配置、DWS 状态和固定 Codex App Server 协议')
+  .description('只读验证配置、DWS 状态和 Codex CLI command/resume 能力')
   .requiredOption('--instance <name>', 'instance 名称')
   .action(async (options) => {
     const config = await loadConfig(options.instance);
-    const [dws, protocol] = await Promise.all([
+    const [dws, runtime] = await Promise.all([
       dwsDoctor(config),
-      verifyCodexProtocol(config, join(instanceDir(options.instance), 'protocol')),
+      verifyCodexCommand(config),
     ]);
     const eventStatus = dws.eventStatus as Record<string, unknown>;
     const bus = eventStatus?.bus as Record<string, unknown> | undefined;
@@ -104,12 +102,13 @@ program.command('doctor')
       dwsVersion: dws.version,
       dwsBusState: entry?.state ?? 'unknown',
       dwsSubscriptions: Array.isArray(eventStatus?.subscriptions) ? eventStatus.subscriptions.length : 0,
-      codexVersion: protocol.codexVersion,
-      protocolSchemaSha256: protocol.schemaSha256,
-      codexModel: config.runtime.codexModel,
-      codexEffort: config.runtime.codexEffort,
-      quietWindowMilliseconds: config.runtime.quietWindowMilliseconds,
-      maxBatchMessages: config.runtime.maxBatchMessages,
+      runtimeId: config.runtime.id,
+      runtimeVersion: runtime.version,
+      runtimeFingerprintPrefix: runtime.fingerprint.slice(0, 20),
+      model: config.runtime.model,
+      effort: config.runtime.effort,
+      quietWindowMilliseconds: config.scheduling.quietWindowMilliseconds,
+      maxBatchMessages: config.scheduling.maxBatchMessages,
     });
   });
 
@@ -138,9 +137,9 @@ conversation.command('add')
         title: options.title,
         responsibility: options.responsibility ?? config.identity.role,
         mode: options.mode,
-        channelId: 'dingtalk',
-        channelProfileId: 'default',
-        runtimeId: 'codex',
+        channelId: config.channel.id,
+        channelProfileId: config.channel.profileId,
+        runtimeId: config.runtime.id,
         workerWarmSeconds: options.warmSeconds,
       });
       print(publicConversation(created));
@@ -253,18 +252,25 @@ program.command('run')
   .action(async (options) => runHost(await loadConfig(options.instance)));
 
 program.command('verify')
-  .description('不连接 DWS、不发送消息；验证指定会话的 thread start/resume/bootstrap/结构化 silent turn')
+  .description('不连接 DWS、不发送消息；验证指定会话的 runtime CLI start/resume/结构化 silent turn')
   .requiredOption('--instance <name>', 'instance 名称')
   .requiredOption('--id <id>', 'conversation UUID')
   .action(async (options) => {
     const config = await loadConfig(options.instance);
     const store = new Store(statePath(options.instance));
-    let session: AppServerSession | null = null;
+    let session: CodexCommandSession | null = null;
     try {
       const target = store.getConversation(options.id);
       if (!target) throw new Error(`conversation 不存在：${options.id}`);
-      const protocol = await verifyCodexProtocol(config, join(instanceDir(options.instance), 'protocol'));
-      session = new AppServerSession(config, target, protocol, store);
+      const runtime = await verifyCodexCommand(config);
+      store.setRuntimeAdapter({
+        runtimeId: config.runtime.id,
+        label: 'Codex CLI',
+        state: 'stopped',
+        model: config.runtime.model,
+        protocolFingerprint: runtime.fingerprint,
+      });
+      session = new CodexCommandSession(config, target, runtime, store);
       const startup = await session.start();
       const canary = await session.runDecision(`
 [宿主离线验证事件；不是钉钉消息]
@@ -278,12 +284,11 @@ program.command('verify')
         ok: true,
         conversationId: target.id,
         startupMode: startup.mode,
-        threadIdPrefix: startup.threadId.slice(0, 12),
-        bootstrapPerformed: startup.bootstrapPerformed,
-        canaryTurnIdPrefix: canary.turnId.slice(0, 12),
+        providerSessionIdPrefix: session.currentSessionId?.slice(0, 12) ?? null,
+        hostRunIdPrefix: canary.turnId.slice(0, 12),
         action: canary.decision.action,
-        model: config.runtime.codexModel,
-        effort: config.runtime.codexEffort,
+        model: config.runtime.model,
+        effort: config.runtime.effort,
       });
     } finally {
       await session?.stop().catch(() => undefined);

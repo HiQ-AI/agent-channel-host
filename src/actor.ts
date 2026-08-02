@@ -173,7 +173,7 @@ export class ConversationWorker {
       const events = this.store.claimPendingEvents(
         this.conversation,
         this.workerId,
-        this.config.runtime.maxBatchMessages,
+        this.config.scheduling.maxBatchMessages,
         Date.now(),
         Math.max(300_000, this.config.runtime.turnTimeoutSeconds * 2_000),
       );
@@ -243,10 +243,10 @@ export class ConversationWorker {
   }
 
   private async waitForQuietWindow(): Promise<void> {
-    if (this.config.runtime.quietWindowMilliseconds === 0) return;
+    if (this.config.scheduling.quietWindowMilliseconds === 0) return;
     while (!this.closed) {
       const generation = this.signalGeneration;
-      const remaining = this.lastSignalAtMs + this.config.runtime.quietWindowMilliseconds - Date.now();
+      const remaining = this.lastSignalAtMs + this.config.scheduling.quietWindowMilliseconds - Date.now();
       if (remaining > 0) await delay(remaining);
       if (generation === this.signalGeneration) return;
     }

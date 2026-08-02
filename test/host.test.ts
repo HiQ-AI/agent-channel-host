@@ -78,8 +78,8 @@ class FakeRuntime implements RuntimeAdapter {
 
 test('ready signal 将 burst 聚合为一次 turn，warm TTL 后释放 Worker', async () => {
   const config = defaultConfig('scheduler-burst', '.', 'Agent', 'role');
-  config.runtime.quietWindowMilliseconds = 20;
-  config.runtime.maxBatchMessages = 20;
+  config.scheduling.quietWindowMilliseconds = 20;
+  config.scheduling.maxBatchMessages = 20;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'direct', externalId: 'burst-user', title: 'Burst 私聊', responsibility: '回答问题', mode: 'shadow',
@@ -118,7 +118,7 @@ test('ready signal 将 burst 聚合为一次 turn，warm TTL 后释放 Worker', 
 
 test('Host 在 Worker 启动中停止时只关闭一次且不再投递 signal', async () => {
   const config = defaultConfig('scheduler-stop-starting', '.', 'Agent', 'role');
-  config.runtime.quietWindowMilliseconds = 0;
+  config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'direct', externalId: 'starting-user', title: 'Starting 私聊', responsibility: '回答问题', mode: 'shadow',
@@ -152,7 +152,7 @@ test('Host 在 Worker 启动中停止时只关闭一次且不再投递 signal', 
 
 test('active turn 内多条新消息只 cancel 一次，并把原 claim 与新消息重新合并', async () => {
   const config = defaultConfig('scheduler-cancel', '.', 'Agent', 'role');
-  config.runtime.quietWindowMilliseconds = 0;
+  config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'direct', externalId: 'cancel-user', title: 'Cancel 私聊', responsibility: '回答问题', mode: 'shadow',
@@ -192,7 +192,7 @@ test('active turn 内多条新消息只 cancel 一次，并把原 claim 与新�
 
 test('启动 reconciliation 释放旧 claim 并只唤醒有 pending work 的 conversation', async () => {
   const config = defaultConfig('scheduler-reconcile', '.', 'Agent', 'role');
-  config.runtime.quietWindowMilliseconds = 0;
+  config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const pending = store.addConversation({
     kind: 'direct', externalId: 'pending-user', title: 'Pending 私聊', responsibility: '回答问题', mode: 'shadow',

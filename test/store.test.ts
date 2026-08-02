@@ -114,7 +114,7 @@ test('lease 只允许一个存活 owner', () => {
 
 test('DWS consumer 参数固定读取 flatten NDJSON stdout', () => {
   const config = defaultConfig('test', '.', 'Agent', 'role');
-  config.runtime.dwsProfile = 'corp:user';
+  config.channel.profile = 'corp:user';
   assert.deepEqual(consumerArgs('user_im_message_receive_group_all', config), [
     'event', 'consume', 'user_im_message_receive_group_all', '--ephemeral', '--flatten', '--format', 'ndjson',
     '--profile', 'corp:user',

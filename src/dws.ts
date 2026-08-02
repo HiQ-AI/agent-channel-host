@@ -21,7 +21,7 @@ export interface RecentGroupHistory {
 
 export async function runDwsJson(config: HostConfig, args: string[], timeoutMs = 30_000): Promise<unknown> {
   const fullArgs = [...args, '--format', 'json', ...profileArgs(config)];
-  const command = await resolveCommand(config.runtime.dwsCommand);
+  const command = await resolveCommand(config.channel.command);
   const result = await execResolved(command, fullArgs, {
     cwd: config.runtime.cwd,
     encoding: 'utf8',
@@ -104,7 +104,7 @@ export function formatDwsLocalTime(value: Date): string {
 }
 
 export async function dwsDoctor(config: HostConfig): Promise<Record<string, unknown>> {
-  const command = await resolveCommand(config.runtime.dwsCommand);
+  const command = await resolveCommand(config.channel.command);
   const version = await execResolved(command, ['--version'], {
     cwd: config.runtime.cwd,
     encoding: 'utf8',
@@ -180,7 +180,7 @@ export class DwsEventOwner {
   ) {}
 
   async start(): Promise<void> {
-    this.command = await resolveCommand(this.config.runtime.dwsCommand);
+    this.command = await resolveCommand(this.config.channel.command);
     const busArgs = [
       'event', 'consume', GROUP_EVENT, '--foreground', '--format', 'ndjson', ...profileArgs(this.config),
     ];
@@ -287,11 +287,16 @@ export class DwsSender {
 }
 
 export class DwsChannelAdapter implements ChannelAdapter {
-  readonly descriptor = { channelId: 'dingtalk', profileId: 'default', label: 'DingTalk DWS' };
+  readonly descriptor;
   private owner: DwsEventOwner | null = null;
   private readonly sender: DwsSender;
 
   constructor(private readonly config: HostConfig) {
+    this.descriptor = {
+      channelId: config.channel.id,
+      profileId: config.channel.profileId,
+      label: 'DingTalk DWS',
+    };
     this.sender = new DwsSender(config);
   }
 
@@ -320,7 +325,7 @@ export class DwsChannelAdapter implements ChannelAdapter {
 }
 
 function profileArgs(config: HostConfig): string[] {
-  return config.runtime.dwsProfile ? ['--profile', config.runtime.dwsProfile] : [];
+  return config.channel.profile ? ['--profile', config.channel.profile] : [];
 }
 
 function text(value: unknown): string | null {

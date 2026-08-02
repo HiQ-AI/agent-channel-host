@@ -53,13 +53,6 @@ export interface Decision {
   delegation: 'not_required' | 'started';
 }
 
-export interface CodexProtocolIdentity {
-  codexVersion: string;
-  schemaSha256: string;
-  schemaPath: string;
-  command: import('./command.js').ResolvedCommand;
-}
-
 export interface SessionRecord {
   conversationId: string;
   runtimeId: string;

@@ -185,7 +185,7 @@ export class EventDrivenScheduler {
 
 export async function runHost(config: HostConfig): Promise<void> {
   const store = new Store(statePath(config.instance));
-  const lock = new OwnerLock(config.instance, config.runtime.dwsProfile);
+  const lock = new OwnerLock(config.instance, config.channel.profile);
   const log = (record: Record<string, unknown>) => {
     process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), instance: config.instance, ...record })}\n`);
   };
@@ -216,16 +216,16 @@ export async function runHost(config: HostConfig): Promise<void> {
     leaseTimer.unref();
 
     store.setRuntimeAdapter({
-      runtimeId: 'codex', label: 'Codex App Server', state: 'starting',
-      model: config.runtime.codexModel,
+      runtimeId: config.runtime.id, label: 'Codex CLI', state: 'starting',
+      model: config.runtime.model,
     });
     let runtime: CodexRuntimeAdapter;
     try {
       runtime = await CodexRuntimeAdapter.create(config, store);
     } catch (error) {
       store.setRuntimeAdapter({
-        runtimeId: 'codex', label: 'Codex App Server', state: 'error',
-        model: config.runtime.codexModel, error: (error as Error).message,
+        runtimeId: config.runtime.id, label: 'Codex CLI', state: 'error',
+        model: config.runtime.model, error: (error as Error).message,
       });
       throw error;
     }
@@ -313,8 +313,8 @@ export async function runHost(config: HostConfig): Promise<void> {
     });
     if (runtimeInitialized) {
       store.setRuntimeAdapter({
-        runtimeId: 'codex', label: 'Codex App Server', state: fatalError ? 'error' : 'stopped',
-        model: config.runtime.codexModel, error: fatalError?.message ?? null,
+        runtimeId: config.runtime.id, label: 'Codex CLI', state: fatalError ? 'error' : 'stopped',
+        model: config.runtime.model, error: fatalError?.message ?? null,
       });
     }
     store.releaseLease('host', lock.ownerId);

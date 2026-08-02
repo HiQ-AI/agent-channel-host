@@ -4,13 +4,22 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { defaultConfig, loadConfig } from '../src/config.js';
 
-test('新旧配置都得到 gpt-5.6-sol low 默认值', async () => {
+test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   const current = defaultConfig('model-defaults', '.', 'Agent', 'role');
-  assert.equal(current.runtime.codexModel, 'gpt-5.6-sol');
-  assert.equal(current.runtime.codexEffort, 'low');
-  assert.equal(current.runtime.quietWindowMilliseconds, 300);
-  assert.equal(current.runtime.maxBatchMessages, 20);
+  assert.equal(current.version, 2);
+  assert.deepEqual(current.channel, {
+    id: 'dingtalk', profileId: 'default', command: 'dws',
+  });
+  assert.equal(current.runtime.id, 'codex');
+  assert.equal(current.runtime.command, 'codex');
+  assert.equal(current.runtime.version, 'codex-cli 0.145.0');
+  assert.equal(current.runtime.model, 'gpt-5.6-sol');
+  assert.equal(current.runtime.effort, 'low');
+  assert.equal(current.scheduling.quietWindowMilliseconds, 300);
+  assert.equal(current.scheduling.maxBatchMessages, 20);
+});
 
+test('v1 App Server 配置 fail closed，不静默迁移', async () => {
   const root = resolve('.test-config-state');
   const path = resolve(root, 'legacy.yaml');
   await rm(root, { recursive: true, force: true });
@@ -27,17 +36,11 @@ runtime:
   cwd: .
   dwsCommand: dws
   codexCommand: codex
-  startupTimeoutSeconds: 120
-  turnTimeoutSeconds: 180
 protocol:
   codexVersion: codex-cli 0.145.0
   schemaSha256: 1f66700d1cc3de4a5004e5614a6098878b405c7e7c5f8c9be97fc900d0ad6c68
 `.trimStart(), 'utf8');
-    const legacy = await loadConfig('legacy', path);
-    assert.equal(legacy.runtime.codexModel, 'gpt-5.6-sol');
-    assert.equal(legacy.runtime.codexEffort, 'low');
-    assert.equal(legacy.runtime.quietWindowMilliseconds, 300);
-    assert.equal(legacy.runtime.maxBatchMessages, 20);
+    await assert.rejects(loadConfig('legacy', path), /version=1.*显式迁移为 version=2/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

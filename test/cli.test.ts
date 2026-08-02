@@ -35,8 +35,8 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
       ok: true, instance: 'test', model: 'gpt-5.6-terra', effort: 'medium', restartRequired: true,
     });
     const configText = await readFile(join(root, 'instances', 'test', 'config.yaml'), 'utf8');
-    assert.match(configText, /codexModel: gpt-5\.6-terra/);
-    assert.match(configText, /codexEffort: medium/);
+    assert.match(configText, /model: gpt-5\.6-terra/);
+    assert.match(configText, /effort: medium/);
 
     await assert.rejects(execFileAsync(process.execPath, [
       cli, 'config', 'model', '--instance', 'test', '--effort', 'light',
@@ -47,8 +47,8 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
       '--model', 'gpt-5.6-terra', '--effort', 'high',
     ], { encoding: 'utf8', env });
     const customConfig = await readFile(join(root, 'instances', 'custom-model', 'config.yaml'), 'utf8');
-    assert.match(customConfig, /codexModel: gpt-5\.6-terra/);
-    assert.match(customConfig, /codexEffort: high/);
+    assert.match(customConfig, /model: gpt-5\.6-terra/);
+    assert.match(customConfig, /effort: high/);
 
     const added = await execFileAsync(process.execPath, [
       cli, 'conversation', 'add', '--instance', 'test', '--kind', 'direct', '--title', '测试私聊',

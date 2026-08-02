@@ -5,7 +5,7 @@ import { Store } from '../src/store.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { ConversationWorker } from '../src/actor.js';
 import type { AgentSession, ChannelAdapter } from '../src/contracts.js';
-import type { DecisionRun } from '../src/app-server.js';
+import type { DecisionRun } from '../src/types.js';
 
 class FakeSession implements AgentSession {
   currentSessionId = 'thread-fixed-123456789';
@@ -47,7 +47,7 @@ class FakeSession implements AgentSession {
 
 test('新消息 durable admission 后中断 active turn，并在同一固定 session 开新 turn', async () => {
   const config = defaultConfig('actor', '.', 'Agent', 'role');
-  config.runtime.quietWindowMilliseconds = 0;
+  config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'group', externalId: 'cid-actor', title: 'Actor 群', responsibility: '回答问题', mode: 'reply',
@@ -187,7 +187,7 @@ test('群 onboarding 发送失败后以同一 UUID 重试', async () => {
 
 test('实施任务派发回执不占用 actor，可继续处理下一条群消息', async () => {
   const config = defaultConfig('delegation-actor', '.', 'Agent', 'role');
-  config.runtime.quietWindowMilliseconds = 0;
+  config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'group', externalId: 'cid-delegation', title: '委派群', responsibility: '参与讨论', mode: 'shadow',

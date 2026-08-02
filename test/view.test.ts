@@ -36,7 +36,7 @@ test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完�
     claimedToSequence: 1,
   });
   store.setRuntimeAdapter({
-    runtimeId: 'codex', label: 'Codex App Server', state: 'ready',
+    runtimeId: 'codex', label: 'Codex CLI', state: 'ready',
     model: 'gpt-test', protocolFingerprint: 'codex:test',
   });
   store.setChannelConnection({
