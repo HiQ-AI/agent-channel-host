@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
 import type { HostConfig } from './config.js';
-import type { Conversation, Decision, ProtocolIdentity, SessionRecord } from './types.js';
+import type { CodexProtocolIdentity, Conversation, Decision, DecisionRun, SessionRecord } from './types.js';
 import type { Store } from './store.js';
 import { stopChild, withTimeout } from './process-utils.js';
 import { commandArgs } from './command.js';
@@ -15,12 +15,7 @@ type Waiter = {
   reject: (error: Error) => void;
 };
 
-export interface DecisionRun {
-  turnId: string;
-  status: 'completed' | 'interrupted';
-  decision: Decision | null;
-  subagentThreadId: string | null;
-}
+export type { DecisionRun } from './types.js';
 
 export interface TurnEvidence {
   spawnedSubagentThreadIds: string[];
@@ -63,13 +58,21 @@ export class AppServerSession {
   constructor(
     private readonly config: HostConfig,
     private readonly conversation: Conversation,
-    private readonly protocol: ProtocolIdentity,
+    private readonly protocol: CodexProtocolIdentity,
     private readonly store: Store,
     private readonly observeNotification: (method: string, params: JsonObject) => void = () => undefined,
   ) {}
 
   get currentThreadId(): string | null {
     return this.threadId;
+  }
+
+  get currentSessionId(): string | null {
+    return this.threadId;
+  }
+
+  get processId(): number | null {
+    return this.child?.pid ?? null;
   }
 
   hasBackgroundWork(): boolean {
@@ -96,7 +99,7 @@ export class AppServerSession {
     });
 
     await this.request('initialize', {
-      clientInfo: { name: 'dingtalk-codex-host', title: 'DingTalk Codex Host', version: '0.1.0' },
+      clientInfo: { name: 'dingtalk-codex-host', title: 'DingTalk Codex Host', version: '0.2.0' },
     });
     this.notify('initialized', {});
     await this.assertModelAvailable();
@@ -109,14 +112,14 @@ export class AppServerSession {
   private async resume(existing: SessionRecord): Promise<{ mode: 'resumed'; threadId: string; bootstrapPerformed: false }> {
     if (
       existing.lifecycle !== 'ready'
-      || existing.codexVersion !== this.protocol.codexVersion
-      || existing.schemaSha256 !== this.protocol.schemaSha256
+      || existing.runtimeId !== 'codex'
+      || existing.protocolFingerprint !== codexProtocolFingerprint(this.protocol)
       || existing.runtimeCwd !== this.config.runtime.cwd
     ) {
       throw new Error('已持久化 session 与当前 runtime/protocol 不兼容，拒绝静默创建新 thread');
     }
     const result = await this.request('thread/resume', {
-      threadId: existing.threadId,
+      threadId: existing.providerSessionId,
       model: this.config.runtime.codexModel,
       cwd: this.config.runtime.cwd,
       approvalPolicy: 'never',
@@ -125,7 +128,7 @@ export class AppServerSession {
     }) as JsonObject;
     const thread = result.thread as JsonObject | undefined;
     const returnedId = typeof thread?.id === 'string' ? thread.id : null;
-    if (!returnedId || returnedId !== existing.threadId) throw new Error('thread/resume 未精确恢复原 thread');
+    if (!returnedId || returnedId !== existing.providerSessionId) throw new Error('thread/resume 未精确恢复原 thread');
     this.threadId = returnedId;
     await this.assertLoaded();
     this.store.saveSession({ ...existing, updatedAt: new Date().toISOString() });
@@ -148,10 +151,11 @@ export class AppServerSession {
     const now = new Date().toISOString();
     const session: SessionRecord = {
       conversationId: this.conversation.id,
-      threadId,
+      runtimeId: 'codex',
+      providerSessionId: threadId,
+      generation: 1,
       lifecycle: 'provisioning',
-      codexVersion: this.protocol.codexVersion,
-      schemaSha256: this.protocol.schemaSha256,
+      protocolFingerprint: codexProtocolFingerprint(this.protocol),
       runtimeCwd: this.config.runtime.cwd,
       bootstrapTurnId: null,
       createdAt: now,
@@ -377,6 +381,10 @@ export class AppServerSession {
     this.child = null;
     this.backgroundThreadIds.clear();
   }
+}
+
+export function codexProtocolFingerprint(protocol: CodexProtocolIdentity): string {
+  return `${protocol.codexVersion}:${protocol.schemaSha256}`;
 }
 
 export function validateModelSelection(model: string, effort: string, rawModels: unknown): void {

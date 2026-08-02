@@ -12,6 +12,8 @@ runtime:
   codexEffort: low
   startupTimeoutSeconds: 120
   turnTimeoutSeconds: 180
+  quietWindowMilliseconds: 300
+  maxBatchMessages: 20
 protocol:
   codexVersion: codex-cli 0.145.0
   schemaSha256: 1f66700d1cc3de4a5004e5614a6098878b405c7e7c5f8c9be97fc900d0ad6c68

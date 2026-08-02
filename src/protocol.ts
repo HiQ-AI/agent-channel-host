@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { HostConfig } from './config.js';
-import type { ProtocolIdentity } from './types.js';
+import type { CodexProtocolIdentity } from './types.js';
 import { execResolved, resolveCommand } from './command.js';
 const SCHEMA_FILE = 'codex_app_server_protocol.schemas.json';
 
-export async function verifyCodexProtocol(config: HostConfig, protocolRoot: string): Promise<ProtocolIdentity> {
+export async function verifyCodexProtocol(config: HostConfig, protocolRoot: string): Promise<CodexProtocolIdentity> {
   const command = await resolveCommand(config.runtime.codexCommand);
   const version = await execResolved(command, ['--version'], {
     cwd: config.runtime.cwd,

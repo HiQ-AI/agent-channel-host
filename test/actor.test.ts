@@ -2,12 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultConfig } from '../src/config.js';
 import { Store } from '../src/store.js';
-import { normalizeDwsEvent, type DwsSender } from '../src/dws.js';
-import { ConversationActor, type ResidentSession } from '../src/actor.js';
+import { normalizeDwsEvent } from '../src/dws.js';
+import { ConversationWorker } from '../src/actor.js';
+import type { AgentSession, ChannelAdapter } from '../src/contracts.js';
 import type { DecisionRun } from '../src/app-server.js';
 
-class FakeSession implements ResidentSession {
-  currentThreadId = 'thread-fixed-123456789';
+class FakeSession implements AgentSession {
+  currentSessionId = 'thread-fixed-123456789';
+  processId = 1234;
   calls = 0;
   interrupts = 0;
   private resolveActive: ((value: DecisionRun) => void) | null = null;
@@ -45,6 +47,7 @@ class FakeSession implements ResidentSession {
 
 test('新消息 durable admission 后中断 active turn，并在同一固定 session 开新 turn', async () => {
   const config = defaultConfig('actor', '.', 'Agent', 'role');
+  config.runtime.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'group', externalId: 'cid-actor', title: 'Actor 群', responsibility: '回答问题', mode: 'reply',
@@ -57,27 +60,28 @@ test('新消息 durable admission 后中断 active turn，并在同一固定 ses
   const first = admitted('evt-1');
   const session = new FakeSession();
   let sent = 0;
-  const sender = { send: async () => { sent += 1; } } as unknown as DwsSender;
+  const sender = { send: async () => { sent += 1; } } as Pick<ChannelAdapter, 'send'>;
   const logs: Array<Record<string, unknown>> = [];
-  const actor = new ConversationActor(config, conversation, session, store, sender, (record) => logs.push(record));
-  await actor.start();
-  actor.submit(first);
-  await new Promise((resolve) => setImmediate(resolve));
+  const worker = new ConversationWorker(config, conversation, session, store, sender, (record) => logs.push(record));
+  await worker.start();
+  worker.signal();
+  await waitFor(() => session.calls === 1);
   const second = admitted('evt-2');
-  actor.submit(second);
+  worker.signal();
   await waitFor(() => sent === 1);
   assert.equal(session.interrupts, 1);
   assert.equal(session.calls, 2);
   assert.equal(sent, 1);
-  assert.equal(store.status().processed, 1);
+  assert.equal(store.status().processed, 2);
   assert.equal(store.status().submitted, 1);
-  assert.ok(logs.some((record) => record.turnStatus === 'interrupted'));
-  await actor.stop();
+  assert.ok(logs.some((record) => record.type === 'BATCH_INTERRUPTED'));
+  await worker.stop();
   store.close();
 });
 
-class OnboardingSession implements ResidentSession {
-  currentThreadId = 'thread-onboarding-123456789';
+class OnboardingSession implements AgentSession {
+  currentSessionId = 'thread-onboarding-123456789';
+  processId = 5678;
   decisionCalls = 0;
 
   async start(): Promise<void> {}
@@ -108,10 +112,12 @@ test('群 onboarding 在 shadow 只准备，切 reply 重启后用同一 UUID �
   });
   const firstSession = new OnboardingSession();
   const sent: Array<{ text: string; uuid: string }> = [];
-  const sender = { send: async (_conversation: unknown, record: { text: string; uuid: string }) => { sent.push(record); } } as unknown as DwsSender;
+  const sender = {
+    send: async (_conversation: unknown, record: { text: string; uuid: string }) => { sent.push(record); },
+  } as Pick<ChannelAdapter, 'send'>;
   const historyLoads: number[] = [];
-  const firstActor = new ConversationActor(
-    config, shadow, firstSession, store, sender, () => undefined, () => undefined,
+  const firstActor = new ConversationWorker(
+    config, shadow, firstSession, store, sender, () => undefined, () => undefined, () => undefined,
     async () => {
       historyLoads.push(1);
       return { count: 2, prompt: '{"content":"近期讨论"}' };
@@ -128,8 +134,8 @@ test('群 onboarding 在 shadow 只准备，切 reply 重启后用同一 UUID �
   store.setConversationMode(shadow.id, 'reply');
   const reply = store.getConversation(shadow.id)!;
   const resumedSession = new OnboardingSession();
-  const secondActor = new ConversationActor(
-    config, reply, resumedSession, store, sender, () => undefined, () => undefined,
+  const secondActor = new ConversationWorker(
+    config, reply, resumedSession, store, sender, () => undefined, () => undefined, () => undefined,
     async () => { throw new Error('已准备 onboarding 不应重复读取历史'); },
   );
   await secondActor.start();
@@ -139,8 +145,8 @@ test('群 onboarding 在 shadow 只准备，切 reply 重启后用同一 UUID �
   assert.equal(store.getGroupOnboarding(shadow.id)?.state, 'submitted');
   await secondActor.stop();
 
-  const thirdActor = new ConversationActor(
-    config, reply, new OnboardingSession(), store, sender, () => undefined, () => undefined,
+  const thirdActor = new ConversationWorker(
+    config, reply, new OnboardingSession(), store, sender, () => undefined, () => undefined, () => undefined,
     async () => { throw new Error('已完成 onboarding 不应读取历史'); },
   );
   await thirdActor.start();
@@ -164,14 +170,14 @@ test('群 onboarding 发送失败后以同一 UUID 重试', async () => {
       uuids.push(record.uuid);
       if (attempts === 1) throw new Error('模拟发送失败');
     },
-  } as unknown as DwsSender;
+  } as Pick<ChannelAdapter, 'send'>;
 
-  const first = new ConversationActor(config, conversation, new OnboardingSession(), store, sender, () => undefined);
+  const first = new ConversationWorker(config, conversation, new OnboardingSession(), store, sender, () => undefined);
   await first.start();
   assert.equal(store.getGroupOnboarding(conversation.id)?.state, 'failed');
   await first.stop();
 
-  const second = new ConversationActor(config, conversation, new OnboardingSession(), store, sender, () => undefined);
+  const second = new ConversationWorker(config, conversation, new OnboardingSession(), store, sender, () => undefined);
   await second.start();
   assert.equal(store.getGroupOnboarding(conversation.id)?.state, 'submitted');
   assert.deepEqual(uuids, ['stable-intro-uuid', 'stable-intro-uuid']);
@@ -181,6 +187,7 @@ test('群 onboarding 发送失败后以同一 UUID 重试', async () => {
 
 test('实施任务派发回执不占用 actor，可继续处理下一条群消息', async () => {
   const config = defaultConfig('delegation-actor', '.', 'Agent', 'role');
+  config.runtime.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'group', externalId: 'cid-delegation', title: '委派群', responsibility: '参与讨论', mode: 'shadow',
@@ -189,8 +196,9 @@ test('实施任务派发回执不占用 actor，可继续处理下一条群消�
   store.finishGroupOnboardingIntro(conversation.id, 'submitted', null);
   let calls = 0;
   let workerFinished = false;
-  const session: ResidentSession = {
-    currentThreadId: 'thread-delegation-123456789',
+  const session: AgentSession = {
+    currentSessionId: 'thread-delegation-123456789',
+    processId: 9012,
     start: async () => undefined,
     interruptActive: async () => false,
     stop: async () => undefined,
@@ -212,21 +220,23 @@ test('实施任务派发回执不占用 actor，可继续处理下一条群消�
       };
     },
   };
-  const actor = new ConversationActor(
-    config, conversation, session, store, { send: async () => undefined } as unknown as DwsSender, () => undefined,
+  const worker = new ConversationWorker(
+    config, conversation, session, store, { send: async () => undefined }, () => undefined,
   );
   const admitted = (id: string) => store.admitEvent(conversation, normalizeDwsEvent({
     type: 'user_im_message_receive_group_all', event_id: id, conversation_id: 'cid-delegation', content: id,
   })!).event!;
-  await actor.start();
-  actor.submit(admitted('implementation-event'));
+  await worker.start();
+  admitted('implementation-event');
+  worker.signal();
   await waitFor(() => calls === 1);
-  actor.submit(admitted('follow-up-event'));
+  admitted('follow-up-event');
+  worker.signal();
   await waitFor(() => calls === 2 && store.status().processed === 2);
-  assert.equal(actor.isBusy(), true);
+  assert.equal(worker.isBusy(), true);
   workerFinished = true;
-  await waitFor(() => !actor.isBusy());
-  await actor.stop();
+  await waitFor(() => !worker.isBusy());
+  await worker.stop();
   store.close();
 });
 

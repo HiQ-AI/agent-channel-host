@@ -8,6 +8,8 @@ test('新旧配置都得到 gpt-5.6-sol low 默认值', async () => {
   const current = defaultConfig('model-defaults', '.', 'Agent', 'role');
   assert.equal(current.runtime.codexModel, 'gpt-5.6-sol');
   assert.equal(current.runtime.codexEffort, 'low');
+  assert.equal(current.runtime.quietWindowMilliseconds, 300);
+  assert.equal(current.runtime.maxBatchMessages, 20);
 
   const root = resolve('.test-config-state');
   const path = resolve(root, 'legacy.yaml');
@@ -34,6 +36,8 @@ protocol:
     const legacy = await loadConfig('legacy', path);
     assert.equal(legacy.runtime.codexModel, 'gpt-5.6-sol');
     assert.equal(legacy.runtime.codexEffort, 'low');
+    assert.equal(legacy.runtime.quietWindowMilliseconds, 300);
+    assert.equal(legacy.runtime.maxBatchMessages, 20);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

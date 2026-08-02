@@ -13,7 +13,7 @@ const config = defaultConfig('resume-canary', root, '验证员工', '验证空�
 const store = new Store(join(root, 'state.sqlite3'));
 const conversation = store.addConversation({
   kind: 'direct', externalId: 'resume-canary-user', title: '恢复 canary',
-  responsibility: '只验证 thread 恢复', mode: 'shadow', sessionLifecycle: 'idle', idleTimeoutMinutes: 5,
+  responsibility: '只验证 thread 恢复', mode: 'shadow', workerWarmSeconds: 0,
 });
 let first;
 let second;

@@ -1,23 +1,27 @@
 export type ConversationKind = 'group' | 'direct';
 export type ConversationMode = 'shadow' | 'reply';
-export type ConversationLifecycle = 'resident' | 'idle';
-export const MAX_IDLE_TIMEOUT_MINUTES = 35_791;
+export const DEFAULT_WORKER_WARM_SECONDS = 30;
+export const MAX_WORKER_WARM_SECONDS = 2_147_483;
 
 export interface Conversation {
   id: string;
+  channelId: string;
+  channelProfileId: string;
   kind: ConversationKind;
   externalId: string;
   title: string;
   responsibility: string;
   mode: ConversationMode;
-  sessionLifecycle: ConversationLifecycle;
-  idleTimeoutMinutes: number;
+  runtimeId: string;
+  workerWarmSeconds: number;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface NormalizedEvent {
+  channelId: string;
+  channelProfileId: string;
   fingerprint: string;
   eventId: string | null;
   messageId: string | null;
@@ -49,7 +53,7 @@ export interface Decision {
   delegation: 'not_required' | 'started';
 }
 
-export interface ProtocolIdentity {
+export interface CodexProtocolIdentity {
   codexVersion: string;
   schemaSha256: string;
   schemaPath: string;
@@ -58,13 +62,39 @@ export interface ProtocolIdentity {
 
 export interface SessionRecord {
   conversationId: string;
-  threadId: string;
+  runtimeId: string;
+  providerSessionId: string;
+  generation: number;
   lifecycle: 'provisioning' | 'ready' | 'failed';
-  codexVersion: string;
-  schemaSha256: string;
+  protocolFingerprint: string;
   runtimeCwd: string;
   bootstrapTurnId: string | null;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface DecisionRun {
+  turnId: string;
+  status: 'completed' | 'interrupted';
+  decision: Decision | null;
+  subagentThreadId: string | null;
+}
+
+export type WorkerState = 'starting' | 'running' | 'warm' | 'stopped' | 'error';
+export type ChannelConnectionState = 'starting' | 'ready' | 'stopped' | 'error';
+
+export interface RuntimeWorkerRecord {
+  conversationId: string;
+  workerId: string | null;
+  runtimeId: string;
+  state: WorkerState;
+  processId: number | null;
+  claimedFromSequence: number | null;
+  claimedToSequence: number | null;
+  lastSignalAt: string | null;
+  warmUntil: string | null;
+  error: string | null;
+  startedAt: string | null;
   updatedAt: string;
 }
 

@@ -27,6 +27,8 @@ const configSchema = z.object({
     dwsProfile: z.string().optional(),
     startupTimeoutSeconds: z.number().int().positive().default(120),
     turnTimeoutSeconds: z.number().int().positive().default(180),
+    quietWindowMilliseconds: z.number().int().min(0).max(60_000).default(300),
+    maxBatchMessages: z.number().int().positive().max(200).default(20),
   }),
   protocol: z.object({
     codexVersion: z.string().min(1),
@@ -53,6 +55,8 @@ export function defaultConfig(instance: string, cwd: string, name: string, role:
       codexEffort: DEFAULT_CODEX_EFFORT,
       startupTimeoutSeconds: 120,
       turnTimeoutSeconds: 180,
+      quietWindowMilliseconds: 300,
+      maxBatchMessages: 20,
     },
     protocol: {
       codexVersion: CURRENT_CODEX_VERSION,

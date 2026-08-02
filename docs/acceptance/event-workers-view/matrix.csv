@@ -1,0 +1,13 @@
+case_id,领域,用例,round-1
+EWV-001,Store,v3 数据无损迁移到中立 route/session/worker schema,PASS
+EWV-002,Store,事件事务提交后可按 conversation claim 且同一消息不被重复 claim,PASS
+EWV-003,Store,中断或 Host 重启可释放 claimed work 并 reconciliation pending,PASS
+EWV-004,扩展边界,不同 channel/profile 可登记相同 external ID 且 runtime binding 独立,PASS
+EWV-005,Worker,连续消息 quiet window 聚合为一次 runtime turn,PASS
+EWV-006,Worker,active turn 多条新增消息只触发一次 cancel 并重新合并全部输入,PASS
+EWV-007,Worker,warm TTL 使用一次性 timer 释放进程且固定 session 可恢复,PASS
+EWV-008,Host,启动只恢复 pending/onboarding work而不预热所有普通 conversation,PASS
+EWV-009,View,status 和 view 共享中立 snapshot并展示 Host/channel/message/conversation/runtime,PASS
+EWV-010,View,默认输出脱敏且不含完整外部 ID/session ID/消息正文,PASS
+EWV-011,CLI,view --once 可在非 TTY 稳定退出且持续模式参数门禁有效,PASS
+EWV-012,回归,npm run verify 与 npm pack 全绿,PASS

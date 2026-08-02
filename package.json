@@ -1,7 +1,7 @@
 {
   "name": "@hiq-ai/dingtalk-codex-host",
-  "version": "0.1.0",
-  "description": "A resident DingTalk event host for isolated Codex App Server conversations.",
+  "version": "0.2.0",
+  "description": "An event-driven Channel host for isolated, resumable agent runtime conversations.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/HiQ-AI/dingtalk-codex-host.git"
@@ -10,7 +10,7 @@
   "bugs": {
     "url": "https://github.com/HiQ-AI/dingtalk-codex-host/issues"
   },
-  "keywords": ["dingtalk", "codex", "agent", "app-server"],
+  "keywords": ["dingtalk", "channel", "codex", "agent", "app-server"],
   "type": "module",
   "license": "MIT",
   "engines": {
