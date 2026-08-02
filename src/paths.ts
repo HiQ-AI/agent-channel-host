@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import { readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DATA_HOME_ENV, LEGACY_DATA_HOME_ENV, PRODUCT_ID } from './product.js';
 
@@ -14,7 +15,34 @@ export function dataRoot(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export function instanceDir(instance: string, env: NodeJS.ProcessEnv = process.env): string {
-  return join(dataRoot(env), 'instances', safeName(instance));
+  return join(instancesRoot(env), safeName(instance));
+}
+
+export function instancesRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return join(dataRoot(env), 'instances');
+}
+
+export async function discoverInstances(env: NodeJS.ProcessEnv = process.env): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(instancesRoot(env), { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const candidates = entries
+    .filter((entry) => entry.isDirectory() && isSafeName(entry.name))
+    .map((entry) => entry.name)
+    .sort((left, right) => left.localeCompare(right));
+  const initialized = await Promise.all(candidates.map(async (instance) => {
+    try {
+      return (await stat(configPath(instance, env))).isFile() ? instance : null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }));
+  return initialized.filter((instance): instance is string => instance !== null);
 }
 
 export function lockRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -34,8 +62,12 @@ export function statePath(instance: string, env: NodeJS.ProcessEnv = process.env
 }
 
 export function safeName(value: string): string {
-  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(value)) {
+  if (!isSafeName(value)) {
     throw new Error('instance 只能包含字母、数字、点、下划线和连字符，长度不超过 64');
   }
   return value;
+}
+
+function isSafeName(value: string): boolean {
+  return /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(value);
 }

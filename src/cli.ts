@@ -4,14 +4,14 @@ import { access } from 'node:fs/promises';
 import {
   CODEX_REASONING_EFFORTS, defaultConfig, loadConfig, writeConfig, writeInitialConfig,
 } from './config.js';
-import { configPath, statePath } from './paths.js';
+import { configPath, discoverInstances, statePath } from './paths.js';
 import { Store } from './store.js';
 import { dwsDoctor, resolveExactGroup } from './dws.js';
 import { CodexCommandSession, verifyCodexCommand } from './codex-command.js';
 import { runHost } from './host.js';
 import { installUserService, removeUserService, windowsServicePlan } from './service.js';
 import { MAX_WORKER_WARM_SECONDS } from './types.js';
-import { assertInteractiveView, runView, shouldStartHostForView } from './view.js';
+import { assertInteractiveView, runView, shouldStartHostForView, type ViewInstance } from './view.js';
 import { CLI_NAME } from './product.js';
 
 const program = new Command();
@@ -226,50 +226,63 @@ program.command('status')
   });
 
 program.command('view')
-  .description('启动或 attach Host，并打开总览、会话详情和设置管理界面')
-  .requiredOption('--instance <name>', 'instance 名称')
+  .description('启动或 attach 全部 instance Host，并打开聚合总览、详情和设置界面')
   .option('--interval <seconds>', '刷新间隔秒数', parseViewInterval, 1)
   .option('--once', '只读渲染一次且不启动 Host；管道和脚本必须使用此模式', false)
   .option('--show-content', '在当前用户本地显示截断消息正文预览', false)
   .action(async (options) => {
-    const config = await loadConfig(options.instance);
-    const store = new Store(statePath(options.instance));
     const viewOptions = {
-      instance: options.instance,
       intervalSeconds: options.interval,
       once: options.once,
       showContent: options.showContent,
     };
     assertInteractiveView(viewOptions);
-    let hostAbort: AbortController | null = null;
-    let hostPromise: Promise<void> | null = null;
-    let hostFailure: Error | null = null;
-    const notices: string[] = [];
+    const instanceNames = await discoverInstances();
+    const instances: ViewInstance[] = [];
     try {
-      const initialSnapshot = store.status();
-      const startHost = shouldStartHostForView(options.once, initialSnapshot);
-      const attached = !options.once && !startHost;
-      if (startHost) {
-        hostAbort = new AbortController();
-        hostPromise = runHost(config, {
-          signal: hostAbort.signal,
-          handleProcessSignals: false,
-          log: (record) => {
-            notices.push(hostNotice(record));
-            if (notices.length > 50) notices.shift();
-          },
-        }).catch((error) => {
-          hostFailure = error as Error;
-          notices.push(`Host 异常：${(error as Error).message}`);
+      for (const name of instanceNames) {
+        instances.push({
+          name,
+          config: await loadConfig(name),
+          store: new Store(statePath(name)),
+          hostOwnership: 'readonly',
+          notices: [],
         });
       }
-      await runView(store, config, { ...viewOptions, attachedToExistingHost: attached, notices });
-    } finally {
-      hostAbort?.abort();
-      await hostPromise;
-      store.close();
+    } catch (error) {
+      for (const instance of instances) instance.store.close();
+      throw error;
     }
-    if (hostFailure) throw hostFailure;
+    const startedHosts: Array<{ instance: ViewInstance; abort: AbortController; promise: Promise<void> }> = [];
+    const hostFailures: Array<{ instance: string; error: Error }> = [];
+    try {
+      for (const instance of instances) {
+        const startHost = shouldStartHostForView(options.once, instance.store.status());
+        instance.hostOwnership = options.once ? 'readonly' : startHost ? 'view' : 'attached';
+        if (!startHost) continue;
+        const abort = new AbortController();
+        const promise = runHost(instance.config, {
+          signal: abort.signal,
+          handleProcessSignals: false,
+          log: (record) => {
+            instance.notices.push(hostNotice(record));
+            if (instance.notices.length > 50) instance.notices.shift();
+          },
+        }).catch((error) => {
+          hostFailures.push({ instance: instance.name, error: error as Error });
+          instance.notices.push(`Host 异常：${(error as Error).message}`);
+        });
+        startedHosts.push({ instance, abort, promise });
+      }
+      await runView(instances, viewOptions);
+    } finally {
+      for (const host of startedHosts) host.abort.abort();
+      await Promise.all(startedHosts.map((host) => host.promise));
+      for (const instance of instances) instance.store.close();
+    }
+    if (hostFailures.length > 0) {
+      throw new Error(hostFailures.map(({ instance, error }) => `${instance}: ${error.message}`).join('; '));
+    }
   });
 
 program.command('run')

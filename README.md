@@ -178,28 +178,29 @@ Prompt 固定采用“身份、会话职责、决策规则、权限边界、当�
 
 ## 前台启动与管理视图
 
-交互使用时，`view` 是首选启动命令：
+交互使用时，`view` 是所有已初始化 instance 上层的首选启动命令，不需要也不接受 `--instance`：
 
 ```powershell
-agent-channel view --instance triss
+agent-channel view
 ```
 
-默认先进入跨 Channel、conversation、runtime 和消息状态的“总览”tab，而不是某个单群页面。上下键选择 conversation，`Enter` 查看详情，`Esc` 返回；`Tab` 或左右键切到相邻的“设置”tab，可修改 Agent 身份、runtime model/effort、合批参数、当前会话职责/mode/warm TTL，以及已观察成员的角色和职责边界。
+`view` 会从用户状态目录发现全部已初始化 instance。默认先进入聚合 instance、Channel、conversation、runtime 和消息状态的“总览”tab，而不是某个 instance 或单群页面。上下键选择 instance，`Enter` 先进入实例详情，再选择 conversation 下钻；`Esc` 逐层返回。`Tab` 或左右键切到相邻的“设置”tab，使用 `[` / `]` 选择目标 instance，再修改 Agent 身份、runtime model/effort、合批参数、当前会话职责/mode/warm TTL，以及已观察成员的角色和职责边界。
 
-- Host 未运行：`view` 在当前进程内启动唯一 Host；退出界面时同时停止这个 Host。
-- Host 已运行：`view` 只 attach 状态，不创建第二个 Channel owner；退出只关闭界面。
-- `--once`：只输出一次脱敏快照，绝不启动 Host。
-- 非交互式服务：继续使用 `agent-channel run`。
+- 某个 instance 的 Host 未运行：`view` 在当前进程内为该 instance 启动唯一 Host；退出时只停止由本次 view 启动的 Host。
+- 某个 instance 的 Host 已运行：`view` 只 attach 该 instance 状态，不创建第二个 Channel owner；退出不停止原有 Host。
+- 尚无 instance：仍进入空总览并显示 `init` 引导，不报“缺少 instance”。
+- `--once`：聚合输出全部 instance 的一次脱敏快照，绝不启动 Host。
+- 非交互式服务：继续使用单 instance 的 `agent-channel run --instance <name>`。
 
 常用状态命令：
 
 ```powershell
 agent-channel status --instance triss
-agent-channel view --instance triss --once
+agent-channel view --once
 agent-channel run --instance triss
 ```
 
-`status` 输出机器可读 JSON；交互 `view` 用 `q` 或 `Ctrl+C` 退出。总览和详情默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。设置先通过与启动相同的 schema 校验，再原子保存；标记“重启后生效”的配置不会伪装成已即时应用。
+`status --instance` 输出一个 instance 的机器可读 JSON；`view` 是跨 instance 的交互管理面，用 `q` 或 `Ctrl+C` 退出。总览和详情默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。设置先通过与启动相同的 schema 校验，再原子保存；标记“重启后生效”的配置不会伪装成已即时应用。
 
 先在 `shadow` 模式确认 `received/processed`、固定 provider session 前缀、重启 resume 和职责判断，才切到发送模式：
 

@@ -80,8 +80,11 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     ], { encoding: 'utf8', env }), /0-2147483 的整数/);
 
     const viewed = await execFileAsync(process.execPath, [
-      cli, 'view', '--instance', 'test', '--once',
+      cli, 'view', '--once',
     ], { encoding: 'utf8', env });
+    assert.match(viewed.stdout, /INSTANCES/);
+    assert.match(viewed.stdout, /test/);
+    assert.match(viewed.stdout, /custom-model/);
     assert.match(viewed.stdout, /CHANNELS/);
     assert.match(viewed.stdout, /MESSAGES received=0 pending=0/);
     assert.match(viewed.stdout, /CONVERSATIONS/);
@@ -89,8 +92,25 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     assert.match(viewed.stdout, /^agent-channel view /);
     assert.doesNotMatch(viewed.stdout, /open-test-user|open-warm-user/);
     await assert.rejects(execFileAsync(process.execPath, [
-      cli, 'view', '--instance', 'test', '--interval', '0.2',
+      cli, 'view', '--interval', '0.2',
     ], { encoding: 'utf8', env }), /持续 view 需要交互式终端/);
+    await assert.rejects(execFileAsync(process.execPath, [
+      cli, 'view', '--instance', 'test', '--once',
+    ], { encoding: 'utf8', env }), /unknown option '--instance'/);
+
+    const emptyRoot = resolve('.test-cli-empty-state');
+    await rm(emptyRoot, { recursive: true, force: true });
+    await mkdir(emptyRoot, { recursive: true });
+    try {
+      const empty = await execFileAsync(process.execPath, [cli, 'view', '--once'], {
+        encoding: 'utf8', env: { ...process.env, AGENT_CHANNEL_HOME: emptyRoot },
+      });
+      assert.match(empty.stdout, /instances=0/);
+      assert.match(empty.stdout, /尚未初始化 instance/);
+      assert.match(empty.stdout, /agent-channel init --instance/);
+    } finally {
+      await rm(emptyRoot, { recursive: true, force: true });
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

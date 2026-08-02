@@ -7,7 +7,7 @@ import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import {
   createManagementViewState, createSettingEntries, handleManagementViewInput, renderManagementView, renderStatusView,
-  shouldStartHostForView,
+  shouldStartHostForView, type ViewInstance,
 } from '../src/view.js';
 
 test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完整 provider session ID', () => {
@@ -55,7 +55,7 @@ test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完�
     assert.doesNotMatch(serialized, /open-secret-user|高度敏感|provider-session-complete-secret|张三/);
     assert.match(serialized, /provider-ses/);
     assert.match(serialized, /张\*\*\*三/);
-    const rendered = renderStatusView('test', snapshot, 120);
+    const rendered = renderStatusView([viewInstance('test', defaultConfig('test', '.', 'Agent', '角色'), store)], false, 120);
     for (const section of ['CHANNELS', 'MESSAGES', 'CONVERSATIONS', 'RUNTIMES']) assert.match(rendered, new RegExp(section));
     assert.match(rendered, /gpt-test/);
     assert.doesNotMatch(rendered, /open-secret-user|高度敏感|provider-session-complete-secret/);
@@ -67,39 +67,49 @@ test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完�
 
 test('management view 默认显示跨会话总览，可进入详情并切换设置 tab', () => {
   const store = new Store(':memory:');
+  const secondStore = new Store(':memory:');
   const config = defaultConfig('management-view', '.', 'Agent', '角色');
+  const secondConfig = defaultConfig('second-agent', '.', 'Second Agent', '评审');
   const first = store.addConversation({
     kind: 'direct', externalId: 'member-a', title: '私聊 A', responsibility: '答疑', mode: 'shadow',
   });
-  store.addConversation({
+  secondStore.addConversation({
     channelId: 'slack', channelProfileId: 'workspace', runtimeId: 'claude',
     kind: 'group', externalId: 'channel-b', title: '群 B', responsibility: '评审', mode: 'shadow',
   });
   try {
-    const snapshot = store.status();
+    const instances = [
+      viewInstance('management-view', config, store),
+      viewInstance('second-agent', secondConfig, secondStore),
+    ];
     const state = createManagementViewState();
     const detail = store.conversationDetail(first.id);
     const settings = createSettingEntries(config, store, first.id);
-    const overview = renderManagementView('management-view', snapshot, config, state, detail, settings, 140);
+    const overview = renderManagementView(instances, state, detail, settings, 140);
     assert.match(overview, /\[ 总览 \]\s+设置/);
+    assert.match(overview, /management-view/);
+    assert.match(overview, /second-agent/);
     assert.match(overview, /私聊 A/);
     assert.match(overview, /群 B/);
     assert.match(overview, /dingtalk/);
     assert.match(overview, /slack/);
 
+    state.detailInstanceName = 'management-view';
     state.detailConversationId = first.id;
-    const detailView = renderManagementView('management-view', snapshot, config, state, detail, settings, 140);
+    const detailView = renderManagementView(instances, state, detail, settings, 140);
     assert.match(detailView, /会话详情 \/ 私聊 A/);
     assert.doesNotMatch(detailView, /member-a/);
 
+    state.detailInstanceName = null;
     state.detailConversationId = null;
     state.tab = 'settings';
-    const settingsView = renderManagementView('management-view', snapshot, config, state, detail, settings, 140);
+    const settingsView = renderManagementView(instances, state, detail, settings, 140);
     assert.match(settingsView, /总览\s+\[ 设置 \]/);
     assert.match(settingsView, /Agent 名称/);
     assert.match(settingsView, /会话职责 · 私聊 A/);
   } finally {
     store.close();
+    secondStore.close();
   }
 });
 
@@ -152,21 +162,53 @@ test('management view 按键可从总览进入详情并切换设置编辑', asyn
     kind: 'group', externalId: 'view-input-group', title: '按键验证群', responsibility: '答疑', mode: 'shadow',
   });
   const state = createManagementViewState();
+  const instances = [viewInstance('view-input', config, store)];
   let stopped = false;
   try {
-    await handleManagementViewInput('\r', state, config, store, () => { stopped = true; });
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    assert.equal(state.detailInstanceName, 'view-input');
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
     assert.equal(state.detailConversationId, conversation.id);
-    await handleManagementViewInput('\u001b', state, config, store, () => { stopped = true; });
+    await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
     assert.equal(state.detailConversationId, null);
-    await handleManagementViewInput('\t', state, config, store, () => { stopped = true; });
+    await handleManagementViewInput('\t', state, instances, () => { stopped = true; });
     assert.equal(state.tab, 'settings');
-    await handleManagementViewInput('\r', state, config, store, () => { stopped = true; });
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
     assert.equal(state.editing?.key, 'identity.name');
-    await handleManagementViewInput('\u001b', state, config, store, () => { stopped = true; });
+    await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
     assert.equal(state.editing, null);
-    await handleManagementViewInput('q', state, config, store, () => { stopped = true; });
+    await handleManagementViewInput('q', state, instances, () => { stopped = true; });
     assert.equal(stopped, true);
   } finally {
     store.close();
   }
 });
+
+test('settings 在上层 view 中显式切换 instance 后编辑对应配置', async () => {
+  const firstStore = new Store(':memory:');
+  const secondStore = new Store(':memory:');
+  const firstConfig = defaultConfig('first', '.', 'First Agent', '答疑');
+  const secondConfig = defaultConfig('second', '.', 'Second Agent', '评审');
+  const instances = [
+    viewInstance('first', firstConfig, firstStore),
+    viewInstance('second', secondConfig, secondStore),
+  ];
+  const state = createManagementViewState();
+  state.tab = 'settings';
+  try {
+    await handleManagementViewInput(']', state, instances, () => undefined);
+    assert.equal(state.selectedInstance, 1);
+    await handleManagementViewInput('\r', state, instances, () => undefined);
+    assert.equal(state.editing?.key, 'identity.name');
+    assert.equal(state.editing?.value, 'Second Agent');
+    const rendered = renderManagementView(instances, state, null, createSettingEntries(secondConfig, secondStore, null), 120);
+    assert.match(rendered, /instance=second/);
+  } finally {
+    firstStore.close();
+    secondStore.close();
+  }
+});
+
+function viewInstance(name: string, config: ReturnType<typeof defaultConfig>, store: Store): ViewInstance {
+  return { name, config, store, hostOwnership: 'attached', notices: [] };
+}

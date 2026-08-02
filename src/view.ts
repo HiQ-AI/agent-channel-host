@@ -6,20 +6,28 @@ import { MAX_WORKER_WARM_SECONDS } from './types.js';
 import { publishRecoveryContext } from './recovery-context.js';
 
 type Json = Record<string, unknown>;
+type TaggedJson = Json & { instance: string };
 
 export interface ViewOptions {
-  instance: string;
   intervalSeconds: number;
   once: boolean;
   showContent: boolean;
-  attachedToExistingHost?: boolean;
-  notices?: string[];
+}
+
+export interface ViewInstance {
+  name: string;
+  config: HostConfig;
+  store: Store;
+  hostOwnership: 'attached' | 'view' | 'readonly';
+  notices: string[];
 }
 
 export interface ManagementViewState {
   tab: 'overview' | 'settings';
+  selectedInstance: number;
   selectedConversation: number;
   selectedSetting: number;
+  detailInstanceName: string | null;
   detailConversationId: string | null;
   editing: { key: string; label: string; value: string } | null;
   notice: string | null;
@@ -36,8 +44,10 @@ export interface SettingEntry {
 export function createManagementViewState(): ManagementViewState {
   return {
     tab: 'overview',
+    selectedInstance: 0,
     selectedConversation: 0,
     selectedSetting: 0,
+    detailInstanceName: null,
     detailConversationId: null,
     editing: null,
     notice: null,
@@ -54,10 +64,10 @@ export function shouldStartHostForView(once: boolean, snapshot: Record<string, u
   return !once && snapshot.hostState !== 'running';
 }
 
-export async function runView(store: Store, config: HostConfig, options: ViewOptions): Promise<void> {
+export async function runView(instances: ViewInstance[], options: ViewOptions): Promise<void> {
   assertInteractiveView(options);
   if (options.once) {
-    process.stdout.write(`${renderStatusView(options.instance, store.status(options.showContent), process.stdout.columns ?? 120)}\n`);
+    process.stdout.write(`${renderStatusView(instances, options.showContent, process.stdout.columns ?? 120)}\n`);
     return;
   }
 
@@ -68,32 +78,34 @@ export async function runView(store: Store, config: HostConfig, options: ViewOpt
   let resolveStop!: () => void;
   const stopped = new Promise<void>((resolve) => { resolveStop = resolve; });
   const render = () => {
-    const snapshot = store.status(options.showContent);
-    const conversations = array(snapshot.conversations);
+    normalizeSelection(state, instances);
+    const selectedInstance = instances[state.selectedInstance] ?? null;
+    const detailInstance = state.detailInstanceName
+      ? instances.find((instance) => instance.name === state.detailInstanceName) ?? null
+      : selectedInstance;
+    const conversations = detailInstance?.store.listConversations() ?? [];
     if (state.selectedConversation >= conversations.length) state.selectedConversation = Math.max(0, conversations.length - 1);
-    const selected = conversations[state.selectedConversation];
-    const selectedId = typeof selected?.id === 'string' ? selected.id : null;
+    const selectedId = conversations[state.selectedConversation]?.id ?? null;
     const detailId = state.detailConversationId ?? selectedId;
-    const detail = detailId ? store.conversationDetail(detailId, options.showContent) : null;
-    const settings = createSettingEntries(config, store, selectedId);
+    const detail = detailInstance && detailId ? detailInstance.store.conversationDetail(detailId, options.showContent) : null;
+    const settings = selectedInstance
+      ? createSettingEntries(selectedInstance.config, selectedInstance.store, selectedIdForSettings(state, selectedInstance))
+      : [];
     if (state.selectedSetting >= settings.length) state.selectedSetting = Math.max(0, settings.length - 1);
     return renderManagementView(
-      options.instance,
-      snapshot,
-      config,
+      instances,
       state,
       detail,
       settings,
       process.stdout.columns ?? 120,
-      options.attachedToExistingHost ?? false,
-      options.notices ?? [],
+      options.showContent,
     );
   };
   const paint = () => process.stdout.write(`\u001b[2J\u001b[H${render()}\n`);
   const onData = (chunk: Buffer) => {
     if (inputBusy) return;
     inputBusy = true;
-    void handleManagementViewInput(chunk.toString('utf8'), state, config, store, resolveStop)
+    void handleManagementViewInput(chunk.toString('utf8'), state, instances, resolveStop)
       .catch((error) => { state.notice = (error as Error).message; })
       .finally(() => {
         inputBusy = false;
@@ -124,10 +136,11 @@ export async function runView(store: Store, config: HostConfig, options: ViewOpt
 export async function handleManagementViewInput(
   key: string,
   state: ManagementViewState,
-  config: HostConfig,
-  store: Store,
+  instances: ViewInstance[],
   stop: () => void,
 ): Promise<void> {
+  normalizeSelection(state, instances);
+  const selectedInstance = instances[state.selectedInstance] ?? null;
   if (state.editing) {
     if (key === '\u001b') {
       state.editing = null;
@@ -135,8 +148,10 @@ export async function handleManagementViewInput(
       return;
     }
     if (key === '\r' || key === '\n') {
-      const selectedId = selectedConversationId(store, state.selectedConversation);
-      const entry = createSettingEntries(config, store, selectedId).find((item) => item.key === state.editing!.key);
+      if (!selectedInstance) throw new Error('没有可配置的 instance');
+      const selectedId = selectedIdForSettings(state, selectedInstance);
+      const entry = createSettingEntries(selectedInstance.config, selectedInstance.store, selectedId)
+        .find((item) => item.key === state.editing!.key);
       if (!entry) throw new Error('设置项已变化，请重新选择');
       await entry.apply(state.editing.value);
       state.notice = `${entry.label} 已保存`;
@@ -157,12 +172,22 @@ export async function handleManagementViewInput(
   }
   if (key === '\t' || key === '\u001b[C' || key === '\u001b[D') {
     state.tab = state.tab === 'overview' ? 'settings' : 'overview';
+    state.detailInstanceName = null;
     state.detailConversationId = null;
     state.notice = null;
     return;
   }
   if (key === '\u001b') {
-    state.detailConversationId = null;
+    if (state.detailConversationId) state.detailConversationId = null;
+    else state.detailInstanceName = null;
+    state.notice = null;
+    return;
+  }
+  if (state.tab === 'settings' && (key === '[' || key === ']')) {
+    const direction = key === '[' ? -1 : 1;
+    state.selectedInstance = clamp(state.selectedInstance + direction, 0, Math.max(0, instances.length - 1));
+    state.selectedConversation = 0;
+    state.selectedSetting = 0;
     state.notice = null;
     return;
   }
@@ -170,22 +195,37 @@ export async function handleManagementViewInput(
     : key === '\u001b[B' || key.toLowerCase() === 'j' ? 1 : 0;
   if (direction !== 0) {
     if (state.tab === 'overview') {
-      const total = store.listConversations().length;
-      state.selectedConversation = clamp(state.selectedConversation + direction, 0, Math.max(0, total - 1));
+      if (!state.detailInstanceName) {
+        state.selectedInstance = clamp(state.selectedInstance + direction, 0, Math.max(0, instances.length - 1));
+        state.selectedConversation = 0;
+      } else {
+        const detailInstance = instances.find((instance) => instance.name === state.detailInstanceName);
+        const total = detailInstance?.store.listConversations().length ?? 0;
+        state.selectedConversation = clamp(state.selectedConversation + direction, 0, Math.max(0, total - 1));
+      }
     } else {
-      const selectedId = selectedConversationId(store, state.selectedConversation);
-      const total = createSettingEntries(config, store, selectedId).length;
+      const selectedId = selectedInstance ? selectedIdForSettings(state, selectedInstance) : null;
+      const total = selectedInstance
+        ? createSettingEntries(selectedInstance.config, selectedInstance.store, selectedId).length
+        : 0;
       state.selectedSetting = clamp(state.selectedSetting + direction, 0, Math.max(0, total - 1));
     }
     return;
   }
   if (key === '\r' || key === '\n') {
     if (state.tab === 'overview') {
-      state.detailConversationId = selectedConversationId(store, state.selectedConversation);
+      if (!selectedInstance) return;
+      if (!state.detailInstanceName) {
+        state.detailInstanceName = selectedInstance.name;
+        state.selectedConversation = 0;
+      } else {
+        state.detailConversationId = selectedConversationId(selectedInstance.store, state.selectedConversation);
+      }
       return;
     }
-    const selectedId = selectedConversationId(store, state.selectedConversation);
-    const entry = createSettingEntries(config, store, selectedId)[state.selectedSetting];
+    if (!selectedInstance) return;
+    const selectedId = selectedIdForSettings(state, selectedInstance);
+    const entry = createSettingEntries(selectedInstance.config, selectedInstance.store, selectedId)[state.selectedSetting];
     if (entry) state.editing = { key: entry.key, label: entry.label, value: entry.value };
   }
 }
@@ -309,40 +349,134 @@ function replaceConfig(target: HostConfig, source: HostConfig): void {
 }
 
 export function renderManagementView(
-  instance: string,
-  snapshot: Record<string, unknown>,
-  config: HostConfig,
+  instances: ViewInstance[],
   state: ManagementViewState,
   detail: Record<string, unknown> | null,
   settings: SettingEntry[],
   width = 120,
-  attached = false,
-  notices: string[] = [],
+  showContent = false,
 ): string {
-  const host = object(snapshot.host);
+  normalizeSelection(state, instances);
+  const selectedInstance = instances[state.selectedInstance] ?? null;
+  const detailInstance = state.detailInstanceName
+    ? instances.find((instance) => instance.name === state.detailInstanceName) ?? null
+    : null;
+  const snapshots = instances.map((instance) => ({ instance, snapshot: instance.store.status(showContent) }));
+  const running = snapshots.filter(({ snapshot }) => text(object(snapshot.host).state) === 'running').length;
   const tabs = state.tab === 'overview' ? '[ 总览 ]   设置' : '  总览   [ 设置 ]';
   const lines = [
-    `${CLI_NAME}  instance=${instance}  host=${text(host.state) ?? 'unknown'}  pid=${text(host.pid) ?? '-'}  ${attached ? 'attached' : 'foreground'}`,
+    `${CLI_NAME}  instances=${instances.length}  running=${running}  refreshed=${new Date().toISOString()}`,
     tabs,
     '─'.repeat(Math.min(width, 120)),
   ];
-  if (state.tab === 'settings') lines.push(...renderSettings(config, detail, settings, state, width, attached));
+  if (state.tab === 'settings') lines.push(...renderSettings(selectedInstance, detail, settings, state, width, instances.length));
   else if (state.detailConversationId) lines.push(...renderConversationDetail(detail, width));
-  else lines.push(...renderOverview(snapshot, state, width));
-  const notice = state.notice ?? notices.at(-1) ?? null;
+  else if (detailInstance) lines.push(...renderInstanceOverview(detailInstance, detailInstance.store.status(showContent), state, width));
+  else lines.push(...renderGlobalOverview(snapshots, state, width));
+  const notice = state.notice ?? selectedInstance?.notices.at(-1) ?? null;
   if (notice) lines.push('', `提示：${notice}`);
   lines.push('', state.editing
     ? `编辑 ${state.editing.label}：${state.editing.value}█  Enter 保存 / Esc 取消`
-    : 'Tab/←/→ 切换  ↑/↓ 选择  Enter 详情或编辑  Esc 返回  q 退出');
+    : state.tab === 'settings'
+      ? 'Tab/←/→ 切换  [/ ] 选择 instance  ↑/↓ 选择  Enter 编辑  Esc 返回  q 退出'
+      : 'Tab/←/→ 切换  ↑/↓ 选择  Enter 下钻  Esc 返回  q 退出');
   return lines.join('\n');
 }
 
-function renderOverview(snapshot: Record<string, unknown>, state: ManagementViewState, width: number): string[] {
+function renderGlobalOverview(
+  snapshots: Array<{ instance: ViewInstance; snapshot: Record<string, unknown> }>,
+  state: ManagementViewState,
+  width: number,
+): string[] {
+  if (snapshots.length === 0) {
+    return [
+      'INSTANCES',
+      '  (none)',
+      '',
+      '尚未初始化 instance。请先运行：',
+      'agent-channel init --instance <name> --cwd <path>',
+    ];
+  }
+  const lines = ['INSTANCES'];
+  lines.push(...table(
+    ['', 'INSTANCE', 'AGENT', 'HOST', 'PID', 'CHANNELS', 'CONVERSATIONS', 'PENDING', 'RUNTIMES', 'OWNER'],
+    snapshots.map(({ instance, snapshot }, index) => {
+      const host = object(snapshot.host);
+      return [
+        index === state.selectedInstance ? '>' : ' ', instance.name, instance.config.identity.name,
+        host.state ?? 'unknown', host.pid ?? '-', array(snapshot.channels).length, array(snapshot.conversations).length,
+        number(snapshot.pending_messages), array(snapshot.runtimeAdapters).length,
+        instance.hostOwnership,
+      ];
+    }),
+    width,
+  ));
+
+  const channels = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.channels));
+  lines.push('', 'CHANNELS');
+  lines.push(...table(
+    ['INSTANCE', 'CHANNEL', 'PROFILE', 'STATE', 'PID', 'LAST EVENT', 'ERROR'],
+    channels.map((row) => [row.instance, row.channelId, row.profileId, row.state, row.pid, age(row.lastEventAt), row.error ?? '-']),
+    width,
+  ));
+
+  const totals = snapshots.reduce((result, { snapshot }) => ({
+    received: result.received + number(snapshot.received),
+    pending: result.pending + number(snapshot.pending_messages),
+    claimed: result.claimed + number(snapshot.claimed_messages),
+    processed: result.processed + number(snapshot.processed),
+    failed: result.failed + number(snapshot.failed_messages),
+    outbox: result.outbox + number(snapshot.pending_outbox),
+    submitted: result.submitted + number(snapshot.submitted),
+  }), { received: 0, pending: 0, claimed: 0, processed: 0, failed: 0, outbox: 0, submitted: 0 });
+  const messages = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.messages));
+  lines.push('',
+    `MESSAGES received=${totals.received} pending=${totals.pending} claimed=${totals.claimed}`
+    + ` processed=${totals.processed} failed=${totals.failed} outbox=${totals.outbox}/${totals.submitted}`,
+  );
+  const messageHeaders = ['INSTANCE', 'CHANNEL', 'CONVERSATION', 'SEQ', 'SENDER', 'STATE', 'ACTION', 'AGE'];
+  if (messages.some((row) => row.preview !== undefined)) messageHeaders.push('PREVIEW');
+  lines.push(...table(messageHeaders, messages.map((row) => {
+    const values: unknown[] = [row.instance, row.channelId, row.title, row.sequence, row.sender ?? '-', row.state, row.action ?? '-', age(row.receivedAt)];
+    if (messageHeaders.includes('PREVIEW')) values.push(row.preview ?? '-');
+    return values;
+  }), width));
+
+  const conversations = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.conversations));
+  lines.push('', 'CONVERSATIONS');
+  lines.push(...table(
+    ['INSTANCE', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'WORKER', 'SESSION', 'CONTEXT', 'RUNTIME'],
+    conversations.map((row) => [
+      row.instance, row.channelId, row.title, row.mode, row.pending, row.workerState,
+      row.sessionState, `v${row.contextVersion ?? 0}@${row.contextThroughSequence ?? 0}`, row.runtimeId,
+    ]),
+    width,
+  ));
+
+  const runtimes = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.runtimeAdapters));
+  lines.push('', 'RUNTIMES');
+  lines.push(...table(
+    ['INSTANCE', 'RUNTIME', 'LABEL', 'STATE', 'MODEL', 'RECOVERY', 'ERROR'],
+    runtimes.map((row) => [row.instance, row.runtimeId, row.label, row.state, row.model ?? '-', row.contextRecovery ?? '-', row.error ?? '-']),
+    width,
+  ));
+  const alerts = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.alerts));
+  if (alerts.length > 0) {
+    lines.push('', 'ALERTS', ...alerts.map((row) => `- ${row.instance}/${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`));
+  }
+  return lines;
+}
+
+function renderInstanceOverview(instance: ViewInstance, snapshot: Record<string, unknown>, state: ManagementViewState, width: number): string[] {
   const channels = array(snapshot.channels);
   const conversations = array(snapshot.conversations);
   const runtimeAdapters = array(snapshot.runtimeAdapters);
   const alerts = array(snapshot.alerts);
-  const lines = ['CHANNELS'];
+  const host = object(snapshot.host);
+  const lines = [
+    `实例详情 / ${instance.name}  Agent=${instance.config.identity.name}  host=${text(host.state) ?? 'unknown'}  pid=${text(host.pid) ?? '-'}  ${instance.hostOwnership}`,
+    '', 'CHANNELS',
+  ];
   lines.push(...table(
     ['CHANNEL', 'PROFILE', 'STATE', 'PID', 'LAST EVENT', 'ERROR'],
     channels.map((row) => [row.channelId, row.profileId, row.state, row.pid, age(row.lastEventAt), row.error ?? '-']),
@@ -413,17 +547,30 @@ function renderConversationDetail(detail: Record<string, unknown> | null, width:
 }
 
 function renderSettings(
-  config: HostConfig,
+  instance: ViewInstance | null,
   detail: Record<string, unknown> | null,
   settings: SettingEntry[],
   state: ManagementViewState,
   width: number,
-  attached: boolean,
+  instanceCount: number,
 ): string[] {
+  if (!instance) {
+    return [
+      '设置',
+      '',
+      '尚未初始化 instance，当前没有可修改的配置。',
+      '请先运行 agent-channel init --instance <name> --cwd <path>。',
+    ];
+  }
   const conversation = object(detail?.conversation);
   const lines = [
-    `设置  Agent=${config.identity.name}  Runtime=${config.runtime.id}  Channel=${config.channel.id}/${config.channel.profileId}`,
-    attached ? '当前连接到外部 Host；conversation/member 设置下一 turn 生效，config.yaml 设置建议重启 Host。' : '当前 Host 由 view 启动；配置在后续 turn/batch 生效。',
+    `设置  instance=${instance.name} (${state.selectedInstance + 1}/${instanceCount})  Agent=${instance.config.identity.name}`,
+    `Runtime=${instance.config.runtime.id}  Channel=${instance.config.channel.id}/${instance.config.channel.profileId}`,
+    instance.hostOwnership === 'attached'
+      ? '当前连接到外部 Host；conversation/member 设置下一 turn 生效，config.yaml 设置建议重启 Host。'
+      : instance.hostOwnership === 'view'
+        ? '当前 Host 由 view 启动；配置在后续 turn/batch 生效。'
+        : '当前为只读快照；未启动或 attach Host。',
     `当前会话：${text(conversation.title) ?? '未选择'}`,
     '',
   ];
@@ -435,74 +582,33 @@ function renderSettings(
   return lines;
 }
 
-export function renderStatusView(instance: string, snapshot: Record<string, unknown>, width = 120): string {
-  const host = object(snapshot.host);
-  const channels = array(snapshot.channels);
-  const conversations = array(snapshot.conversations);
-  const messages = array(snapshot.messages);
-  const runtimeAdapters = array(snapshot.runtimeAdapters);
-  const runtimes = array(snapshot.runtimes);
-  const alerts = array(snapshot.alerts);
-  const lines: string[] = [];
-  lines.push(`${CLI_NAME} view  instance=${instance}  refreshed=${text(snapshot.generatedAt) ?? '-'}`);
-  lines.push(`Host ${text(host.state) ?? 'unknown'}  pid=${text(host.pid) ?? '-'}  heartbeat=${age(host.heartbeatAt)}`);
-  lines.push('');
-  lines.push('CHANNELS');
-  lines.push(...table(
-    ['CHANNEL', 'PROFILE', 'STATE', 'PID', 'LAST EVENT', 'ERROR'],
-    channels.map((row) => [row.channelId, row.profileId, row.state, row.pid, age(row.lastEventAt), row.error ?? '-']),
-    width,
-  ));
-  lines.push('');
-  lines.push(
-    `MESSAGES received=${number(snapshot.received)} pending=${number(snapshot.pending_messages)}`
-    + ` claimed=${number(snapshot.claimed_messages)} processed=${number(snapshot.processed)}`
-    + ` failed=${number(snapshot.failed_messages)} outbox=${number(snapshot.pending_outbox)}/${number(snapshot.submitted)}`,
-  );
-  const messageHeaders = ['CHANNEL', 'CONVERSATION', 'SEQ', 'SENDER', 'STATE', 'ACTION', 'AGE'];
-  if (messages.some((row) => row.preview !== undefined)) messageHeaders.push('PREVIEW');
-  lines.push(...table(
-    messageHeaders,
-    messages.map((row) => {
-      const values: unknown[] = [row.channelId, row.title, row.sequence, row.sender ?? '-', row.state, row.action ?? '-', age(row.receivedAt)];
-      if (messageHeaders.includes('PREVIEW')) values.push(row.preview ?? '-');
-      return values;
-    }),
-    width,
-  ));
-  lines.push('', 'CONVERSATIONS');
-  lines.push(...table(
-    ['CHANNEL', 'TITLE', 'KIND', 'MODE', 'PENDING', 'WORKER', 'CONTEXT', 'RUNTIME'],
-    conversations.map((row) => [
-      row.channelId, row.title, row.kind, row.mode, row.pending, row.workerState,
-      `v${row.contextVersion ?? 0}@${row.contextThroughSequence ?? 0}`, row.runtimeId,
-    ]),
-    width,
-  ));
-  lines.push('', 'RUNTIMES');
-  lines.push(...table(
-    ['RUNTIME', 'LABEL', 'STATE', 'MODEL', 'RECOVERY', 'ERROR'],
-    runtimeAdapters.map((row) => [
-      row.runtimeId, row.label, row.state, row.model ?? '-', row.contextRecovery ?? '-', row.error ?? '-',
-    ]),
-    width,
-  ));
-  lines.push('', 'SESSIONS / WORKERS');
-  lines.push(...table(
-    ['RUNTIME', 'CONVERSATION', 'WORKER', 'PID', 'SESSION', 'SESSION ID', 'GEN'],
-    runtimes.map((row) => [
-      row.runtimeId, row.conversation, row.workerState, row.processId ?? '-', row.sessionState,
-      row.providerSessionPrefix ?? '-', row.generation ?? '-',
-    ]),
-    width,
-  ));
-  if (alerts.length > 0) lines.push('', 'ALERTS', ...alerts.map((row) => `- ${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`));
-  lines.push('', '只读快照；交互模式默认启动或 attach Host，并提供总览、详情和设置 tab');
+export function renderStatusView(instances: ViewInstance[], showContent = false, width = 120): string {
+  const state = createManagementViewState();
+  const snapshots = instances.map((instance) => ({ instance, snapshot: instance.store.status(showContent) }));
+  const lines = [
+    `${CLI_NAME} view  instances=${instances.length}  refreshed=${new Date().toISOString()}`,
+    ...renderGlobalOverview(snapshots, state, width),
+    '',
+    '只读聚合快照；交互模式会逐 instance 启动或 attach Host，并提供下钻详情和设置 tab',
+  ];
   return lines.join('\n');
 }
 
 function selectedConversationId(store: Store, index: number): string | null {
   return store.listConversations()[index]?.id ?? null;
+}
+
+function selectedIdForSettings(state: ManagementViewState, instance: ViewInstance): string | null {
+  if (state.detailInstanceName && state.detailInstanceName !== instance.name) return null;
+  return selectedConversationId(instance.store, state.selectedConversation);
+}
+
+function normalizeSelection(state: ManagementViewState, instances: ViewInstance[]): void {
+  state.selectedInstance = clamp(state.selectedInstance, 0, Math.max(0, instances.length - 1));
+  if (state.detailInstanceName && !instances.some((instance) => instance.name === state.detailInstanceName)) {
+    state.detailInstanceName = null;
+    state.detailConversationId = null;
+  }
 }
 
 function table(headers: string[], rows: unknown[][], width: number): string[] {
@@ -528,6 +634,10 @@ function object(value: unknown): Json {
 
 function array(value: unknown): Json[] {
   return Array.isArray(value) ? value.filter((item): item is Json => Boolean(item) && typeof item === 'object' && !Array.isArray(item)) : [];
+}
+
+function tagRows(instance: string, value: unknown): TaggedJson[] {
+  return array(value).map((row) => Object.assign({ instance }, row));
 }
 
 function text(value: unknown): string | null {
