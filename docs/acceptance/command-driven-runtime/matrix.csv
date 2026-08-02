@@ -10,4 +10,4 @@ CMD-008,Regression,全量 npm test 通过,PASS
 CMD-009,Package,npm pack dry run 通过且无 App Server 运行依赖,PASS
 CMD-010,Canary,本机 Codex 新建和 resume 真实 canary 通过,PASS
 CMD-011,Docs,README 示例和扩展边界同步且历史记录不被改写,PASS
-CMD-012,GitHub,现有 PR 更新且 Windows Ubuntu CI 通过,PENDING
+CMD-012,GitHub,现有 PR 更新且 Windows Ubuntu CI 通过,PASS
