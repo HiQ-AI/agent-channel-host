@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import YAML from 'yaml';
 import { z } from 'zod';
@@ -41,6 +41,10 @@ const configSchema = z.object({
 
 export type HostConfig = z.infer<typeof configSchema>;
 
+export function validateConfig(value: unknown): HostConfig {
+  return configSchema.parse(value);
+}
+
 export function defaultConfig(instance: string, cwd: string, name: string, role: string): HostConfig {
   return {
     version: 2,
@@ -79,7 +83,14 @@ export async function writeInitialConfig(config: HostConfig, path = configPath(c
 
 export async function writeConfig(config: HostConfig, path = configPath(config.instance)): Promise<void> {
   const validated = configSchema.parse(config);
-  await writeFile(path, YAML.stringify(validated), { encoding: 'utf8', mode: 0o600 });
+  const temporary = `${path}.${process.pid}.tmp`;
+  await mkdir(dirname(path), { recursive: true });
+  try {
+    await writeFile(temporary, YAML.stringify(validated), { encoding: 'utf8', mode: 0o600 });
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
 }
 
 export async function loadConfig(instance: string, path = configPath(instance)): Promise<HostConfig> {

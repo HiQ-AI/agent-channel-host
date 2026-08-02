@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { defaultConfig } from '../src/config.js';
 import type { AgentSession, ChannelAdapter, ChannelHandlers, RuntimeAdapter } from '../src/contracts.js';
-import { EventDrivenScheduler } from '../src/host.js';
+import { EventDrivenScheduler, runHost } from '../src/host.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import type { Conversation, DecisionRun, OutboxRecord } from '../src/types.js';
@@ -10,11 +12,19 @@ import type { Conversation, DecisionRun, OutboxRecord } from '../src/types.js';
 class FakeChannel implements ChannelAdapter {
   readonly descriptor = { channelId: 'dingtalk', profileId: 'default', label: 'Fake Channel' };
   sent = 0;
+  stopped = 0;
   async start(_handlers: ChannelHandlers): Promise<void> {}
-  async stop(): Promise<void> {}
+  async stop(): Promise<void> { this.stopped += 1; }
   async send(_conversation: Conversation, _record: Pick<OutboxRecord, 'text' | 'uuid'>): Promise<void> {
     this.sent += 1;
   }
+}
+
+class FakeOwnerLock {
+  released = 0;
+  constructor(readonly ownerId: string) {}
+  async acquire(): Promise<void> {}
+  async release(): Promise<void> { this.released += 1; }
 }
 
 class FakeSession implements AgentSession {
@@ -62,6 +72,7 @@ class FakeSession implements AgentSession {
 class FakeRuntime implements RuntimeAdapter {
   readonly descriptor = {
     runtimeId: 'codex', label: 'Fake Runtime', model: 'fake', protocolFingerprint: 'fake:v1',
+    contextRecovery: 'adapter-managed' as const,
   };
   readonly sessions: FakeSession[] = [];
   blockFirst = false;
@@ -223,6 +234,52 @@ test('启动 reconciliation 释放旧 claim 并只唤醒有 pending work 的 con
   }
 });
 
+test('可嵌入 Host 由 AbortSignal 停止，第二个 owner 不覆盖运行状态', async () => {
+  const root = resolve('.test-embedded-host');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const previous = process.env.AGENT_CHANNEL_HOME;
+  process.env.AGENT_CHANNEL_HOME = root;
+  const config = defaultConfig('embedded-host', '.', 'Agent', 'role');
+  const channel = new FakeChannel();
+  const runtime = new FakeRuntime();
+  const owner = new FakeOwnerLock('owner-1');
+  const abort = new AbortController();
+  try {
+    const running = runHost(config, {
+      signal: abort.signal,
+      handleProcessSignals: false,
+      channel,
+      runtime,
+      ownerLock: owner,
+      log: () => undefined,
+    });
+    await waitFor(() => {
+      const observer = new Store(resolve(root, 'instances', 'embedded-host', 'state.sqlite3'));
+      try { return observer.status().hostState === 'running'; } finally { observer.close(); }
+    });
+    const secondChannel = new FakeChannel();
+    await assert.rejects(runHost(config, {
+      handleProcessSignals: false,
+      channel: secondChannel,
+      runtime: new FakeRuntime(),
+      ownerLock: new FakeOwnerLock('owner-2'),
+      log: () => undefined,
+    }), /lease 已被其他 Host 持有/);
+    assert.equal(secondChannel.stopped, 0);
+    const observer = new Store(resolve(root, 'instances', 'embedded-host', 'state.sqlite3'));
+    try { assert.equal(observer.status().hostState, 'running'); } finally { observer.close(); }
+    abort.abort();
+    await running;
+    assert.equal(channel.stopped, 1);
+    assert.equal(owner.released, 1);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+    else process.env.AGENT_CHANNEL_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function admit(store: Store, conversation: Conversation, id: string): void {
   const event = normalizeDwsEvent({
     type: 'user_im_message_receive_o2o_all', event_id: id,
@@ -238,6 +295,7 @@ function silentRun(turnId: string): DecisionRun {
     decision: {
       action: 'silent', responsibilityMatch: false, category: 'test', replyText: '',
       reasonCode: 'test', workType: 'discussion', delegation: 'not_required',
+      contextUpdate: null,
     },
     subagentThreadId: null,
   };

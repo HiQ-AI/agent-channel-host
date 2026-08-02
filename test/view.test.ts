@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, readFile, rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { defaultConfig } from '../src/config.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
-import { renderStatusView } from '../src/view.js';
+import {
+  createManagementViewState, createSettingEntries, handleManagementViewInput, renderManagementView, renderStatusView,
+  shouldStartHostForView, type ViewInstance,
+} from '../src/view.js';
 
 test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完整 provider session ID', () => {
   const store = new Store(':memory:');
@@ -49,7 +55,7 @@ test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完�
     assert.doesNotMatch(serialized, /open-secret-user|高度敏感|provider-session-complete-secret|张三/);
     assert.match(serialized, /provider-ses/);
     assert.match(serialized, /张\*\*\*三/);
-    const rendered = renderStatusView('test', snapshot, 120);
+    const rendered = renderStatusView([viewInstance('test', defaultConfig('test', '.', 'Agent', '角色'), store)], false, 120);
     for (const section of ['CHANNELS', 'MESSAGES', 'CONVERSATIONS', 'RUNTIMES']) assert.match(rendered, new RegExp(section));
     assert.match(rendered, /gpt-test/);
     assert.doesNotMatch(rendered, /open-secret-user|高度敏感|provider-session-complete-secret/);
@@ -58,3 +64,151 @@ test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完�
     store.close();
   }
 });
+
+test('management view 默认显示跨会话总览，可进入详情并切换设置 tab', () => {
+  const store = new Store(':memory:');
+  const secondStore = new Store(':memory:');
+  const config = defaultConfig('management-view', '.', 'Agent', '角色');
+  const secondConfig = defaultConfig('second-agent', '.', 'Second Agent', '评审');
+  const first = store.addConversation({
+    kind: 'direct', externalId: 'member-a', title: '私聊 A', responsibility: '答疑', mode: 'shadow',
+  });
+  secondStore.addConversation({
+    channelId: 'slack', channelProfileId: 'workspace', runtimeId: 'claude',
+    kind: 'group', externalId: 'channel-b', title: '群 B', responsibility: '评审', mode: 'shadow',
+  });
+  try {
+    const instances = [
+      viewInstance('management-view', config, store),
+      viewInstance('second-agent', secondConfig, secondStore),
+    ];
+    const state = createManagementViewState();
+    const detail = store.conversationDetail(first.id);
+    const settings = createSettingEntries(config, store, first.id);
+    const overview = renderManagementView(instances, state, detail, settings, 140);
+    assert.match(overview, /\[ 总览 \]\s+设置/);
+    assert.match(overview, /management-view/);
+    assert.match(overview, /second-agent/);
+    assert.match(overview, /私聊 A/);
+    assert.match(overview, /群 B/);
+    assert.match(overview, /dingtalk/);
+    assert.match(overview, /slack/);
+
+    state.detailInstanceName = 'management-view';
+    state.detailConversationId = first.id;
+    const detailView = renderManagementView(instances, state, detail, settings, 140);
+    assert.match(detailView, /会话详情 \/ 私聊 A/);
+    assert.doesNotMatch(detailView, /member-a/);
+
+    state.detailInstanceName = null;
+    state.detailConversationId = null;
+    state.tab = 'settings';
+    const settingsView = renderManagementView(instances, state, detail, settings, 140);
+    assert.match(settingsView, /总览\s+\[ 设置 \]/);
+    assert.match(settingsView, /Agent 名称/);
+    assert.match(settingsView, /会话职责 · 私聊 A/);
+  } finally {
+    store.close();
+    secondStore.close();
+  }
+});
+
+test('settings 使用同一 schema 原子保存 config，并更新 conversation 与成员资料', async () => {
+  const root = resolve('.test-view-settings');
+  const configFile = resolve(root, 'config.yaml');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const store = new Store(':memory:');
+  const config = defaultConfig('view-settings', '.', 'Agent', '角色');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'member-settings', title: '设置私聊', responsibility: '旧职责', mode: 'shadow',
+  });
+  store.updateConversationMember(conversation.id, 'member-settings', { displayName: '成员甲' });
+  try {
+    let entries = createSettingEntries(config, store, conversation.id, configFile);
+    await entries.find((entry) => entry.key === 'identity.name')!.apply('新 Agent');
+    assert.equal(config.identity.name, '新 Agent');
+    assert.match(await readFile(configFile, 'utf8'), /name: 新 Agent/);
+    entries = createSettingEntries(config, store, conversation.id, configFile);
+    await entries.find((entry) => entry.key === 'identity.role')!.apply('更新后的角色');
+    assert.equal(config.identity.role, '更新后的角色');
+    assert.match(await readFile(configFile, 'utf8'), /role: 更新后的角色/);
+    await assert.rejects(entries.find((entry) => entry.key === 'runtime.effort')!.apply('light'), /Invalid option/);
+
+    entries = createSettingEntries(config, store, conversation.id, configFile);
+    await entries.find((entry) => entry.key.endsWith(':responsibility'))!.apply('新职责边界');
+    await entries.find((entry) => entry.key.endsWith(':mode'))!.apply('reply');
+    await entries.find((entry) => entry.key.endsWith(':organizationRole'))!.apply('产品经理');
+    assert.equal(store.getConversation(conversation.id)?.responsibility, '新职责边界');
+    assert.equal(store.getConversation(conversation.id)?.mode, 'reply');
+    assert.equal(store.getConversation(conversation.id)?.policyVersion, 3);
+    assert.equal(store.listConversationMembers(conversation.id)[0]?.organizationRole, '产品经理');
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('view 仅在交互模式且 Host 未运行时启动 owner', () => {
+  assert.equal(shouldStartHostForView(false, { hostState: 'stopped' }), true);
+  assert.equal(shouldStartHostForView(false, { hostState: 'running' }), false);
+  assert.equal(shouldStartHostForView(true, { hostState: 'stopped' }), false);
+});
+
+test('management view 按键可从总览进入详情并切换设置编辑', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('view-input', '.', 'Agent', '角色');
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'view-input-group', title: '按键验证群', responsibility: '答疑', mode: 'shadow',
+  });
+  const state = createManagementViewState();
+  const instances = [viewInstance('view-input', config, store)];
+  let stopped = false;
+  try {
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    assert.equal(state.detailInstanceName, 'view-input');
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    assert.equal(state.detailConversationId, conversation.id);
+    await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
+    assert.equal(state.detailConversationId, null);
+    await handleManagementViewInput('\t', state, instances, () => { stopped = true; });
+    assert.equal(state.tab, 'settings');
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    assert.equal(state.editing?.key, 'identity.name');
+    await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
+    assert.equal(state.editing, null);
+    await handleManagementViewInput('q', state, instances, () => { stopped = true; });
+    assert.equal(stopped, true);
+  } finally {
+    store.close();
+  }
+});
+
+test('settings 在上层 view 中显式切换 instance 后编辑对应配置', async () => {
+  const firstStore = new Store(':memory:');
+  const secondStore = new Store(':memory:');
+  const firstConfig = defaultConfig('first', '.', 'First Agent', '答疑');
+  const secondConfig = defaultConfig('second', '.', 'Second Agent', '评审');
+  const instances = [
+    viewInstance('first', firstConfig, firstStore),
+    viewInstance('second', secondConfig, secondStore),
+  ];
+  const state = createManagementViewState();
+  state.tab = 'settings';
+  try {
+    await handleManagementViewInput(']', state, instances, () => undefined);
+    assert.equal(state.selectedInstance, 1);
+    await handleManagementViewInput('\r', state, instances, () => undefined);
+    assert.equal(state.editing?.key, 'identity.name');
+    assert.equal(state.editing?.value, 'Second Agent');
+    const rendered = renderManagementView(instances, state, null, createSettingEntries(secondConfig, secondStore, null), 120);
+    assert.match(rendered, /instance=second/);
+  } finally {
+    firstStore.close();
+    secondStore.close();
+  }
+});
+
+function viewInstance(name: string, config: ReturnType<typeof defaultConfig>, store: Store): ViewInstance {
+  return { name, config, store, hostOwnership: 'attached', notices: [] };
+}

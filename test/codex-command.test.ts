@@ -13,7 +13,7 @@ import type { Conversation } from '../src/types.js';
 const conversation: Conversation = {
   id: 'conversation', channelId: 'dingtalk', channelProfileId: 'default', kind: 'group',
   externalId: 'group', title: '测试群', responsibility: '回答测试问题', mode: 'shadow',
-  runtimeId: 'codex', workerWarmSeconds: 30, enabled: true,
+  runtimeId: 'codex', workerWarmSeconds: 30, policyVersion: 1, enabled: true,
   createdAt: '2026-01-01', updatedAt: '2026-01-01',
 };
 
@@ -21,21 +21,23 @@ test('结构化决策 fail closed', () => {
   assert.doesNotThrow(() => validateDecision({
     action: 'silent', responsibilityMatch: false, category: 'out_of_scope', replyText: '', reasonCode: 'outside',
     workType: 'discussion', delegation: 'not_required',
+    contextUpdate: null,
   }, '- Agent代回'));
   assert.throws(() => validateDecision({
     action: 'reply', responsibilityMatch: true, category: 'question', replyText: '没有签名', reasonCode: 'inside',
     workType: 'discussion', delegation: 'not_required',
+    contextUpdate: null,
   }, '- Agent代回'), /必须有正文/);
 });
 
 test('新建与 resume 使用同一命令协议并显式携带 session ID', () => {
   const config = defaultConfig('test', '.', 'Agent', 'role');
   const created = buildCodexExecArgs(config, conversation, 'schema.json', 'hello', null);
-  assert.deepEqual(created.slice(0, 3), ['exec', '--json', '--output-schema']);
+  assert.deepEqual(created.slice(0, 4), ['exec', '--dangerously-bypass-hook-trust', '--json', '--output-schema']);
   assert.ok(created.includes('--sandbox'));
   assert.ok(created.some((arg) => arg.startsWith('developer_instructions=')));
   const resumed = buildCodexExecArgs(config, conversation, 'schema.json', 'again', 'session-1');
-  assert.deepEqual(resumed.slice(0, 4), ['exec', 'resume', '--json', '--output-schema']);
+  assert.deepEqual(resumed.slice(0, 5), ['exec', 'resume', '--dangerously-bypass-hook-trust', '--json', '--output-schema']);
   assert.deepEqual(resumed.slice(-2), ['session-1', 'again']);
 });
 
@@ -63,6 +65,7 @@ test('实施类决策必须有真实后台派发证据且主会话不能等待�
     reasonCode: 'delegated',
     workType: 'implementation' as const,
     delegation: 'started' as const,
+    contextUpdate: null,
   };
   assert.doesNotThrow(() => validateDecision(decision, '- Agent代回', {
     spawnedSubagentThreadIds: ['child-thread'], waitedForSubagent: false, mainWorkItems: [],

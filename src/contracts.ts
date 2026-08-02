@@ -23,6 +23,7 @@ export interface RuntimeDescriptor {
   label: string;
   model: string | null;
   protocolFingerprint: string;
+  contextRecovery: 'session-start-hook' | 'adapter-managed' | 'unavailable';
 }
 
 export interface AgentSession {

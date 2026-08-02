@@ -1,0 +1,85 @@
+import assert from 'node:assert/strict';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { defaultConfig } from '../../../../dist/src/config.js';
+import { Store } from '../../../../dist/src/store.js';
+import { runView } from '../../../../dist/src/view.js';
+
+const root = resolve(process.argv[2] ?? '');
+if (!process.argv[2]) throw new Error('缺少 smoke 状态目录');
+if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('必须在真实交互终端运行');
+
+await mkdir(root, { recursive: true });
+const resultPath = join(root, 'result.json');
+const store = new Store(join(root, 'first-state.sqlite3'));
+const secondStore = new Store(join(root, 'second-state.sqlite3'));
+const config = defaultConfig('tui-smoke', root, '小小鹏', '编辑器需求、方案与 bug 排查答疑');
+const secondConfig = defaultConfig('second-agent', root, '翠丝', '跨 Channel 方案评审');
+const first = store.addConversation({
+  kind: 'group', externalId: 'synthetic-group', title: '编辑器验证群',
+  responsibility: '回答编辑器需求、方案与 bug 排查；不负责开发实现', mode: 'shadow',
+});
+secondStore.addConversation({
+  channelId: 'slack', channelProfileId: 'synthetic', runtimeId: 'claude',
+  kind: 'direct', externalId: 'synthetic-direct', title: '跨 Channel 私聊',
+  responsibility: '回答职责范围内问题', mode: 'shadow',
+});
+store.updateConversationMember(first.id, 'synthetic-member', {
+  displayName: '成员甲', organizationRole: '产品经理', conversationRole: '需求提出人',
+});
+store.setChannelConnection({
+  channelId: 'dingtalk', profileId: 'default', label: 'Synthetic DingTalk', state: 'stopped', ownerPid: null,
+});
+secondStore.setChannelConnection({
+  channelId: 'slack', profileId: 'synthetic', label: 'Synthetic Slack', state: 'stopped', ownerPid: null,
+});
+store.setRuntimeAdapter({
+  runtimeId: 'codex', label: 'Codex CLI', state: 'stopped', model: 'gpt-5.6-sol', contextRecovery: 'session-start-hook',
+});
+secondStore.setRuntimeAdapter({
+  runtimeId: 'claude', label: 'Claude CLI', state: 'stopped', model: null, contextRecovery: 'unavailable',
+});
+
+const originalWrite = process.stdout.write.bind(process.stdout);
+let transcript = '';
+process.stdout.write = (chunk, ...args) => {
+  transcript += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+  return originalWrite(chunk, ...args);
+};
+
+const keys = [
+  [5_000, '\r'],
+  [6_000, '\r'],
+  [8_000, '\u001b'],
+  [10_000, '\t'],
+  [12_000, ']'],
+  [13_000, '\r'],
+  [14_000, '\u001b'],
+  [16_000, 'q'],
+];
+for (const [delay, key] of keys) setTimeout(() => process.stdin.emit('data', Buffer.from(key)), delay);
+
+try {
+  await runView([
+    { name: 'tui-smoke', config, store, hostOwnership: 'attached', notices: ['合成终端 smoke；未连接 Channel'] },
+    { name: 'second-agent', config: secondConfig, store: secondStore, hostOwnership: 'attached', notices: [] },
+  ], { intervalSeconds: 10, once: false, showContent: false });
+  assert.match(transcript, /\[ 总览 \]/);
+  assert.match(transcript, /instances=2/);
+  assert.match(transcript, /second-agent/);
+  assert.match(transcript, /编辑器验证群/);
+  assert.match(transcript, /跨 Channel 私聊/);
+  assert.match(transcript, /\[ 设置 \]/);
+  assert.match(transcript, /instance=second-agent/);
+  assert.match(transcript, /编辑 Agent 名称/);
+  await writeFile(resultPath, JSON.stringify({
+    ok: true,
+    tty: { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY },
+    observed: ['global-overview', 'instance-detail', 'conversation-detail', 'settings', 'instance-switch', 'editing', 'exit'],
+    channelStarted: false,
+  }, null, 2));
+} finally {
+  process.stdout.write = originalWrite;
+  store.close();
+  secondStore.close();
+}

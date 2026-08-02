@@ -13,6 +13,15 @@ interface WorkerHandle {
   leaseTimer: NodeJS.Timeout;
 }
 
+export interface HostRunOptions {
+  signal?: AbortSignal;
+  handleProcessSignals?: boolean;
+  log?: (record: Record<string, unknown>) => void;
+  channel?: ChannelAdapter;
+  runtime?: RuntimeAdapter;
+  ownerLock?: { ownerId: string; acquire(): Promise<void>; release(): Promise<void> };
+}
+
 export class EventDrivenScheduler {
   private readonly workers = new Map<string, WorkerHandle>();
   private readonly starts = new Map<string, Promise<WorkerHandle>>();
@@ -107,7 +116,8 @@ export class EventDrivenScheduler {
   private scheduleWarmRelease(worker: ConversationWorker): void {
     if (this.stopping || this.workers.get(worker.conversation.id)?.worker !== worker) return;
     this.clearWarmTimer(worker.conversation.id);
-    const delayMs = worker.conversation.workerWarmSeconds * this.secondMs;
+    const current = this.store.getConversation(worker.conversation.id);
+    const delayMs = (current?.workerWarmSeconds ?? worker.conversation.workerWarmSeconds) * this.secondMs;
     const warmUntil = new Date(Date.now() + delayMs).toISOString();
     this.store.setWorkerState({
       conversationId: worker.conversation.id,
@@ -183,12 +193,15 @@ export class EventDrivenScheduler {
   }
 }
 
-export async function runHost(config: HostConfig): Promise<void> {
+export async function runHost(config: HostConfig, options: HostRunOptions = {}): Promise<void> {
   const store = new Store(statePath(config.instance));
-  const lock = new OwnerLock(config.instance, config.channel.profile);
-  const log = (record: Record<string, unknown>) => {
-    process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), instance: config.instance, ...record })}\n`);
-  };
+  const lock = options.ownerLock ?? new OwnerLock(config.instance, config.channel.profile);
+  const sink = options.log ?? ((record: Record<string, unknown>) => {
+    process.stdout.write(`${JSON.stringify(record)}\n`);
+  });
+  const log = (record: Record<string, unknown>) => sink({
+    at: new Date().toISOString(), instance: config.instance, ...record,
+  });
   let fatal: Error | null = null;
   let stopResolve!: () => void;
   const stopSignal = new Promise<void>((resolve) => { stopResolve = resolve; });
@@ -202,14 +215,24 @@ export async function runHost(config: HostConfig): Promise<void> {
   let leaseTimer: NodeJS.Timeout | null = null;
   let scheduler: EventDrivenScheduler | null = null;
   let runtimeInitialized = false;
-  const channel = new DwsChannelAdapter(config);
+  let lockAcquired = false;
+  let leaseAcquired = false;
+  let channelOwned = false;
+  const channel = options.channel ?? new DwsChannelAdapter(config);
   const channels = new Map([[channelKey(channel.descriptor.channelId, channel.descriptor.profileId), channel as ChannelAdapter]]);
+  const abortHandler = () => requestStop();
+  if (options.signal?.aborted) requestStop();
+  else options.signal?.addEventListener('abort', abortHandler, { once: true });
+  const signalHandler = () => requestStop();
 
   try {
+    if (options.signal?.aborted) return;
     await lock.acquire();
+    lockAcquired = true;
     if (!store.acquireLease('host', lock.ownerId, Date.now(), 30_000)) {
       throw new Error('instance 数据库 lease 已被其他 Host 持有');
     }
+    leaseAcquired = true;
     leaseTimer = setInterval(() => {
       if (!store.renewLease('host', lock.ownerId, Date.now(), 30_000)) requestStop(new Error('Host lease 丢失'));
     }, 10_000);
@@ -219,15 +242,18 @@ export async function runHost(config: HostConfig): Promise<void> {
       runtimeId: config.runtime.id, label: 'Codex CLI', state: 'starting',
       model: config.runtime.model,
     });
-    let runtime: CodexRuntimeAdapter;
-    try {
-      runtime = await CodexRuntimeAdapter.create(config, store);
-    } catch (error) {
-      store.setRuntimeAdapter({
-        runtimeId: config.runtime.id, label: 'Codex CLI', state: 'error',
-        model: config.runtime.model, error: (error as Error).message,
-      });
-      throw error;
+    let runtime: RuntimeAdapter;
+    if (options.runtime) runtime = options.runtime;
+    else {
+      try {
+        runtime = await CodexRuntimeAdapter.create(config, store);
+      } catch (error) {
+        store.setRuntimeAdapter({
+          runtimeId: config.runtime.id, label: 'Codex CLI', state: 'error',
+          model: config.runtime.model, error: (error as Error).message,
+        });
+        throw error;
+      }
     }
     runtimeInitialized = true;
     store.setRuntimeAdapter({
@@ -236,6 +262,7 @@ export async function runHost(config: HostConfig): Promise<void> {
       state: 'ready',
       model: runtime.descriptor.model,
       protocolFingerprint: runtime.descriptor.protocolFingerprint,
+      contextRecovery: runtime.descriptor.contextRecovery,
     });
     const runtimes = new Map([[runtime.descriptor.runtimeId, runtime as RuntimeAdapter]]);
     log({
@@ -245,6 +272,7 @@ export async function runHost(config: HostConfig): Promise<void> {
     scheduler = new EventDrivenScheduler(config, store, channels, runtimes, log, requestStop);
 
     const descriptor = channel.descriptor;
+    channelOwned = true;
     store.setChannelConnection({
       ...descriptor,
       state: 'starting',
@@ -291,12 +319,11 @@ export async function runHost(config: HostConfig): Promise<void> {
       conversations: store.listConversations(true).length, activeWorkers: scheduler.activeWorkerCount(),
     });
 
-    const signalHandler = () => requestStop();
-    process.once('SIGINT', signalHandler);
-    process.once('SIGTERM', signalHandler);
+    if (options.handleProcessSignals !== false) {
+      process.once('SIGINT', signalHandler);
+      process.once('SIGTERM', signalHandler);
+    }
     await stopSignal;
-    process.removeListener('SIGINT', signalHandler);
-    process.removeListener('SIGTERM', signalHandler);
   } catch (error) {
     fatal = error instanceof Error ? error : new Error(String(error));
     log({ type: 'HOST_FATAL', error: fatal.message });
@@ -304,22 +331,27 @@ export async function runHost(config: HostConfig): Promise<void> {
     const fatalError = fatal as Error | null;
     if (leaseTimer) clearInterval(leaseTimer);
     await scheduler?.stop();
-    await channel.stop().catch((error) => log({ type: 'CHANNEL_STOP_ERROR', error: (error as Error).message }));
-    store.setChannelConnection({
-      ...channel.descriptor,
-      state: fatalError ? 'error' : 'stopped',
-      ownerPid: null,
-      error: fatalError?.message ?? null,
-    });
+    if (channelOwned) {
+      await channel.stop().catch((error) => log({ type: 'CHANNEL_STOP_ERROR', error: (error as Error).message }));
+      store.setChannelConnection({
+        ...channel.descriptor,
+        state: fatalError ? 'error' : 'stopped',
+        ownerPid: null,
+        error: fatalError?.message ?? null,
+      });
+    }
     if (runtimeInitialized) {
       store.setRuntimeAdapter({
         runtimeId: config.runtime.id, label: 'Codex CLI', state: fatalError ? 'error' : 'stopped',
         model: config.runtime.model, error: fatalError?.message ?? null,
       });
     }
-    store.releaseLease('host', lock.ownerId);
+    if (leaseAcquired) store.releaseLease('host', lock.ownerId);
     store.close();
-    await lock.release();
+    if (lockAcquired) await lock.release();
+    options.signal?.removeEventListener('abort', abortHandler);
+    process.removeListener('SIGINT', signalHandler);
+    process.removeListener('SIGTERM', signalHandler);
     log({ type: 'HOST_STOPPED', fatal: fatal ? (fatal as Error).message : null });
   }
   if (fatal) throw fatal;

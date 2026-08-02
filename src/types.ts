@@ -14,8 +14,36 @@ export interface Conversation {
   mode: ConversationMode;
   runtimeId: string;
   workerWarmSeconds: number;
+  policyVersion: number;
   enabled: boolean;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationContextUpdate {
+  currentTopic: string;
+  facts: string[];
+  decisions: string[];
+  commitments: string[];
+  openQuestions: string[];
+}
+
+export interface ConversationContext extends ConversationContextUpdate {
+  conversationId: string;
+  version: number;
+  throughSequence: number;
+  updatedAt: string;
+}
+
+export interface ConversationMember {
+  conversationId: string;
+  externalUserId: string;
+  displayName: string | null;
+  organizationRole: string;
+  conversationRole: string;
+  responsibilityBoundary: string;
+  source: 'message' | 'manual';
+  version: number;
   updatedAt: string;
 }
 
@@ -51,6 +79,7 @@ export interface Decision {
   reasonCode: string;
   workType: 'discussion' | 'implementation';
   delegation: 'not_required' | 'started';
+  contextUpdate: ConversationContextUpdate | null;
 }
 
 export interface SessionRecord {

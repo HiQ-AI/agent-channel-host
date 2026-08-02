@@ -4,21 +4,21 @@ import { access } from 'node:fs/promises';
 import {
   CODEX_REASONING_EFFORTS, defaultConfig, loadConfig, writeConfig, writeInitialConfig,
 } from './config.js';
-import { configPath, statePath } from './paths.js';
+import { configPath, discoverInstances, statePath } from './paths.js';
 import { Store } from './store.js';
 import { dwsDoctor, resolveExactGroup } from './dws.js';
 import { CodexCommandSession, verifyCodexCommand } from './codex-command.js';
 import { runHost } from './host.js';
 import { installUserService, removeUserService, windowsServicePlan } from './service.js';
 import { MAX_WORKER_WARM_SECONDS } from './types.js';
-import { runView } from './view.js';
+import { assertInteractiveView, runView, shouldStartHostForView, type ViewInstance } from './view.js';
 import { CLI_NAME } from './product.js';
 
 const program = new Command();
 program
   .name(CLI_NAME)
   .description('将 Channel 消息路由到每个会话独立、可恢复的 Agent runtime session')
-  .version('0.3.0');
+  .version('0.4.0');
 
 program.command('init')
   .description('初始化一个不含凭据的用户级 Host instance')
@@ -51,7 +51,7 @@ program.command('init')
     });
     store.setRuntimeAdapter({
       runtimeId: config.runtime.id, label: 'Codex CLI', state: 'stopped',
-      model: config.runtime.model,
+      model: config.runtime.model, contextRecovery: 'session-start-hook',
     });
     store.close();
     print({ ok: true, instance: options.instance, configPath: path, statePath: statePath(options.instance) });
@@ -226,23 +226,62 @@ program.command('status')
   });
 
 program.command('view')
-  .description('像 top 一样查看 Host、Channel、消息、conversation 和 runtime Worker')
-  .requiredOption('--instance <name>', 'instance 名称')
+  .description('启动或 attach 全部 instance Host，并打开聚合总览、详情和设置界面')
   .option('--interval <seconds>', '刷新间隔秒数', parseViewInterval, 1)
-  .option('--once', '只渲染一次后退出；管道和脚本必须使用此模式', false)
+  .option('--once', '只读渲染一次且不启动 Host；管道和脚本必须使用此模式', false)
   .option('--show-content', '在当前用户本地显示截断消息正文预览', false)
   .action(async (options) => {
-    await loadConfig(options.instance);
-    const store = new Store(statePath(options.instance));
+    const viewOptions = {
+      intervalSeconds: options.interval,
+      once: options.once,
+      showContent: options.showContent,
+    };
+    assertInteractiveView(viewOptions);
+    const instanceNames = await discoverInstances();
+    const instances: ViewInstance[] = [];
     try {
-      await runView(store, {
-        instance: options.instance,
-        intervalSeconds: options.interval,
-        once: options.once,
-        showContent: options.showContent,
-      });
+      for (const name of instanceNames) {
+        instances.push({
+          name,
+          config: await loadConfig(name),
+          store: new Store(statePath(name)),
+          hostOwnership: 'readonly',
+          notices: [],
+        });
+      }
+    } catch (error) {
+      for (const instance of instances) instance.store.close();
+      throw error;
+    }
+    const startedHosts: Array<{ instance: ViewInstance; abort: AbortController; promise: Promise<void> }> = [];
+    const hostFailures: Array<{ instance: string; error: Error }> = [];
+    try {
+      for (const instance of instances) {
+        const startHost = shouldStartHostForView(options.once, instance.store.status());
+        instance.hostOwnership = options.once ? 'readonly' : startHost ? 'view' : 'attached';
+        if (!startHost) continue;
+        const abort = new AbortController();
+        const promise = runHost(instance.config, {
+          signal: abort.signal,
+          handleProcessSignals: false,
+          log: (record) => {
+            instance.notices.push(hostNotice(record));
+            if (instance.notices.length > 50) instance.notices.shift();
+          },
+        }).catch((error) => {
+          hostFailures.push({ instance: instance.name, error: error as Error });
+          instance.notices.push(`Host 异常：${(error as Error).message}`);
+        });
+        startedHosts.push({ instance, abort, promise });
+      }
+      await runView(instances, viewOptions);
     } finally {
-      store.close();
+      for (const host of startedHosts) host.abort.abort();
+      await Promise.all(startedHosts.map((host) => host.promise));
+      for (const instance of instances) instance.store.close();
+    }
+    if (hostFailures.length > 0) {
+      throw new Error(hostFailures.map(({ instance, error }) => `${instance}: ${error.message}`).join('; '));
     }
   });
 
@@ -269,6 +308,7 @@ program.command('verify')
         state: 'stopped',
         model: config.runtime.model,
         protocolFingerprint: runtime.fingerprint,
+        contextRecovery: 'session-start-hook',
       });
       session = new CodexCommandSession(config, target, runtime, store);
       const startup = await session.start();
@@ -276,6 +316,7 @@ program.command('verify')
 [宿主离线验证事件；不是钉钉消息]
 当前没有待处理消息，禁止发言。返回 action="silent"、responsibilityMatch=false、category="verify"、replyText=""、reasonCode="offline_canary"。
 同时返回 workType="discussion"、delegation="not_required"。
+返回 contextUpdate=null。
 `.trim());
       if (canary.status !== 'completed' || canary.decision?.action !== 'silent' || canary.decision.replyText !== '') {
         throw new Error('离线 canary 未返回严格 silent 决策');
@@ -364,4 +405,10 @@ function parseReasoningEffort(value: string): typeof CODEX_REASONING_EFFORTS[num
     throw new Error(`--effort 必须是 ${CODEX_REASONING_EFFORTS.join('、')}`);
   }
   return value as typeof CODEX_REASONING_EFFORTS[number];
+}
+
+function hostNotice(record: Record<string, unknown>): string {
+  const type = String(record.type ?? 'HOST_EVENT');
+  const error = record.error ? `：${String(record.error)}` : '';
+  return `${type}${error}`;
 }
