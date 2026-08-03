@@ -62,6 +62,41 @@ npm link
 agent-channel --help
 ```
 
+### 更新已有的源码安装
+
+先退出正在运行的 `agent-channel view`。如果目标 Instance 由 Windows 用户计划任务常驻，先用旧版本命令移除该任务：
+
+```powershell
+$instanceName = 'triss'
+agent-channel service remove --instance $instanceName
+```
+
+仓库已存在时，从最新 `main` 重新构建，并显式替换可能仍指向旧检出目录的全局 npm 链接：
+
+```powershell
+Set-Location 'D:\baibu-agent\agent-channel-host'
+git fetch origin
+git switch main
+git pull --ff-only origin main
+npm ci
+npm run verify
+
+npm unlink --global @hiq-ai/agent-channel-host
+npm link
+
+agent-channel --version
+(Get-Item "$(npm root --global)\@hiq-ai\agent-channel-host").Target
+```
+
+版本应与仓库 `package.json` 一致，链接目标应为当前仓库目录。`npm unlink/link` 只替换命令安装链接，不删除 `%LOCALAPPDATA%\agent-channel-host` 下的 Instance 配置、SQLite 或 runtime session 映射。
+
+交互式使用重新执行 `agent-channel view`；需要计划任务常驻时重新安装目标 Instance：
+
+```powershell
+agent-channel service install --instance $instanceName
+agent-channel status --instance $instanceName
+```
+
 ## 初始化
 
 初始化只写本地配置和空 SQLite 数据库，不启动订阅或发送消息：
