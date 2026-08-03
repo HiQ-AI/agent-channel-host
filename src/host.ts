@@ -146,7 +146,6 @@ export class EventDrivenScheduler {
       conversation,
       session,
       this.store,
-      channel,
       this.log,
       (idleWorker) => this.scheduleWarmRelease(idleWorker),
     );

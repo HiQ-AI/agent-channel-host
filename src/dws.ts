@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
 import type { HostConfig } from './config.js';
-import { ChannelDeliveryUnknownError, type ChannelAdapter, type ChannelHandlers } from './contracts.js';
-import type { Conversation, ConversationKind, NormalizedEvent, OutboxRecord } from './types.js';
+import type { ChannelAdapter, ChannelHandlers } from './contracts.js';
+import type { Conversation, ConversationKind, NormalizedEvent } from './types.js';
 import { delay, stopChild, withTimeout } from './process-utils.js';
 import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from './command.js';
 export const GROUP_EVENT = 'user_im_message_receive_group_all';
@@ -397,40 +397,9 @@ export class DwsEventOwner {
   }
 }
 
-export class DwsSender {
-  constructor(
-    private readonly config: HostConfig,
-    private readonly runner: typeof runDwsJson = runDwsJson,
-  ) {}
-
-  async send(
-    conversation: { kind: ConversationKind; externalId: string },
-    record: Pick<OutboxRecord, 'text' | 'uuid'>,
-  ): Promise<void> {
-    const target = conversation.kind === 'group'
-      ? ['--group', conversation.externalId]
-      : ['--open-dingtalk-id', conversation.externalId];
-    let result: Record<string, unknown>;
-    try {
-      result = await this.runner(this.config, [
-        'chat', 'message', 'send', ...target,
-        '--text', record.text, '--uuid', record.uuid, '--ai-tag=true', '--yes',
-      ], 45_000) as Record<string, unknown>;
-    } catch (error) {
-      if (isDwsRepeatedUuidError(error)) throw new ChannelDeliveryUnknownError('duplicate_uuid');
-      throw error;
-    }
-    if (isDwsRepeatedUuidResponse(result)) throw new ChannelDeliveryUnknownError('duplicate_uuid');
-    if (result.success !== true) {
-      throw new Error(`DWS 发送失败：${dwsFailureSummary(result, null)}`);
-    }
-  }
-}
-
 export class DwsChannelAdapter implements ChannelAdapter {
   readonly descriptor;
   private owner: DwsEventOwner | null = null;
-  private readonly sender: DwsSender;
 
   constructor(private readonly config: HostConfig) {
     this.descriptor = {
@@ -438,7 +407,6 @@ export class DwsChannelAdapter implements ChannelAdapter {
       profileId: config.channel.profileId,
       label: 'DingTalk DWS',
     };
-    this.sender = new DwsSender(config);
   }
 
   async start(handlers: ChannelHandlers): Promise<void> {
@@ -460,9 +428,6 @@ export class DwsChannelAdapter implements ChannelAdapter {
     this.owner = null;
   }
 
-  send(conversation: Conversation, record: Pick<OutboxRecord, 'text' | 'uuid'>): Promise<void> {
-    return this.sender.send(conversation, record);
-  }
 }
 
 function profileArgs(config: HostConfig): string[] {

@@ -1,12 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { HostConfig } from './config.js';
-import { ChannelDeliveryUnknownError, type AgentSession, type ChannelAdapter } from './contracts.js';
-import type { AdmittedEvent, Conversation, DecisionRun, OutboxRecord } from './types.js';
+import type { AgentSession } from './contracts.js';
+import type { AdmittedEvent, Conversation, NormalizedEvent } from './types.js';
 import type { Store } from './store.js';
 import { delay } from './process-utils.js';
 import { fetchRecentGroupHistory, type RecentGroupHistory } from './dws.js';
-import { PRODUCT_ID } from './product.js';
-import { batchPrompt, recentMessagesPrompt } from './prompts.js';
+import { batchPrompt } from './prompts.js';
 
 export class ConversationWorker {
   readonly workerId = randomUUID();
@@ -15,134 +14,89 @@ export class ConversationWorker {
   private closed = false;
   private signalGeneration = 0;
   private lastSignalAtMs = 0;
-  private turnActive = false;
-  private cancelRequested = false;
 
   constructor(
     private readonly config: HostConfig,
     readonly conversation: Conversation,
     private readonly session: AgentSession,
     private readonly store: Store,
-    private readonly sender: Pick<ChannelAdapter, 'send'>,
     private readonly log: (record: Record<string, unknown>) => void,
     private readonly onIdle: (worker: ConversationWorker) => void = () => undefined,
     private readonly loadGroupHistory: (conversation: Conversation) => Promise<RecentGroupHistory>
       = (target) => fetchRecentGroupHistory(config, target),
   ) {}
 
-  get processId(): number | null {
-    return this.session.processId;
-  }
+  get processId(): number | null { return this.session.processId; }
 
   async start(): Promise<void> {
     if (this.started) return;
     const now = new Date().toISOString();
     this.store.setWorkerState({
-      conversationId: this.conversation.id,
-      workerId: this.workerId,
-      runtimeId: this.conversation.runtimeId,
-      state: 'starting',
-      processId: null,
-      startedAt: now,
+      conversationId: this.conversation.id, workerId: this.workerId,
+      runtimeId: this.conversation.runtimeId, state: 'starting', processId: null, startedAt: now,
     });
     try {
       let history: RecentGroupHistory | null = null;
       if (this.conversation.kind === 'group') {
         const onboarding = this.store.getGroupOnboarding(this.conversation.id);
         if (!onboarding) throw new Error(`群 onboarding 状态不存在：${this.conversation.id}`);
-        if (!['completed', 'submitted', 'delivered', 'delivery_unknown'].includes(onboarding.state)
-          && !onboarding.introText) {
+        if (!['completed', 'submitted', 'delivered', 'delivery_unknown'].includes(onboarding.state)) {
           history = await this.loadGroupHistory(this.conversation);
         }
       }
       await this.session.start();
-      if (this.conversation.kind === 'group') await this.onboardGroup(history);
-      await this.retryPendingOutbox();
+      if (this.conversation.kind === 'group') await this.deliverRecentHistory(history);
       this.started = true;
       this.store.setWorkerState({
-        conversationId: this.conversation.id,
-        workerId: this.workerId,
-        runtimeId: this.conversation.runtimeId,
-        state: 'warm',
-        processId: this.session.processId,
-        claimedFromSequence: null,
-        claimedToSequence: null,
-        startedAt: now,
+        conversationId: this.conversation.id, workerId: this.workerId,
+        runtimeId: this.conversation.runtimeId, state: 'warm', processId: this.session.processId,
+        claimedFromSequence: null, claimedToSequence: null, startedAt: now,
       });
       this.log({
-        type: 'WORKER_READY', conversationId: this.conversation.id, workerIdPrefix: this.workerId.slice(0, 8),
-        runtimeId: this.conversation.runtimeId, processId: this.session.processId,
-        providerSessionPrefix: this.session.currentSessionId?.slice(0, 12) ?? null,
+        type: 'WORKER_READY', conversationId: this.conversation.id,
+        workerIdPrefix: this.workerId.slice(0, 8), runtimeId: this.conversation.runtimeId,
+        processId: this.session.processId, providerSessionPrefix: this.session.currentSessionId?.slice(0, 12) ?? null,
       });
     } catch (error) {
       this.store.setWorkerState({
-        conversationId: this.conversation.id,
-        workerId: this.workerId,
-        runtimeId: this.conversation.runtimeId,
-        state: 'error',
-        processId: this.session.processId,
-        error: (error as Error).message,
-        startedAt: now,
+        conversationId: this.conversation.id, workerId: this.workerId,
+        runtimeId: this.conversation.runtimeId, state: 'error', processId: this.session.processId,
+        error: (error as Error).message, startedAt: now,
       });
       throw error;
     }
   }
 
-  private async onboardGroup(history: RecentGroupHistory | null): Promise<void> {
-    let onboarding = this.store.getGroupOnboarding(this.conversation.id);
+  private async deliverRecentHistory(history: RecentGroupHistory | null): Promise<void> {
+    const onboarding = this.store.getGroupOnboarding(this.conversation.id);
     if (!onboarding) throw new Error(`群 onboarding 状态不存在：${this.conversation.id}`);
     if (['completed', 'submitted', 'delivered', 'delivery_unknown'].includes(onboarding.state)) return;
-    if (!onboarding.introText) {
-      if (!history) throw new Error('群 onboarding 缺少最近消息上下文');
-      if (history.count === 0) {
-        this.store.completeGroupOnboardingSilently(this.conversation.id, 0, null);
-        this.log({ type: 'GROUP_HISTORY_COMPLETED', conversationId: this.conversation.id, historyCount: 0, action: 'silent' });
-        return;
-      }
-      const result = await this.session.runDecision(recentMessagesPrompt(history.messages));
-      if (result.status !== 'completed' || !result.decision) {
-        throw new Error('群最近消息处理未返回有效决定');
-      }
-      if (result.decision.action === 'silent') {
-        this.store.completeGroupOnboardingSilently(this.conversation.id, history.count, result.turnId);
+    if (!history) throw new Error('群 onboarding 缺少最近消息上下文');
+    this.store.markGroupHistoryLoaded(this.conversation.id, history.count);
+    for (const message of history.messages) {
+      this.store.admitEvent(this.conversation, historyEvent(this.conversation, message), 'history');
+    }
+    while (true) {
+      const events = this.store.claimPendingEvents(this.conversation, this.workerId, 1, 'history');
+      if (events.length === 0) break;
+      try {
+        const result = await this.session.deliver(batchPrompt(events));
+        if (result.status !== 'completed') {
+          this.store.releaseClaimedEvents(events, this.workerId);
+          throw new Error('群最近消息未成功传入 runtime');
+        }
+        this.store.recordBatchDecision(events, this.workerId, result.turnId, 'completed', null, null);
         this.log({
-          type: 'GROUP_HISTORY_COMPLETED', conversationId: this.conversation.id,
-          historyCount: history.count, action: 'silent', turnIdPrefix: result.turnId.slice(0, 12),
+          type: 'GROUP_HISTORY_DELIVERED', conversationId: this.conversation.id,
+          sequence: events[0]!.sequence, turnIdPrefix: result.turnId.slice(0, 12),
         });
-        return;
+      } catch (error) {
+        this.store.recordBatchDecision(events, this.workerId, null, 'failed', null, null, (error as Error).message);
+        throw error;
       }
-      onboarding = this.store.prepareGroupOnboarding(
-        this.conversation.id,
-        history.count,
-        result.turnId,
-        result.decision.replyText,
-        deterministicOnboardingUuid(this.conversation, result.decision.replyText),
-      );
-      this.log({
-        type: 'GROUP_HISTORY_REPLY_PREPARED', conversationId: this.conversation.id,
-        historyCount: history.count, turnIdPrefix: result.turnId.slice(0, 12),
-      });
     }
-    if (['completed', 'submitted', 'delivered'].includes(onboarding.state)) return;
-    if (this.conversation.mode !== 'reply') {
-      this.log({ type: 'GROUP_ONBOARDING_DEFERRED', conversationId: this.conversation.id, reason: 'shadow-mode' });
-      return;
-    }
-    const claimed = this.store.claimGroupOnboardingIntro(this.conversation.id);
-    if (!claimed) return;
-    if (!claimed.introText || !claimed.introUuid) throw new Error('群 onboarding 发送记录不完整');
-    try {
-      await this.sender.send(this.conversation, { text: claimed.introText, uuid: claimed.introUuid });
-      this.store.finishGroupOnboardingIntro(this.conversation.id, 'submitted', null);
-      this.log({ type: 'GROUP_ONBOARDING_SUBMITTED', conversationId: this.conversation.id });
-    } catch (error) {
-      const state = error instanceof ChannelDeliveryUnknownError ? 'delivery_unknown' : 'failed';
-      this.store.finishGroupOnboardingIntro(this.conversation.id, state, (error as Error).message);
-      this.log({
-        type: state === 'delivery_unknown' ? 'GROUP_ONBOARDING_DELIVERY_UNKNOWN' : 'GROUP_ONBOARDING_FAILED',
-        conversationId: this.conversation.id, error: (error as Error).message,
-      });
-    }
+    this.store.refreshGroupOnboardingFromHistory(this.conversation.id);
+    this.log({ type: 'GROUP_HISTORY_COMPLETED', conversationId: this.conversation.id, historyCount: history.count });
   }
 
   signal(): void {
@@ -150,30 +104,14 @@ export class ConversationWorker {
     this.signalGeneration += 1;
     this.lastSignalAtMs = Date.now();
     this.store.setWorkerState({
-      conversationId: this.conversation.id,
-      workerId: this.workerId,
-      runtimeId: this.conversation.runtimeId,
-      state: this.draining ? 'running' : 'warm',
-      processId: this.session.processId,
-      lastSignalAt: new Date(this.lastSignalAtMs).toISOString(),
+      conversationId: this.conversation.id, workerId: this.workerId,
+      runtimeId: this.conversation.runtimeId, state: this.draining ? 'running' : 'warm',
+      processId: this.session.processId, lastSignalAt: new Date(this.lastSignalAtMs).toISOString(),
     });
-    if (this.draining) {
-      if (this.turnActive && !this.cancelRequested) {
-        this.cancelRequested = true;
-        void this.session.interruptActive()
-          .then((interrupted) => {
-            if (interrupted) this.log({ type: 'TURN_CANCEL_REQUESTED', conversationId: this.conversation.id });
-          })
-          .catch((error) => this.onError(error as Error, []));
-      }
-      return;
-    }
-    this.startDrain();
+    if (!this.draining) this.startDrain();
   }
 
-  isBusy(): boolean {
-    return this.draining !== null || Boolean(this.session.hasBackgroundWork?.());
-  }
+  isBusy(): boolean { return this.draining !== null || Boolean(this.session.hasBackgroundWork?.()); }
 
   private startDrain(): void {
     this.draining = this.drain().finally(() => {
@@ -186,61 +124,29 @@ export class ConversationWorker {
   private async drain(): Promise<void> {
     while (!this.closed) {
       await this.waitForQuietWindow();
-      const claimedGeneration = this.signalGeneration;
-      const events = this.store.claimPendingEvents(
-        this.conversation,
-        this.workerId,
-        this.config.scheduling.maxBatchMessages,
-      );
+      const events = this.store.claimPendingEvents(this.conversation, this.workerId, 1);
       if (events.length === 0) break;
-      const first = events[0]!.sequence;
-      const last = events.at(-1)!.sequence;
+      const event = events[0]!;
       this.store.setWorkerState({
-        conversationId: this.conversation.id,
-        workerId: this.workerId,
-        runtimeId: this.conversation.runtimeId,
-        state: 'running',
-        processId: this.session.processId,
-        claimedFromSequence: first,
-        claimedToSequence: last,
+        conversationId: this.conversation.id, workerId: this.workerId,
+        runtimeId: this.conversation.runtimeId, state: 'running', processId: this.session.processId,
+        claimedFromSequence: event.sequence, claimedToSequence: event.sequence,
       });
       try {
-        this.cancelRequested = false;
-        this.turnActive = true;
-        let result: DecisionRun;
-        try {
-          result = await this.session.runDecision(
-            batchPrompt(events),
-            () => this.signalGeneration > claimedGeneration,
-          );
-        } finally {
-          this.turnActive = false;
-        }
-        if (result.status === 'interrupted') {
+        const result = await this.session.deliver(batchPrompt(events));
+        if (result.status !== 'completed') {
           this.store.releaseClaimedEvents(events, this.workerId);
           this.log({
-            type: 'BATCH_INTERRUPTED', conversationId: this.conversation.id,
-            fromSequence: first, toSequence: last, turnIdPrefix: result.turnId.slice(0, 12),
+            type: 'MESSAGE_DELIVERY_INTERRUPTED', conversationId: this.conversation.id,
+            sequence: event.sequence, turnIdPrefix: result.turnId.slice(0, 12),
           });
-          continue;
+          break;
         }
-        const tail = events.at(-1)!;
-        const outbox = this.store.recordBatchDecision(
-          events,
-          this.workerId,
-          result.turnId,
-          'completed',
-          result.decision,
-          result.decision?.action === 'reply'
-            ? { text: result.decision.replyText, uuid: deterministicUuid(tail) }
-            : null,
-        );
+        this.store.recordBatchDecision(events, this.workerId, result.turnId, 'completed', null, null);
         this.log({
-          type: 'BATCH_COMPLETED', conversationId: this.conversation.id,
-          fromSequence: first, toSequence: last, count: events.length,
-          action: result.decision?.action ?? null,
+          type: 'MESSAGE_DELIVERED', conversationId: this.conversation.id,
+          sequence: event.sequence, turnIdPrefix: result.turnId.slice(0, 12),
         });
-        if (outbox) await this.submitOutbox(outbox, tail.sequence);
       } catch (error) {
         this.store.recordBatchDecision(events, this.workerId, null, 'failed', null, null, (error as Error).message);
         this.onError(error as Error, events);
@@ -249,13 +155,9 @@ export class ConversationWorker {
     }
     if (!this.closed) {
       this.store.setWorkerState({
-        conversationId: this.conversation.id,
-        workerId: this.workerId,
-        runtimeId: this.conversation.runtimeId,
-        state: 'warm',
-        processId: this.session.processId,
-        claimedFromSequence: null,
-        claimedToSequence: null,
+        conversationId: this.conversation.id, workerId: this.workerId,
+        runtimeId: this.conversation.runtimeId, state: 'warm', processId: this.session.processId,
+        claimedFromSequence: null, claimedToSequence: null,
       });
     }
   }
@@ -270,39 +172,11 @@ export class ConversationWorker {
     }
   }
 
-  private async retryPendingOutbox(): Promise<void> {
-    for (const record of this.store.listPendingOutbox(this.conversation.id)) {
-      await this.submitOutbox(record, record.inputSequence);
-    }
-  }
-
-  private async submitOutbox(record: OutboxRecord, sequence: number): Promise<void> {
-    const claimed = this.store.claimOutboxIfFresh(record.id);
-    if (!claimed) return;
-    try {
-      await this.sender.send(this.conversation, claimed);
-      this.store.finishOutbox(claimed.id, 'submitted', null);
-      this.log({ type: 'OUTBOX_SUBMITTED', conversationId: this.conversation.id, sequence, uuid: claimed.uuid });
-    } catch (error) {
-      const state = error instanceof ChannelDeliveryUnknownError ? 'delivery_unknown' : 'failed';
-      this.store.finishOutbox(claimed.id, state, (error as Error).message);
-      this.log({
-        type: state === 'delivery_unknown' ? 'OUTBOX_DELIVERY_UNKNOWN' : 'OUTBOX_FAILED',
-        conversationId: this.conversation.id, sequence, error: (error as Error).message,
-      });
-    }
-  }
-
   private onError(error: Error, events: AdmittedEvent[]): void {
     this.store.setWorkerState({
-      conversationId: this.conversation.id,
-      workerId: this.workerId,
-      runtimeId: this.conversation.runtimeId,
-      state: 'error',
-      processId: this.session.processId,
-      claimedFromSequence: null,
-      claimedToSequence: null,
-      error: error.message,
+      conversationId: this.conversation.id, workerId: this.workerId,
+      runtimeId: this.conversation.runtimeId, state: 'error', processId: this.session.processId,
+      claimedFromSequence: null, claimedToSequence: null, error: error.message,
     });
     this.log({
       type: 'WORKER_ERROR', conversationId: this.conversation.id,
@@ -317,25 +191,33 @@ export class ConversationWorker {
     await this.draining?.catch(() => undefined);
     await this.session.stop();
     this.store.setWorkerState({
-      conversationId: this.conversation.id,
-      workerId: null,
-      runtimeId: this.conversation.runtimeId,
-      state: 'stopped',
-      processId: null,
-      claimedFromSequence: null,
-      claimedToSequence: null,
+      conversationId: this.conversation.id, workerId: null,
+      runtimeId: this.conversation.runtimeId, state: 'stopped', processId: null,
+      claimedFromSequence: null, claimedToSequence: null,
     });
   }
 }
 
-function deterministicUuid(event: AdmittedEvent): string {
-  const hex = createHash('sha256').update(`${PRODUCT_ID}:${event.fingerprint}`).digest('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
-}
-
-function deterministicOnboardingUuid(conversation: Conversation, replyText: string): string {
-  const hex = createHash('sha256').update(
-    `${PRODUCT_ID}:onboarding:${conversation.channelId}:${conversation.channelProfileId}:${conversation.externalId}:${replyText}`,
+function historyEvent(conversation: Conversation, message: { sender: string; time: string; content: string }): NormalizedEvent {
+  const fingerprint = createHash('sha256').update(
+    `history\0${conversation.channelProfileId}\0${conversation.externalId}\0${message.sender}\0${message.time}\0${message.content}`,
   ).digest('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+  return {
+    channelId: conversation.channelId,
+    channelProfileId: conversation.channelProfileId,
+    fingerprint,
+    eventId: null,
+    messageId: null,
+    conversationExternalId: conversation.externalId,
+    conversationTitle: conversation.title,
+    kind: 'group',
+    senderId: null,
+    senderName: message.sender,
+    content: message.content,
+    quotedMessage: null,
+    forwardedMessages: null,
+    occurredAt: message.time === '未知' ? null : message.time,
+    receivedAt: new Date().toISOString(),
+    source: {},
+  };
 }

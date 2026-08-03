@@ -1,8 +1,8 @@
 # agent-channel-host
 
-`agent-channel-host` 是事件驱动的数字化员工会话宿主：它从 Channel adapter 接收已授权群聊/私聊消息，维护 conversation 与 Agent runtime session 的独立映射，再通过同一 Channel adapter 受控回复。
+`agent-channel-host` 是事件驱动的单向消息投递宿主：它从 Channel adapter 接收已授权群聊/私聊消息，维护 conversation 与 Agent runtime session 的独立映射，并确保每条消息成功进入对应 runtime session。
 
-当前可运行组合是 DingTalk DWS + Codex CLI。DingTalk 不以 `@` 作为唯一入口；每条授权消息都会进入所属 conversation 的固定 Codex session，由 Agent 根据自己的工作目录、配置和独立历史决定 `silent / reply`。Host 不替 Agent 判断职责或编排任务。项目不运行 Codex App Server，也不提供第二套消息接收服务。
+当前可运行组合是 DingTalk DWS + Codex CLI。DingTalk 不以 `@` 作为唯一入口；每条授权消息都会逐条进入所属 conversation 的固定 Codex session。Host 不接收 Agent 的处理结果，不判断是否回复，也不代发回复；Agent 根据自己的工作目录、配置、工具和独立历史，自行决定是否处理、怎么处理、是否回复以及怎么回复。项目不运行 Codex App Server，也不提供第二套消息接收服务。
 
 首版发布 Node.js/TypeScript npm package，命令名为 `agent-channel`，不提供 Windows portable zip/exe。
 
@@ -18,29 +18,27 @@ flowchart LR
   Map --> Runtime[RuntimeAdapter]
   Runtime -->|new| Exec[runtime CLI start]
   Runtime -->|existing| Resume[runtime CLI resume]
-  Exec --> Decision[structured decision]
-  Resume --> Decision
-  Decision --> Gate[freshness + mode + outbox]
-  Gate --> Adapter
+  Exec --> Receipt[turn.completed]
+  Resume --> Receipt
+  Receipt --> Cursor[inbox completed]
 ```
 
 - 一个 instance 只持有一个 Channel owner。当前 DingTalk adapter 用跨 instance 文件锁避免同一 DWS profile 被重复消费。
 - 常驻的是 Host、DWS 长连接和 SQLite 状态，不是每个 conversation 的 provider 进程。消息到达后才启动一轮 runtime CLI；该轮完成后进程退出。
 - 每个群聊/私聊持久化自己的 `(channel, profile, conversation) → runtime + provider session ID + generation`，彼此不共享 transcript。
-- 新 Codex 会话执行 `codex exec --json --output-schema`；已有会话执行 `codex exec resume <原 ID>`。每次 resume 都校验 `thread.started.thread_id` 必须等于原 ID，否则 fail closed，不创建第二条 session。
-- 普通 turn 只转发本批消息的“发送者、时间、内容”。引用和合并转发折叠进内容；Host 不附带群名、私聊标识、成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息前增加一份短提醒。
+- 新 Codex 会话执行 `codex exec --json`；已有会话执行 `codex exec resume <原 ID> --json`。每次 resume 都校验 `thread.started.thread_id` 必须等于原 ID，否则 fail closed，不创建第二条 session。Host 不配置 output schema，也不解析 Agent final text。
+- 每个 turn 只转发一条消息的“发送者、时间、内容”。引用和合并转发折叠进内容；Host 不附带群名、私聊标识、成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息前增加一份短提醒。
 - Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不覆盖 provider 的 developer/system 指令；Agent 的长期规则由 runtime 工作目录自行维护。
-- 每条消息先写 SQLite WAL，提交后才发进程内 ready signal。Worker 不轮询 DWS 或 SQLite；Host 启动时一次性 reconciliation：释放中断的 claim、重新处理未完成及未达 3 次上限的失败消息，并用原 UUID 重试未确认的 outbox。DWS 明确返回同 UUID 重复时记为 `delivery_unknown`：不换 UUID、不自动重试，并保留告警供人工核实。只有 DWS 本次明确成功才记为 `submitted`；已完成消息、已提交 outbox 和发送结果不明项不重放，达到上限的失败项保留终止状态。
-- quiet window 默认 300 ms，一次最多合并 20 条消息。active turn 期间的新消息会终止旧 CLI 进程，释放旧 claim，再与新消息合并处理。
-- Host 不配置 turn 超时，也不会因运行时长终止活动 turn。claim 由该 Conversation 的唯一 Worker 和 Host lease 持有，不按时间过期；只有新消息抢占、Host 停止或 runtime 自身退出会结束 turn，进程中断后的 claim 在下次 Host 启动时统一恢复。
-- 群首次接入是持久工作：只读拉取最近 50 条消息，以同一最小信封交给该群固定 session。Agent 自主返回 `silent` 或 `reply`，不会被要求自我介绍；`shadow` 只保存 reply，切换 `reply` 并重启后用同一 UUID 发送。
-- runtime 只返回 `{"action":"silent","replyText":""}` 或 `{"action":"reply","replyText":"..."}`。Host 只校验这个最小结构，再执行 conversation mode、freshness 和 outbox 门禁。
+- 每条消息先写 SQLite WAL，提交后才发进程内 ready signal。Host 启动时释放中断的 claim，并重新投递未完成及未达 3 次上限的失败消息。`turn.completed` 只证明 runtime 已完成本次输入，不代表 Agent 已回复或业务已完成。
+- quiet window 只用于降低 Worker 启动抖动，不再合并消息。新消息在当前 turn 后排队，Host 不打断已经传入 runtime 的消息。
+- Host 不配置 turn 超时，也不会因运行时长或新消息终止活动 turn。Host 停止或 runtime 自身退出造成的未完成 claim 在下次启动时恢复。
+- 群首次接入时只读拉取最近 50 条消息，先逐条写入 history inbox，再按时间顺序交给该群固定 session。Host 不要求自我介绍、不接收决定，也不发送回复。
 
 ## 三段扩展边界
 
-1. `ChannelAdapter` 负责连接、标准化入站、错误上报和发送。当前实现是 DingTalk DWS；新增 Slack、Teams 等 Channel 时不得自行管理 Agent session 或绕过 outbox。
-2. `ConversationHost / EventDrivenScheduler` 负责 route binding、durable inbox、ready signal、lease/claim、合批、取消、Worker 生命周期和状态快照，不理解具体 Channel event key 或 runtime CLI 参数。
-3. `RuntimeAdapter / AgentSession` 负责启动 runtime 自己的命令、创建/恢复 session、解析 structured decision、取消活动进程和暴露 session/process identity。当前实现是 Codex CLI；Claude Code、Gemini CLI、Qwen CLI 应各自实现这个契约，不复制 Host、Store 或 Channel。
+1. `ChannelAdapter` 负责连接、标准化入站和错误上报。当前实现是 DingTalk DWS；新增 Slack、Teams 等 Channel 时不得自行管理 Agent session。
+2. `ConversationHost / EventDrivenScheduler` 负责 route binding、durable inbox、ready signal、lease/claim、逐条顺序投递、Worker 生命周期和状态快照。
+3. `RuntimeAdapter / AgentSession` 负责启动 runtime 命令、创建/恢复 session、接收一条消息并返回完成回执，以及暴露 session/process identity。当前实现是 Codex CLI；其他 runtime 各自实现这个契约。
 
 配置也按这三类职责拆分：`channel`、`runtime`、`scheduling`。当前版本只注册 `dingtalk` 与 `codex`，未知 adapter 会明确失败。每个 Channel 内分别配置群聊/私聊的准入范围和新 Conversation 默认模式；这些策略不改变底层唯一 owner。
 
@@ -290,20 +288,7 @@ agent-channel run --instance triss
 
 `status --instance` 输出一个 instance 的机器可读 JSON；`view` 是跨 instance 的交互管理面。非编辑态第一次按 `q` 或任何状态下按 `Ctrl+C` 只打开退出确认，并明确显示会停止多少个 View-owned Host；再次按 `q`、`Ctrl+C` 或 Enter 才退出，按 Esc/`←` 取消且保留当前页面与尚未提交的编辑内容。进程收到外部 SIGINT/SIGTERM 时仍立即安全收尾。总览和详情默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。instance 设置先通过与启动相同的 schema 校验，再原子保存；标记“重启后生效”的配置不会伪装成已即时应用。
 
-首次拉取的群历史不进入普通实时消息计数；`view` 单独显示 `HISTORY loaded/judged`，会话行显示 `HISTORY` 与 onboarding `DELIVERY`。`completed` 表示 Agent 已判断且选择静默，`submitted` 只表示 DWS 明确接受发送调用，`delivered` 表示 Host 随后在群历史中精确回读到回复，`delivery_unknown` 表示发送结果不明且禁止自动重试。
-
-对 `delivery_unknown` 必须显式协调。先只读回查；只有确认群内没有精确回复、停止唯一 Host 后，才允许备份并执行一次内容绑定的新 UUID 重发。apply 内部会再次回查，发送后也会再次回读；输出不包含正文、群外部 ID 或 UUID。
-
-```powershell
-agent-channel delivery --instance triss --id '<conversation UUID>' --check
-agent-channel delivery --instance triss --id '<conversation UUID>' --apply --backup-dir 'D:\baibu-agent\artifacts\agent-channel-delivery' --yes
-```
-
-先在 `shadow` 模式确认 `received/processed`、固定 provider session 前缀、重启 resume 和 Agent 判断，才切到发送模式：
-
-```powershell
-agent-channel conversation mode --instance triss --id '<conversation UUID>' --mode reply
-```
+首次拉取的群历史不进入普通实时消息计数；`view` 单独显示 `HISTORY loaded/delivered`。这里的 `delivered` 只表示消息已逐条完成 runtime turn，不表示 Agent 已判断、已回复或回复已送达 Channel。
 
 Windows 当前用户常驻可使用计划任务，不以 LocalSystem 运行、不复制登录态：
 
@@ -316,15 +301,14 @@ agent-channel service remove --instance triss
 
 ## 可靠性与安全边界
 
-- SQLite WAL 保证 Host 收到事件后的本地 admission/outbox 原子性。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
-- Host 启动恢复只重试未达 3 次上限的 failed inbox 与未确认 outbox；outbox 沿用原 UUID，并在实际发送前再次校验 Conversation 权限和最新消息 sequence。DWS 返回 `Request is repeated with uuid` 时只能证明该幂等键已经登记，不能证明当前内容已提交或已送达；Host 将其记为 `delivery_unknown`，不换 UUID、不自动重发，并在 View 中保留告警。达到上限、已完成、已提交或发送结果不明的记录不会自动重放。
-- `submitted` 只表示 DWS 本次发送调用明确成功，不等于消息已送达、对端已读或业务已接受；只有精确群历史回读命中后才标记 `delivered`。
+- SQLite WAL 保证 Host 收到事件后的本地 admission 与投递状态持久化。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
+- Host 启动只恢复未完成及未达 3 次上限的 failed inbox，不恢复或发送历史 outbox。旧数据库中的 decision/outbox 仅作为迁移遗留数据保留，不进入新运行路径。
 - Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner、一个 bus，以及按群聊/私聊订阅范围启停的共享 consumer。
 - Host 仅在 `dws event status` 同时返回 `state=running` 和可用 live RPC 时认定 bus ready；只有存活 PID、没有 IPC 的状态会明确报告为 stale bus/PID 复用。DWS 子进程退出时保留经脱敏且有界的 stderr 根因，不再只显示 `code=5`。
 - Host 不覆盖 Codex 的 `approval_policy`、sandbox、network 或 writable roots；这些权限与 MCP/skills 一样由 runtime 自身配置加载。`runtime.cwd` 必须指向专用工作目录，部署者必须按该 runtime 的权限模型独立审计。
 - Host 不安装 compaction hook，也不覆盖用户的 developer/system 指令；短职责提醒属于低频普通上下文，不能作为权限隔离。Host 不审查 Agent 的命令、文件或内部任务行为。
-- Runtime 返回不符合 `{action, replyText}` 最小结构时，仅将对应 Conversation 的当前 batch 标为 failed 并禁止出站；不会停止唯一 Channel owner或阻断其他 Conversation。
-- 决定、inbox 完成和可选 outbox 在同一事务内写入。Host 重启发现活动 claim 时会提升 session generation，避免把同一消息再次输入可能已包含该消息的旧 transcript。
+- Runtime 未返回 `turn.completed` 或命令异常退出时，仅将对应消息投递标为 failed；不会停止唯一 Channel owner 或阻断其他 Conversation。Host 不读取 Agent final text。
+- inbox 完成状态按单条消息写入。Host 重启发现活动 claim 时会提升 session generation，避免把同一消息再次输入可能已包含该消息的旧 transcript。
 
 ## 开发与验收
 
@@ -337,6 +321,6 @@ $canaryRoot = 'D:\baibu-agent\scratchpad\agent-channel-host-command-canary'
 node docs/acceptance/message-forwarding-proxy/scripts/codex-message-proxy-canary.mjs $canaryRoot
 ```
 
-自动化测试覆盖最小消息信封、最小返回结构、首次群历史 `silent/reply`、SQLite admission/去重/sequence、原子 decision/outbox、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、无过期 claim/release/有界失败恢复、session generation 重置审计、原 UUID outbox 重试、跨 Channel 路由、固定 session resume、outbox freshness、lease、ready signal、quiet-window burst、无 turn 超时、active command cancel、warm TTL、DWS 参数、错误处理、稳定 Conversation 选择、详情分区顺序、Runtime cwd 原子保存、Channel 行删除、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
+自动化测试覆盖最小消息信封、实时与首次群历史逐条投递、Host 零发送、SQLite admission/去重/sequence、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、claim/release/有界失败恢复、session generation 重置审计、跨 Channel 路由、固定 session resume、lease、ready signal、新消息排队且不抢占、无 turn 超时、warm TTL、DWS 参数、错误处理、稳定 Conversation 选择、详情分区顺序、Runtime cwd 原子保存、Channel 行删除、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
 
 真实 Codex canary 只验证 runtime CLI 与固定 session 恢复，不连接或发送 DingTalk。真实 DWS 收发必须在专用测试群/账号获得单独授权后执行。

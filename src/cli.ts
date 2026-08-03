@@ -19,7 +19,6 @@ import { CLI_NAME, PRODUCT_VERSION } from './product.js';
 import {
   deleteConversationWithLifecycle, deleteInstanceWithLifecycle, initializeInstance,
 } from './instance.js';
-import { inspectOnboardingDelivery, reconcileOnboardingDelivery } from './delivery-reconciliation.js';
 
 const program = new Command();
 program
@@ -229,29 +228,6 @@ program.command('status')
     }
   });
 
-program.command('delivery')
-  .description('只读回查或显式协调首次群历史回复；绝不自动重发 delivery_unknown')
-  .requiredOption('--instance <name>', 'instance 名称')
-  .requiredOption('--id <id>', '群 conversation UUID')
-  .option('--check', '只读回查群历史，不修改 SQLite、不发送消息', false)
-  .option('--apply', '在 Host 停止且已备份后显式协调发送', false)
-  .option('--backup-dir <path>', 'apply 模式必填的 SQLite 备份目录')
-  .option('--yes', '确认执行可能的单次重发', false)
-  .action(async (options) => {
-    if (Boolean(options.check) === Boolean(options.apply)) throw new Error('--check 与 --apply 必须且只能指定一个');
-    const config = await loadConfig(options.instance);
-    const databasePath = statePath(options.instance);
-    if (options.check) {
-      print({ ok: true, check: true, instance: options.instance, conversationId: options.id,
-        ...(await inspectOnboardingDelivery(config, databasePath, options.id)) });
-      return;
-    }
-    if (!options.yes) throw new Error('--apply 必须同时提供 --yes');
-    if (!options.backupDir) throw new Error('--apply 必须提供 --backup-dir');
-    print({ ok: true, check: false, instance: options.instance, conversationId: options.id,
-      ...(await reconcileOnboardingDelivery(config, databasePath, options.id, options.backupDir)) });
-  });
-
 program.command('view')
   .description('启动或 attach 全部 instance Host，并打开总览下钻管理与独立全局设置界面')
   .option('--interval <seconds>', '刷新间隔秒数', parseViewInterval, 1)
@@ -367,7 +343,7 @@ program.command('run')
   .action(async (options) => runHost(await loadConfig(options.instance)));
 
 program.command('verify')
-  .description('不连接 DWS、不发送消息；验证指定会话的 runtime CLI start/resume/结构化 silent turn')
+  .description('不连接 DWS、不发送消息；验证指定会话的 runtime CLI start/resume 与完成回执')
   .requiredOption('--instance <name>', 'instance 名称')
   .requiredOption('--id <id>', 'conversation UUID')
   .action(async (options) => {
@@ -388,20 +364,18 @@ program.command('verify')
       });
       session = new CodexCommandSession(config, target, runtime, store);
       const startup = await session.start();
-      const canary = await session.runDecision(`
+      const canary = await session.deliver(`
 [宿主离线验证事件；不是钉钉消息]
-当前没有待处理消息。只返回 {"action":"silent","replyText":""}。
+当前没有待处理消息。请确认 runtime session 能正常接收本事件。
 `.trim());
-      if (canary.status !== 'completed' || canary.decision?.action !== 'silent' || canary.decision.replyText !== '') {
-        throw new Error('离线 canary 未返回严格 silent 决策');
-      }
+      if (canary.status !== 'completed') throw new Error('离线 canary 未成功传入 runtime');
       print({
         ok: true,
         conversationId: target.id,
         startupMode: startup.mode,
         providerSessionIdPrefix: session.currentSessionId?.slice(0, 12) ?? null,
         hostRunIdPrefix: canary.turnId.slice(0, 12),
-        action: canary.decision.action,
+        delivery: 'completed',
         model: config.runtime.model,
         effort: config.runtime.effort,
       });

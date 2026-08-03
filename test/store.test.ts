@@ -6,7 +6,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.js';
 import {
   DIRECT_EVENT,
-  DwsSender,
   GROUP_EVENT,
   consumerArgs,
   dwsProcessExitError,
@@ -18,7 +17,6 @@ import {
   subscribedEventKeys,
 } from '../src/dws.js';
 import { defaultConfig } from '../src/config.js';
-import { ChannelDeliveryUnknownError } from '../src/contracts.js';
 
 test('授权会话才可持久化，事件按会话单调编号并去重', () => {
   const store = new Store(':memory:');
@@ -105,7 +103,7 @@ test('pending message 可事务 claim、释放并在 Host 重启时 reconciliati
   store.close();
 });
 
-test('启动 reconciliation 恢复可重试 failed inbox/outbox，并跳过完成项和失败上限', () => {
+test('启动 reconciliation 只恢复可重试 inbox，不执行遗留 outbox', () => {
   const store = new Store(':memory:');
   const inbox = store.addConversation({
     kind: 'direct', externalId: 'recover-inbox', title: '恢复私聊', responsibility: '回答问题', mode: 'shadow',
@@ -129,6 +127,7 @@ test('启动 reconciliation 恢复可重试 failed inbox/outbox，并跳过完�
   const outboundEvent = store.admitEvent(send, makeEvent(send.externalId, 'recover-outbox-event')).event!;
   const original = store.enqueueOutbox(outboundEvent, '恢复回复', '00000000-0000-4000-8000-000000000777')!;
   store.db.prepare("UPDATE outbox SET state='failed',attempt_count=1,error='temporary-send' WHERE id=?").run(original.id);
+  store.db.prepare("UPDATE inbound_events SET processing_state='completed' WHERE id=?").run(outboundEvent.id);
 
   const exhaustedSend = store.addConversation({
     kind: 'direct', externalId: 'exhausted-outbox', title: '达到重试上限', responsibility: '回答问题', mode: 'reply',
@@ -149,7 +148,7 @@ test('启动 reconciliation 恢复可重试 failed inbox/outbox，并跳过完�
   store.db.prepare("UPDATE inbound_events SET processing_state='completed' WHERE id=?").run(completedEvent.id);
   store.db.prepare("UPDATE outbox SET state='submitted',attempt_count=1 WHERE id=?").run(submitted.id);
 
-  assert.deepEqual(store.recoverPendingWork(), [inbox.id, send.id].sort());
+  assert.deepEqual(store.recoverPendingWork(), [inbox.id]);
   const states = store.db.prepare(`
     SELECT sequence,processing_state,failure_count FROM inbound_events
     WHERE conversation_id=? ORDER BY sequence
@@ -157,15 +156,10 @@ test('启动 reconciliation 恢复可重试 failed inbox/outbox，并跳过完�
   assert.deepEqual(states.map((row) => [row.sequence, row.processing_state, row.failure_count]), [
     [1, 'admitted', 0], [2, 'admitted', 0], [3, 'admitted', 1], [4, 'failed', 3], [5, 'completed', 0],
   ]);
-  const pending = store.listPendingOutbox(send.id);
-  assert.equal(pending.length, 1);
-  assert.equal(pending[0]?.uuid, original.uuid);
+  assert.equal(store.listPendingOutbox(send.id).length, 0);
+  assert.equal(store.getOutbox(original.id)?.state, 'failed');
   assert.equal(store.getOutbox(submitted.id)?.state, 'submitted');
-  assert.equal(store.getOutbox(exhausted.id)?.state, 'failed');
-  assert.equal(store.getOutbox(exhausted.id)?.error, 'recovery-attempt-limit');
-  const claimed = store.claimOutboxIfFresh(original.id);
-  assert.equal(claimed?.uuid, original.uuid);
-  assert.equal(claimed?.attemptCount, 2);
+  assert.equal(store.getOutbox(exhausted.id)?.state, 'sending');
   store.close();
 });
 
@@ -401,15 +395,9 @@ test('DWS 发送重复 UUID 返回 delivery_unknown，结构化错误不泄露�
   assert.match(structured.message, /duplicate_uuid/);
   assert.doesNotMatch(structured.message, /机密正文|stable-uuid/);
 
-  const sender = new DwsSender(defaultConfig('dws-duplicate', '.', 'Agent'), async () => { throw structured; });
-  await assert.rejects(sender.send(
-    { kind: 'group', externalId: 'cid-duplicate' },
-    { text: '机密正文', uuid: 'stable-uuid' },
-  ), (error: Error) => error instanceof ChannelDeliveryUnknownError
-    && error.message === 'delivery_unknown:duplicate_uuid');
 });
 
-test('DWS 其他业务错误继续 fail closed', async () => {
+test('DWS 其他业务错误保持脱敏', async () => {
   const payload = {
     error: {
       category: 'api', reason: 'business_error', server_error_code: '1001', operation: 'tools/call',
@@ -421,11 +409,7 @@ test('DWS 其他业务错误继续 fail closed', async () => {
     stderr: JSON.stringify(payload),
   }), ['chat', 'message', 'send']);
   assert.doesNotMatch(structured.message, /机密正文/);
-  const sender = new DwsSender(defaultConfig('dws-failure', '.', 'Agent'), async () => { throw structured; });
-  await assert.rejects(sender.send(
-    { kind: 'group', externalId: 'cid-failure' },
-    { text: '机密正文', uuid: 'new-uuid' },
-  ), /reason=business_error/);
+  assert.match(structured.message, /reason=business_error/);
 });
 
 test('DWS 群搜索只投影有效候选并按 openConversationId 去重', async () => {
@@ -531,7 +515,7 @@ test('v1 会话迁移后补 onboarding 和每类生命周期默认值', () => {
     assert.equal(migrated.getConversation('group-v1')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v1')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
     assert.equal(migrated.getConversation('group-v1')?.policyVersion, 1);
     migrated.close();
   } finally {
@@ -565,7 +549,7 @@ test('v2 会话迁移到当前 schema 时得到固定逻辑 session 和按需 Wo
     assert.equal(migrated.getConversation('group-v2')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v2')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -630,7 +614,7 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
     assert.equal(onboarding?.introUuid, null);
     assert.equal(migrated.getGroupOnboarding('group-v3-submitted')?.state, 'submitted');
     assert.deepEqual(migrated.db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -672,7 +656,7 @@ test('v5 Channel 状态表迁移后保留旧记录并允许 disabled', () => {
       `).get() as { state: string; label: string };
       assert.equal(row.state, 'disabled');
       assert.equal(row.label, 'DingTalk DWS');
-      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
     } finally {
       migrated.close();
     }

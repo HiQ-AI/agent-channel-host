@@ -471,6 +471,13 @@ export class Store {
         COMMIT;
       `);
     }
+    const perMessageHistoryVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (perMessageHistoryVersion < 11) {
+      this.db.exec(`
+        ALTER TABLE inbound_events ADD COLUMN ingress TEXT NOT NULL DEFAULT 'live';
+        PRAGMA user_version=11;
+      `);
+    }
   }
 
   addConversation(input: {
@@ -724,7 +731,11 @@ export class Store {
     return nextGeneration;
   }
 
-  admitEvent(conversation: Conversation, event: NormalizedEvent): { admitted: boolean; event: AdmittedEvent | null } {
+  admitEvent(
+    conversation: Conversation,
+    event: NormalizedEvent,
+    ingress: AdmittedEvent['ingress'] = 'live',
+  ): { admitted: boolean; event: AdmittedEvent | null } {
     if (
       conversation.channelId !== event.channelId
       || conversation.channelProfileId !== event.channelProfileId
@@ -753,11 +764,11 @@ export class Store {
       this.db.prepare(`
         INSERT INTO inbound_events(
           id,conversation_id,sequence,fingerprint,event_id,message_id,sender_id,sender_name,
-          body_json,occurred_at,received_at,processing_state
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'admitted')
+          body_json,occurred_at,received_at,processing_state,ingress
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'admitted',?)
       `).run(
         id, conversation.id, sequence, event.fingerprint, event.eventId, event.messageId,
-        event.senderId, event.senderName, body, event.occurredAt, event.receivedAt,
+        event.senderId, event.senderName, body, event.occurredAt, event.receivedAt, ingress,
       );
       if (event.senderId) {
         this.db.prepare(`
@@ -777,7 +788,7 @@ export class Store {
         `).run(conversation.id, event.senderId, event.senderName, event.receivedAt);
       }
       this.db.exec('COMMIT');
-      return { admitted: true, event: { ...event, id, conversationId: conversation.id, sequence } };
+      return { admitted: true, event: { ...event, id, conversationId: conversation.id, sequence, ingress } };
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
@@ -788,14 +799,16 @@ export class Store {
     conversation: Conversation,
     workerId: string,
     limit: number,
+    ingress?: AdmittedEvent['ingress'],
   ): AdmittedEvent[] {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const rows = this.db.prepare(`
         SELECT * FROM inbound_events
         WHERE conversation_id=? AND processing_state='admitted'
+          AND (? IS NULL OR ingress=?)
         ORDER BY sequence LIMIT ?
-      `).all(conversation.id, limit) as Row[];
+      `).all(conversation.id, ingress ?? null, ingress ?? null, limit) as Row[];
       if (rows.length === 0) {
         this.db.exec('COMMIT');
         return [];
@@ -884,8 +897,9 @@ export class Store {
         const conversation = this.db.prepare(
           'SELECT enabled,mode FROM conversations WHERE id=?',
         ).get(tail.conversationId) as Row | undefined;
-        if (conversation && Boolean(conversation.enabled) && conversation.mode === 'reply'
-          && this.latestSequence(tail.conversationId) === tail.sequence) {
+        if (conversation && Boolean(conversation.enabled)
+          && (conversation.mode === 'reply' || tail.ingress === 'history')
+          && this.isOutboxInputFresh(tail.conversationId, tail.sequence, tail.ingress)) {
           outboxId = randomUUID();
           this.db.prepare(`
             INSERT INTO outbox(
@@ -947,14 +961,6 @@ export class Store {
         WHERE processing_state='failed' AND failure_count<?
       `).run(MAX_RECOVERY_ATTEMPTS);
       this.db.prepare(`
-        UPDATE outbox SET state='pending',updated_at=?
-        WHERE state IN ('sending','failed') AND attempt_count<?
-      `).run(now, MAX_RECOVERY_ATTEMPTS);
-      this.db.prepare(`
-        UPDATE outbox SET state='failed',error=COALESCE(error,'recovery-attempt-limit'),updated_at=?
-        WHERE state='sending' AND attempt_count>=?
-      `).run(now, MAX_RECOVERY_ATTEMPTS);
-      this.db.prepare(`
         UPDATE runtime_workers SET worker_id=NULL,state='stopped',process_id=NULL,
           claimed_from_sequence=NULL,claimed_to_sequence=NULL,warm_until=NULL,
           error=CASE WHEN state IN ('starting','running') THEN 'host-restarted' ELSE error END,
@@ -964,13 +970,11 @@ export class Store {
         SELECT DISTINCT c.id
         FROM conversations c
         LEFT JOIN inbound_events e ON e.conversation_id=c.id AND e.processing_state='admitted'
-        LEFT JOIN outbox o ON o.conversation_id=c.id AND o.state='pending'
         LEFT JOIN group_onboarding g ON g.conversation_id=c.id
         WHERE c.enabled=1 AND (
           e.id IS NOT NULL OR
-          o.id IS NOT NULL OR
           (c.kind='group' AND g.state NOT IN ('completed','submitted','delivered','delivery_unknown')
-            AND (g.intro_text IS NULL OR c.mode='reply'))
+            AND g.intro_text IS NULL)
         )
         ORDER BY c.id
       `).all() as Row[];
@@ -1052,13 +1056,26 @@ export class Store {
       }
       const now = new Date().toISOString();
       const conversation = this.getConversation(row.conversationId);
-      if (!conversation?.enabled || conversation.mode !== 'reply') {
+      const inbound = this.db.prepare('SELECT ingress FROM inbound_events WHERE id=?')
+        .get(row.inboundEventId) as Row | undefined;
+      const ingress = (inbound?.ingress ?? 'live') as AdmittedEvent['ingress'];
+      if (!conversation?.enabled) {
         this.db.prepare("UPDATE outbox SET state='suppressed',error='conversation-not-reply',updated_at=? WHERE id=?")
           .run(now, id);
         this.db.exec('COMMIT');
         return null;
       }
-      if (this.latestSequence(row.conversationId) !== row.inputSequence) {
+      if (conversation.mode !== 'reply') {
+        if (ingress === 'history') {
+          this.db.exec('COMMIT');
+          return null;
+        }
+        this.db.prepare("UPDATE outbox SET state='suppressed',error='conversation-not-reply',updated_at=? WHERE id=?")
+          .run(now, id);
+        this.db.exec('COMMIT');
+        return null;
+      }
+      if (!this.isOutboxInputFresh(row.conversationId, row.inputSequence, ingress)) {
         this.db.prepare("UPDATE outbox SET state='suppressed',error='newer-message-admitted',updated_at=? WHERE id=?")
           .run(now, id);
         this.db.exec('COMMIT');
@@ -1074,6 +1091,19 @@ export class Store {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  private isOutboxInputFresh(
+    conversationId: string,
+    inputSequence: number,
+    ingress: AdmittedEvent['ingress'],
+  ): boolean {
+    if (ingress === 'live') return this.latestSequence(conversationId) === inputSequence;
+    const row = this.db.prepare(`
+      SELECT COALESCE(MAX(sequence),0) AS sequence FROM inbound_events
+      WHERE conversation_id=? AND ingress='live'
+    `).get(conversationId) as Row;
+    return Number(row.sequence) <= inputSequence;
   }
 
   finishOutbox(id: string, state: 'submitted' | 'failed' | 'delivery_unknown', error: string | null): void {
@@ -1103,6 +1133,70 @@ export class Store {
     return mapGroupOnboarding(this.db.prepare(
       'SELECT * FROM group_onboarding WHERE conversation_id=?',
     ).get(conversationId) as Row | undefined);
+  }
+
+  markGroupHistoryLoaded(conversationId: string, historyCount: number): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE group_onboarding SET history_count=?,history_loaded_at=?,error=NULL,updated_at=?
+      WHERE conversation_id=? AND state NOT IN ('submitted','delivered','delivery_unknown')
+    `).run(historyCount, now, now, conversationId);
+  }
+
+  historyEventState(fingerprint: string): string | null {
+    const row = this.db.prepare(`
+      SELECT processing_state FROM inbound_events WHERE fingerprint=? AND ingress='history'
+    `).get(fingerprint) as Row | undefined;
+    return row ? String(row.processing_state) : null;
+  }
+
+  historyEventCount(conversationId: string): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM inbound_events WHERE conversation_id=? AND ingress='history'
+    `).get(conversationId) as Row;
+    return Number(row.count);
+  }
+
+  refreshGroupOnboardingFromHistory(conversationId: string): GroupOnboardingRecord {
+    const stats = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN e.processing_state='completed' THEN 1 ELSE 0 END) AS completed,
+        SUM(CASE WHEN e.processing_state='failed' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN o.state='pending' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN o.state='sending' THEN 1 ELSE 0 END) AS sending,
+        SUM(CASE WHEN o.state='submitted' THEN 1 ELSE 0 END) AS submitted,
+        SUM(CASE WHEN o.state='failed' THEN 1 ELSE 0 END) AS outbox_failed,
+        SUM(CASE WHEN o.state='delivery_unknown' THEN 1 ELSE 0 END) AS delivery_unknown,
+        MAX(d.turn_id) AS last_turn_id,
+        MAX(COALESCE(e.last_error,o.error)) AS error
+      FROM inbound_events e
+      LEFT JOIN decisions d ON d.inbound_event_id=e.id
+      LEFT JOIN outbox o ON o.inbound_event_id=e.id
+      WHERE e.conversation_id=? AND e.ingress='history'
+    `).get(conversationId) as Row;
+    const total = Number(stats.total ?? 0);
+    const completed = Number(stats.completed ?? 0);
+    let state: GroupOnboardingRecord['state'];
+    if (Number(stats.delivery_unknown ?? 0) > 0) state = 'delivery_unknown';
+    else if (Number(stats.failed ?? 0) > 0 || Number(stats.outbox_failed ?? 0) > 0) state = 'failed';
+    else if (completed < total) state = 'pending';
+    else if (Number(stats.sending ?? 0) > 0) state = 'sending';
+    else if (Number(stats.pending ?? 0) > 0) state = 'prepared';
+    else if (Number(stats.submitted ?? 0) > 0) state = 'submitted';
+    else state = 'completed';
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE group_onboarding SET state=?,history_count=?,history_loaded_at=COALESCE(history_loaded_at,?),
+        intro_turn_id=?,intro_text=NULL,intro_uuid=NULL,error=?,updated_at=?
+      WHERE conversation_id=?
+    `).run(
+      state, total, now, stats.last_turn_id ? String(stats.last_turn_id) : null,
+      stats.error ? String(stats.error) : null, now, conversationId,
+    );
+    const record = this.getGroupOnboarding(conversationId);
+    if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
+    return record;
   }
 
   prepareGroupOnboarding(
@@ -1430,8 +1524,12 @@ export class Store {
         (SELECT COUNT(*) FROM outbox WHERE state='submitted') AS submitted,
         (SELECT COUNT(*) FROM outbox WHERE state IN ('pending','sending')) AS pending_outbox,
         (SELECT COUNT(*) FROM group_onboarding WHERE state IN ('pending','prepared','sending','failed')) AS pending_group_onboarding,
-        (SELECT COALESCE(SUM(history_count),0) FROM group_onboarding WHERE history_loaded_at IS NOT NULL) AS history_loaded,
-        (SELECT COALESCE(SUM(history_count),0) FROM group_onboarding WHERE intro_turn_id IS NOT NULL) AS history_judged
+        (SELECT COUNT(*) FROM inbound_events WHERE ingress='history')
+          + (SELECT COALESCE(SUM(g.history_count),0) FROM group_onboarding g
+             WHERE g.history_loaded_at IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM inbound_events e WHERE e.conversation_id=g.conversation_id AND e.ingress='history'
+             )) AS history_loaded,
+        (SELECT COUNT(*) FROM inbound_events WHERE ingress='history' AND processing_state='completed') AS history_judged
     `).get() as Row;
     const channels = this.db.prepare(`
       SELECT channel_id,profile_id,label,state,owner_pid,connected_at,last_event_at,error,updated_at
@@ -1448,6 +1546,10 @@ export class Store {
         x.version AS context_version,x.through_sequence AS context_through_sequence,
         r.label AS runtime_label,r.model AS runtime_model,r.state AS runtime_adapter_state,
         g.state AS onboarding_state,g.history_count,g.history_loaded_at,g.intro_turn_id,
+        (SELECT COUNT(*) FROM inbound_events he
+          WHERE he.conversation_id=c.id AND he.ingress='history') AS history_event_count,
+        (SELECT COUNT(*) FROM inbound_events he
+          WHERE he.conversation_id=c.id AND he.ingress='history' AND he.processing_state='completed') AS history_judged_count,
         (SELECT COUNT(*) FROM inbound_events e
           WHERE e.conversation_id=c.id AND e.processing_state IN ('admitted','claimed')) AS pending_count,
         (SELECT COALESCE(MAX(sequence),0) FROM inbound_events e WHERE e.conversation_id=c.id) AS latest_sequence,
@@ -1554,8 +1656,9 @@ export class Store {
         contextThroughSequence: row.context_through_sequence === null || row.context_through_sequence === undefined
           ? 0 : Number(row.context_through_sequence),
         memberCount: Number(row.member_count),
-        historyLoaded: row.history_loaded_at ? Number(row.history_count ?? 0) : 0,
-        historyJudged: row.intro_turn_id ? Number(row.history_count ?? 0) : 0,
+        historyLoaded: Number(row.history_event_count) > 0
+          ? Number(row.history_event_count) : row.history_loaded_at ? Number(row.history_count ?? 0) : 0,
+        historyJudged: Number(row.history_judged_count ?? 0),
         onboardingState: row.onboarding_state ? String(row.onboarding_state) : null,
       })),
       messages: messages.map((row) => ({
@@ -1665,6 +1768,7 @@ function mapAdmittedEvent(row: Row, conversation: Conversation): AdmittedEvent {
     id: String(row.id),
     conversationId: String(row.conversation_id),
     sequence: Number(row.sequence),
+    ingress: (row.ingress ?? 'live') as AdmittedEvent['ingress'],
     channelId: conversation.channelId,
     channelProfileId: conversation.channelProfileId,
     fingerprint: String(row.fingerprint),

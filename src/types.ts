@@ -73,6 +73,7 @@ export interface AdmittedEvent extends NormalizedEvent {
   id: string;
   conversationId: string;
   sequence: number;
+  ingress: 'live' | 'history';
 }
 
 export interface Decision {
@@ -93,10 +94,9 @@ export interface SessionRecord {
   updatedAt: string;
 }
 
-export interface DecisionRun {
+export interface DeliveryRun {
   turnId: string;
   status: 'completed' | 'interrupted';
-  decision: Decision | null;
 }
 
 export type WorkerState = 'starting' | 'running' | 'warm' | 'stopped' | 'error';

@@ -1705,7 +1705,7 @@ function historySummary(
   color: boolean,
 ): string {
   return `${heading('HISTORY', color)} loaded=${ansi(String(values.historyLoaded), values.historyLoaded > 0 ? 'green' : 'dim', color)}`
-    + ` judged=${ansi(String(values.historyJudged), values.historyJudged > 0 ? 'green' : 'dim', color)}`;
+    + ` delivered=${ansi(String(values.historyJudged), values.historyJudged > 0 ? 'green' : 'dim', color)}`;
 }
 
 function statusText(value: string, color: boolean): string {

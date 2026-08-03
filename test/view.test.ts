@@ -97,7 +97,7 @@ test('ALERTS 将遗留 DWS 长错误压缩为单行脱敏摘要', () => {
   }
 });
 
-test('首次群历史与普通消息分开计数并在会话表展示判断和发送状态', () => {
+test('首次群历史不再把批次 turn 冒充为逐消息判断结果', () => {
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'group', externalId: 'cid-history-evidence', title: '历史证据群', responsibility: '答疑', mode: 'reply',
@@ -112,11 +112,11 @@ test('首次群历史与普通消息分开计数并在会话表展示判断和�
     assert.equal(snapshot.received, 0);
     assert.equal(snapshot.processed, 0);
     assert.equal(snapshot.history_loaded, 2);
-    assert.equal(snapshot.history_judged, 2);
+    assert.equal(snapshot.history_judged, 0);
     const rendered = renderManagementView([instance], state, null, [], 140);
     assert.match(rendered, /MESSAGES received=0 .*processed=0/);
-    assert.match(rendered, /HISTORY loaded=2 judged=2/);
-    assert.match(rendered, /历史证据群.*2\/2.*delivery_unknown/);
+    assert.match(rendered, /HISTORY loaded=2 delivered=0/);
+    assert.match(rendered, /历史证据群.*0\/2.*delivery_unknown/);
   } finally {
     store.close();
   }

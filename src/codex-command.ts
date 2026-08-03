@@ -1,15 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
 import { createInterface, type Interface } from 'node:readline';
 import type { HostConfig } from './config.js';
 import type { AgentSession } from './contracts.js';
 import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from './command.js';
-import { validateDecision } from './decision.js';
 import { withTimeout } from './process-utils.js';
 import type { Store } from './store.js';
-import type { Conversation, Decision, DecisionRun, SessionRecord } from './types.js';
+import type { Conversation, DeliveryRun, SessionRecord } from './types.js';
 import { prependResponsibilityReminder } from './prompts.js';
 
 type JsonObject = Record<string, unknown>;
@@ -18,7 +15,6 @@ export interface CodexCommandIdentity {
   version: string;
   fingerprint: string;
   command: ResolvedCommand;
-  decisionSchemaPath: string;
 }
 
 export interface SessionStartup {
@@ -26,8 +22,7 @@ export interface SessionStartup {
   providerSessionId: string | null;
 }
 
-const DRIVER_PROTOCOL = 'exec-jsonl-v3-message-proxy';
-const DECISION_SCHEMA_PATH = fileURLToPath(new URL('../../schemas/decision-output.schema.json', import.meta.url));
+const DRIVER_PROTOCOL = 'exec-jsonl-v4-one-way-delivery';
 export const RESPONSIBILITY_REMINDER_INTERVAL_TURNS = 5;
 
 export async function verifyCodexCommand(config: HostConfig): Promise<CodexCommandIdentity> {
@@ -42,38 +37,33 @@ export async function verifyCodexCommand(config: HostConfig): Promise<CodexComma
   if (actualVersion !== config.runtime.version) {
     throw new Error(`Codex 版本不匹配：要求 ${config.runtime.version}，实际 ${actualVersion}`);
   }
-  const [execHelp, resumeHelp, schema] = await Promise.all([
+  const [execHelp, resumeHelp] = await Promise.all([
     execResolved(command, ['exec', '--help'], {
       cwd: config.runtime.cwd, encoding: 'utf8', timeout: 10_000, windowsHide: true,
     }),
     execResolved(command, ['exec', 'resume', '--help'], {
       cwd: config.runtime.cwd, encoding: 'utf8', timeout: 10_000, windowsHide: true,
     }),
-    readFile(DECISION_SCHEMA_PATH),
   ]);
-  for (const token of ['--json', '--output-schema']) {
+  for (const token of ['--json']) {
     if (!execHelp.stdout.includes(token)) throw new Error(`Codex exec 缺少能力：${token}`);
     if (!resumeHelp.stdout.includes(token)) throw new Error(`Codex exec resume 缺少能力：${token}`);
   }
   if (!resumeHelp.stdout.includes('[SESSION_ID]')) throw new Error('Codex exec resume 缺少显式 session ID');
-  const schemaHash = createHash('sha256').update(schema).digest('hex');
   return {
     version: actualVersion,
-    fingerprint: `${actualVersion}:${DRIVER_PROTOCOL}:${schemaHash}`,
+    fingerprint: `${actualVersion}:${DRIVER_PROTOCOL}`,
     command,
-    decisionSchemaPath: DECISION_SCHEMA_PATH,
   };
 }
 
 export function buildCodexExecArgs(
   config: HostConfig,
-  schemaPath: string,
   prompt: string,
   providerSessionId: string | null,
 ): string[] {
   const common = [
     '--json',
-    '--output-schema', schemaPath,
     '--model', config.runtime.model,
     '--skip-git-repo-check',
     '-c', `model_reasoning_effort=${tomlString(config.runtime.effort)}`,
@@ -84,7 +74,6 @@ export function buildCodexExecArgs(
 
 export class CodexJsonlCollector {
   providerSessionId: string | null = null;
-  agentMessage = '';
   turnCompleted = false;
   failure: Error | null = null;
 
@@ -116,13 +105,7 @@ export class CodexJsonlCollector {
       this.failure = new Error(`Codex exec ${type}：${eventMessage(event)}`);
       return;
     }
-    if (type !== 'item.completed') return;
-    const item = event.item && typeof event.item === 'object' ? event.item as JsonObject : null;
-    if (!item) return;
-    const itemType = normalizeToken(item.type);
-    if (itemType === 'agentmessage' && typeof item.text === 'string') {
-      this.agentMessage = item.text;
-    }
+    // item.completed 及 Agent final text 均属于 runtime 内部结果，Host 不读取。
   }
 }
 
@@ -176,7 +159,7 @@ export class CodexCommandSession implements AgentSession {
     return { mode: existing ? 'resumed' : 'new', providerSessionId: this.providerSessionId };
   }
 
-  async runDecision(prompt: string, shouldInterrupt?: () => boolean): Promise<DecisionRun> {
+  async deliver(prompt: string): Promise<DeliveryRun> {
     if (!this.started) throw new Error('Codex command session 尚未 start');
     if (this.child) throw new Error('同一 conversation 已有活动 Codex command');
     const expectedSessionId = this.providerSessionId;
@@ -194,7 +177,6 @@ export class CodexCommandSession implements AgentSession {
     const turnId = randomUUID();
     const args = buildCodexExecArgs(
       this.config,
-      this.identity.decisionSchemaPath,
       effectivePrompt,
       expectedSessionId,
     );
@@ -230,7 +212,6 @@ export class CodexCommandSession implements AgentSession {
       child.once('close', (code, signal) => resolve({ code, signal }));
     });
     this.activeExit = exited.then(() => undefined, () => undefined);
-    if (shouldInterrupt?.()) await this.interruptActive();
     let exit: { code: number | null; signal: NodeJS.Signals | null };
     try {
       exit = await exited;
@@ -243,7 +224,7 @@ export class CodexCommandSession implements AgentSession {
       this.activeExit = null;
     }
     if (this.interruptRequested) {
-      return { turnId, status: 'interrupted', decision: null };
+      return { turnId, status: 'interrupted' };
     }
     if (streamError) throw streamError;
     if (collector.failure) throw collector.failure;
@@ -253,13 +234,6 @@ export class CodexCommandSession implements AgentSession {
     }
     if (!collector.providerSessionId) throw new Error('Codex exec 未返回 provider session ID');
     if (!collector.turnCompleted) throw new Error('Codex exec 未返回 turn.completed');
-    let decision: Decision;
-    try {
-      decision = JSON.parse(collector.agentMessage) as Decision;
-    } catch (error) {
-      throw new Error(`Codex 决策不是合法 JSON：${(error as Error).message}`);
-    }
-    validateDecision(decision);
     this.persistReady(collector.providerSessionId, turnId);
     this.lastCompletedResponsibility = responsibility;
     this.completedTurnsSinceResponsibilityReminder = injectResponsibility
@@ -268,7 +242,6 @@ export class CodexCommandSession implements AgentSession {
     return {
       turnId,
       status: 'completed',
-      decision,
     };
   }
 
@@ -320,10 +293,6 @@ export class CodexCommandSession implements AgentSession {
 
 function tomlString(value: string): string {
   return JSON.stringify(value);
-}
-
-function normalizeToken(value: unknown): string {
-  return typeof value === 'string' ? value.replace(/[_\-/]/g, '').toLowerCase() : '';
 }
 
 function eventMessage(event: JsonObject): string {

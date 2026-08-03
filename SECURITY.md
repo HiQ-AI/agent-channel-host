@@ -1,19 +1,15 @@
 # Security policy
 
-请通过 GitHub Security Advisory 私下报告安全问题，不要在公开 issue 中粘贴钉钉消息正文、conversation/thread 完整 ID、OAuth/Codex 登录态、token、cookie 或其他凭据。
+请通过 GitHub Security Advisory 私下报告安全问题，不要在公开 issue 中粘贴钉钉消息正文、conversation/session 完整 ID、OAuth/Codex 登录态、token、cookie 或其他凭据。
 
-运行 Host 的操作系统用户可以读取其 instance SQLite 数据。请使用独立的普通用户权限运行，不要以 LocalSystem/root 共享个人 DWS 或 Codex 登录态。
+Host 只负责把已授权 Channel 消息可靠、逐条地投递到对应 runtime session。它不接收 Agent 的处理决定或 final text，不创建 Channel outbox，也不调用 Channel 发送接口。Agent 是否具备并使用 DWS 或其他 Channel skill/CLI，完全由各 runtime 工作目录、审批、sandbox、网络和工具权限决定，必须独立审计。
 
-Channel 的 `subscriptions.groups/directs=all` 会把该 DWS 账号可见的未知会话自动登记并持久化首条消息；默认 `selected` 才是最小范围。扩大为 `all` 前应核对账号可见范围、Agent 职责和数据保留要求。`defaultModes.groups/directs=reply` 还会允许对应的新 Conversation 通过出站门禁，风险高于默认 `shadow`；它仍不强制 Agent 回复。两类默认模式只影响之后的新 Conversation，显式 disabled 仍作为 deny override。
+Channel 的 `subscriptions.groups/directs=all` 会把该 DWS 账号可见的未知会话自动登记并持久化首条消息；默认 `selected` 才是最小范围。扩大为 `all` 前应核对账号可见范围和数据保留要求。既有 `defaultModes`/Conversation mode 仅为兼容配置与本地展示，不构成 Agent 工具权限或 Host 出站门禁。
 
-Host 不覆盖 Codex session 的审批、sandbox、网络、额外 writable roots 或外部 MCP/skills；这些权限由 runtime 工作目录和用户级配置决定。`runtime.cwd` 应指向专用工作目录，不应指向用户主目录、磁盘根目录或混有其他敏感项目的上级目录。View 修改 cwd 会触发 Host 重启；若已有 provider session 的 cwd 不一致，Host 会提升 generation 后创建新 session。部署前必须独立审计 runtime 配置，不能把 Host 的消息门禁误当成工具权限隔离。
+每条实时消息和首次群历史消息先写入 SQLite WAL，再按 conversation 固定 session 串行投递。Host 只以 runtime 的 `turn.completed` 作为本次投递完成凭据；这不证明 Agent 已处理、已回复或业务已完成。Host 启动时恢复被中断的 claim，并重试未达上限的 failed inbox。旧数据库中的 decision、outbox 和 onboarding 发送字段仅作迁移遗留数据保留，不会被新运行路径执行。
 
-Runtime 返回不是精确的 `{action, replyText}` 最小结构时，当前 batch 保持 fail-closed 且不产生 outbox，但错误隔离在对应 Conversation，不应终止共享 Channel owner。Host 只接收可选的 Conversation 职责，并在首轮、职责变更后首轮及每 5 个已完成 turn 作为普通上下文提醒；它不接收实施、委派或权限字段，也不把职责提醒当成 developer/system 权限边界，避免消息代理替 Agent 做行为判断。
+Host 不设置 turn 超时。活动 claim 不按时间自动释放；新消息只排队，不抢占当前 turn。Host 停止或 runtime 异常退出时显式收口，异常进程退出后的 claim 由下次启动 reconciliation 释放。
 
-Host 启动时会一次性恢复被中断的 claim，并重试未达 3 次上限的 failed inbox/outbox。outbox 沿用原 UUID，发送前再次检查 Conversation 是否仍允许回复以及对应入站 sequence 是否仍是最新；DWS 明确返回同 UUID 重复时记为 `delivery_unknown`，不会换 UUID 或自动重发，并保留告警供人工核实。只有 DWS 本次明确成功才记为 `submitted`，但仍不等于 delivered。DWS 非零退出优先解析结构化 JSON，持久错误不包含完整 `--text` 命令参数。已完成、已提交、结果不明和达到上限的记录不会自动重放。该机制降低进程中断造成的漏处理风险，但不把 DWS 易失 event bus 提升为端到端 exactly-once。
+Host 不覆盖 runtime 的 developer/system 指令、审批、sandbox、网络、额外 writable roots 或 MCP/skills。可选 Conversation 职责只作为低频普通上下文提醒，不能提供权限隔离。`runtime.cwd` 必须指向专用工作目录，不应指向用户主目录、磁盘根目录或混有其他敏感项目的上级目录。
 
-`delivery_unknown` 的显式协调命令要求唯一 Host 已停止，先从群历史精确匹配已准备正文，再通过 SQLite `VACUUM INTO` 生成完整备份。只有回读零命中才使用由目标、正文和上一 UUID 共同绑定的新 UUID 单次发送；DWS 调用成功后仍需群历史回读命中才标记 `delivered`。任意发送异常重新进入 `delivery_unknown`，不会在 Host 重启后盲目发送。
-
-Host 不设置 turn 超时。活动 claim 不按时间自动释放，而由 Conversation 唯一 Worker 和 Host lease 隔离；新消息抢占、Host 停止或 runtime 退出时显式收口，异常进程退出后由下次启动 reconciliation 释放。部署方应监控长期无输出的 runtime turn，并通过停止 Host 或发送新消息触发受控中断，不能依赖时间阈值自动杀进程。
-
-每轮 Codex CLI 完成后子进程退出；Worker 的 warm TTL 只释放宿主内对象，不删除 SQLite 中的 provider session ID 或 Codex 本地 rollout。`view` 的 Conversation 删除会清理 Host 自己保存的消息、session 映射、outbox、旧 checkpoint 和成员资料，但不会删除 provider CLI 在其用户目录维护的本地 rollout；若保留策略要求物理清除 provider 数据，仍需停止 Host 后按该 provider 的受控流程处理。不能把进程退出、空闲释放或 Host 侧删除等同于 provider 全链路删除。
+每轮 Codex CLI 完成后子进程退出；Worker 的 warm TTL 只释放宿主内对象，不删除 SQLite 中的 provider session ID 或 Codex 本地 rollout。View 删除 Conversation 会清理 Host 自己保存的消息和 session 映射，但不会删除 provider CLI 在其用户目录维护的本地 rollout。
