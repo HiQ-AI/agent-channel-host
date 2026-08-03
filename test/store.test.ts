@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.js';
@@ -110,6 +110,46 @@ test('lease 只允许一个存活 owner', () => {
   assert.equal(store.acquireLease('host', 'two', 1_500, 1_000), false);
   assert.equal(store.acquireLease('host', 'two', 2_001, 1_000), true);
   store.close();
+});
+
+test('删除 Conversation 级联清理业务状态、Worker lease 与外置 recovery', () => {
+  const path = resolve('.test-delete-conversation', 'state.sqlite3');
+  rmSync(dirname(path), { recursive: true, force: true });
+  const store = new Store(path);
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'delete-group', title: '待删除群', responsibility: '测试', mode: 'reply',
+  });
+  try {
+    const event = normalizeDwsEvent({
+      type: 'user_im_message_receive_group_all', event_id: 'delete-event', conversation_id: 'delete-group',
+      sender_open_dingtalk_id: 'delete-sender', sender: '同事甲', content: '待删除消息',
+    })!;
+    const admitted = store.admitEvent(conversation, event).event!;
+    store.enqueueOutbox(admitted, '待删除回复', '00000000-0000-4000-8000-000000000099');
+    store.saveSession({
+      conversationId: conversation.id, runtimeId: 'codex', providerSessionId: 'delete-session', generation: 1,
+      lifecycle: 'ready', protocolFingerprint: 'test', runtimeCwd: '.', bootstrapTurnId: null,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+    store.acquireLease(`conversation:${conversation.id}`, 'worker-delete', Date.now(), 60_000);
+    const recovery = store.recoveryContextFile(conversation.id);
+    mkdirSync(dirname(recovery), { recursive: true });
+    writeFileSync(recovery, '{}', 'utf8');
+
+    assert.equal(store.deleteConversation(conversation.id), true);
+    assert.equal(store.getConversation(conversation.id), null);
+    assert.equal(existsSync(recovery), false);
+    for (const table of ['runtime_sessions', 'runtime_workers', 'inbound_events', 'outbox', 'group_onboarding', 'conversation_members']) {
+      const row = store.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
+      assert.equal(Number(row.count), 0, table);
+    }
+    assert.equal((store.db.prepare('SELECT COUNT(*) AS count FROM host_lease WHERE lease_key=?')
+      .get(`conversation:${conversation.id}`) as { count: number }).count, 0);
+    assert.equal(store.deleteConversation(conversation.id), false);
+  } finally {
+    store.close();
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
 });
 
 test('DWS consumer 参数固定读取 flatten NDJSON stdout', () => {

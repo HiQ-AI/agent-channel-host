@@ -41,7 +41,7 @@ flowchart LR
 2. `ConversationHost / EventDrivenScheduler` 负责 route binding、durable inbox、ready signal、lease/claim、合批、取消、Worker 生命周期和状态快照，不理解具体 Channel event key 或 runtime CLI 参数。
 3. `RuntimeAdapter / AgentSession` 负责启动 runtime 自己的命令、创建/恢复 session、解析 structured decision、取消活动进程和暴露 session/process identity。当前实现是 Codex CLI；Claude Code、Gemini CLI、Qwen CLI 应各自实现这个契约，不复制 Host、Store 或 Channel。
 
-配置也按这三类职责拆分：`channel`、`runtime`、`scheduling`。当前版本只注册 `dingtalk` 与 `codex`，未知 adapter 会明确失败。
+配置也按这三类职责拆分：`channel`、`runtime`、`scheduling`。当前版本只注册 `dingtalk` 与 `codex`，未知 adapter 会明确失败。每个 Channel 内再分别配置群聊和私聊的准入范围；该策略不改变底层唯一 owner。
 
 ## 前置条件
 
@@ -110,7 +110,7 @@ Windows 默认数据目录：
 
 0.3 配置版本为 `version: 2`，删除 `protocol` 块，并把原来混在 `runtime` 中的 DWS、调度与 Codex 字段拆开。项目尚未正式部署，因此不保留两套加载路径；读取 `version: 1` 会明确失败。
 
-旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v5，旧表会原地增加 checkpoint、成员资料、policy version 和 runtime recovery capability；旧 App Server session 的协议指纹与 command runtime 不兼容，请为测试 conversation 使用新 instance 或显式清理对应预览状态，Host 不会偷偷创建第二个 provider session。
+旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v6，旧表会原地增加 checkpoint、成员资料、policy version、runtime recovery capability 和 Channel disabled 状态；旧 App Server session 的协议指纹与 command runtime 不兼容，请为测试 conversation 使用新 instance 或显式清理对应预览状态，Host 不会偷偷创建第二个 provider session。
 
 ## 添加授权会话
 
@@ -140,7 +140,30 @@ agent-channel conversation add `
   --mode shadow
 ```
 
-`--responsibility` 省略时使用 `identity.role`。`conversation disable/enable --id <UUID>` 控制 allowlist；未授权 conversation 的事件只记录脱敏拒绝计数，不持久化正文。
+`--responsibility` 省略时使用 `identity.role`。`conversation disable/enable --id <UUID>` 控制指定会话；未准入 conversation 的事件只记录脱敏拒绝原因，不持久化正文。
+
+### Channel 订阅范围
+
+每个 Instance 的 Channel 可分别配置群聊和私聊：
+
+- `none`：该类消息全部拒绝；
+- `selected`：仅准入已登记且 enabled 的 Conversation；这是旧配置和新 Instance 的默认值；
+- `all`：未知 Conversation 收到首条消息时自动以 Agent 默认职责、`shadow` mode 和当前 runtime 建档，再持久准入。显式 disabled 的 Conversation 仍然拒绝，不会被 `all` 绕过。
+
+配置位于 `config.yaml`：
+
+```yaml
+channel:
+  id: dingtalk
+  enabled: true
+  profileId: default
+  command: dws
+  subscriptions:
+    groups: selected
+    directs: selected
+```
+
+`none/selected/all` 是唯一共享事件流上的 Host 准入策略。无论选择哪一种，DingTalk 仍然只有一个 Channel owner、一个 bus，以及共享的群聊/私聊 consumer；不会为每个群或私聊创建接收服务。交互式 `view` 可在 Instance 的 Channel 页面逐项切换策略。View-owned Host 会按新配置重启；attached Host 只保存配置并提示外部重启。
 
 ## 离线 runtime canary
 
@@ -186,13 +209,24 @@ agent-channel view
 
 `view` 会从用户状态目录发现全部已初始化 instance。顶层固定为 `总览 | 全局设置`，不会把某个 instance 的配置误称为全局设置：
 
-- `总览` 聚合 instance、Channel、conversation、runtime 和消息状态，其中 `INSTANCES` 表就是 instance 的管理入口，不是同级 tab。`↑/↓` 选择，`Enter/→` 下钻，`Esc/←` 逐层返回；`Tab` 只切换顶层“总览 / 全局设置”。该导航语义参考 Claude Code agent view，但业务层级仍是本项目的 `Instance → Channel → 群组/Conversation`。
-- Instance 详情中的 Channel 和 Conversation 都可选择。进入 Channel 后，第一项直接切换 `enabled/disabled`，下面显示该 Channel 已绑定的群组，末行“搜索并绑定群组”支持输入关键词、选择候选并写入现有 conversation registry；外部群 ID 不在界面展示。
+- `总览` 只展示 INSTANCES 索引、跨实例消息汇总和全局告警，不重复铺开具体 Channel、Conversation、Runtime 或最近消息。Instance 行保留 Host/owner、Channel/Conversation 数、pending 和 alert 数，便于先判断应下钻到哪里。`↑/↓` 选择，`Enter/→` 下钻，`Esc/←` 逐层返回；`Tab` 只切换顶层“总览 / 全局设置”。
+- Instance 详情集中展示该实例的 Channel、最近消息、Conversation、Runtime 和告警。进入 Channel 后，前三项依次切换 `enabled/disabled`、群聊订阅和私聊订阅；后续分区展示指定群聊和指定私聊。群聊末行“搜索并绑定指定群聊”支持输入关键词、选择候选并写入现有 conversation registry；外部群 ID 不在界面展示。
 - 新绑定群组默认 `shadow`，职责继承该 Instance 的 Agent 默认角色，runtime 使用 Instance 当前配置。绑定不创建第二套接收服务、不自动发送消息；Channel disabled 时可先配置群组，重新启用后继续复用原 registry 和 session 映射。
+- 指定私聊继续使用稳定 `openDingTalkId` 登记，当前不按姓名猜测 ID；通过 `conversation add --open-dingtalk-id` 添加后会出现在 Channel 的 DIRECTS 分区，并可下钻修改或删除。
 - `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 
-每个 Instance 设置页可修改 Agent 身份、runtime model/effort、合批参数、当前会话职责/mode/warm TTL 和已观察成员资料；Channel 开关与群组绑定统一放在 Instance 下钻后的 Channel 页面，不再埋在长设置列表中。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
+每个 Instance 设置页可修改 Agent 身份、runtime model/effort 和合批参数。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、职责、mode、warm TTL 和已观察成员资料；Channel 开关、订阅范围与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
+
+### 删除 Instance 与 Conversation
+
+删除都是二次确认操作：第一次按 `d` 只显示目标和影响，Enter 或再次按 `d` 执行，Esc/`←` 取消。
+
+- 在总览或 Instance 详情删除 Instance：停止当前 View 启动的 Host，移除可能存在的同名 Windows 用户计划任务，关闭数据库，再精确删除该 Instance 的配置、SQLite/WAL、recovery、日志和本地 session 映射。
+- 在 Conversation 详情删除：停止目标 View-owned Host，级联删除消息、decision、outbox、runtime session/worker、checkpoint、成员、onboarding 和 Worker lease，同时删除外置 recovery 文件；随后恢复该 Instance Host。
+- attached Host 仍存活时两种删除都 fail closed。View 不会越权修改外部进程持有的内存态；先用原进程管理方式停止 Host，再重新进入 `view` 删除。
+
+Conversation 删除后不会用原 provider session 恢复；如果以后重新绑定同一个外部会话，它会作为新 Conversation 建立新逻辑 session。
 
 字段设置、新增 Instance 向导和群搜索输入都支持单行光标编辑：`←/→` 移动，Home/End 跳到首尾，Backspace 删除光标前字符，Delete 删除光标后字符，Enter 提交，Esc 取消或返回。只有在非编辑态，`←/→` 才表示返回/下钻。
 
@@ -257,6 +291,6 @@ $canaryRoot = 'D:\baibu-agent\scratchpad\agent-channel-host-command-canary'
 node docs/acceptance/command-driven-runtime/scripts/codex-command-resume-canary.mjs $canaryRoot
 ```
 
-自动化测试覆盖 SQLite admission/去重/sequence、checkpoint 与成员资料、claim/release/reconciliation、跨 Channel 路由、runtime session 迁移、compaction recovery、outbox freshness、lease、ready signal、quiet-window burst、active command cancel、warm TTL、群 onboarding、DWS 参数、结构化决定、命令新建/resume、错误/超时、`status/view` 脱敏、管理 tab 与设置保存、service plan 和 CLI 实跑。
+自动化测试覆盖 SQLite admission/去重/sequence、checkpoint 与成员资料、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、claim/release/reconciliation、跨 Channel 路由、runtime session 迁移、compaction recovery、outbox freshness、lease、ready signal、quiet-window burst、active command cancel、warm TTL、群 onboarding、DWS 参数、结构化决定、命令新建/resume、错误/超时、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
 
 真实 Codex canary 只验证 runtime CLI 与固定 session 恢复，不连接或发送 DingTalk。真实 DWS 收发必须在专用测试群/账号获得单独授权后执行。

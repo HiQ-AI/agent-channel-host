@@ -1,42 +1,55 @@
-case_id,area,case,round_1,round_2,round_3,round_4,round_5,status
-CTX-001,store,SQLite migration creates versioned checkpoint and member tables,PASS,PASS,PASS,PASS,PASS,PASS
-CTX-002,store,context update and batch decision commit atomically with through sequence,PASS,PASS,PASS,PASS,PASS,PASS
-CTX-003,members,inbound sender upsert and relevant member lookup do not inject full roster,PASS,PASS,PASS,PASS,PASS,PASS
-CTX-004,prompt,prompts use fixed concise sections and explicit contextUpdate contract,PASS,PASS,PASS,PASS,PASS,PASS
-CTX-005,recovery,new provider session receives existing checkpoint while ordinary resume does not duplicate it,PASS,PASS,PASS,PASS,PASS,PASS
-CTX-006,recovery,Codex SessionStart compact hook returns current recovery version and bounded context,PASS,PASS,PASS,PASS,PASS,PASS
-CTX-007,recovery,real Codex fixed version accepts bundled hook configuration during verify,PASS,PASS,PASS,PASS,PASS,PASS
-VIEW-001,lifecycle,interactive view starts embedded Host only when no active owner exists,PASS,PASS,PASS,PASS,PASS,PASS
-VIEW-002,lifecycle,quitting view stops only the Host started by that view,PASS,PASS,PASS,PASS,PASS,PASS
-VIEW-003,overview,default tab shows all channels conversations messages runtimes workers and alerts,PASS,PASS,PASS,PASS,PASS,PASS
-VIEW-004,detail,selection opens one conversation detail without exposing raw IDs or content by default,PASS,PASS,PASS,PASS,PASS,PASS
-VIEW-005,settings,instance settings validate and save config atomically,PASS,PASS,PASS,PASS,PASS,PASS
-VIEW-006,settings,conversation responsibility mode and warm TTL changes are read on the next turn or send gate,PASS,PASS,PASS,PASS,PASS,PASS
-VIEW-007,settings,observed member role and boundary can be updated without adding the full roster to prompts,PASS,PASS,PASS,PASS,PASS,PASS
-VIEW-008,cli,--once remains read only and non TTY interactive view fails before Host side effects,PASS,PASS,PASS,PASS,PASS,PASS
-VIEW-009,registry,view discovers all initialized instances in stable order and shows zero instance guidance,,PASS,PASS,PASS,PASS,PASS
-VIEW-010,overview,bare view aggregates instances channels messages conversations and runtimes then drills down by instance,,PASS,PASS,PASS,PASS,PASS
-VIEW-011,lifecycle,each instance independently starts or attaches and view exit stops only owners started by that view,,PASS,PASS,PASS,PASS,PASS
-VIEW-012,settings,instance selection drills from overview into the matching validated settings page,,PASS,PASS,PASS,PASS,PASS
-VIEW-013,visual,interactive TTY uses semantic ANSI colors without changing table alignment,,,PASS,PASS,PASS,PASS
-VIEW-014,fallback,NO_COLOR non TTY and view once remain plain text without ANSI,,,PASS,PASS,PASS,PASS
-VIEW-015,settings,settings columns use explicit separators and left alignment,,,PASS,PASS,PASS,PASS
-VIEW-016,navigation,top level contains only overview and global settings while instance settings are reached by overview drill down,,,,PASS,PASS,PASS
-VIEW-017,channels,DingTalk enabled toggle persists through the shared config schema and old v2 config defaults to enabled,,,,PASS,PASS,PASS
-VIEW-018,lifecycle,disabled Channel state migrates safely and Host starts no adapter or Channel owner,,,,PASS,PASS,PASS
-VIEW-019,instances,TUI creates a validated instance through shared init with Channel disabled and shows it immediately,,,,PASS,PASS,PASS
-VIEW-020,settings,global settings page contains no Agent Runtime Channel conversation or member settings,,,,PASS,PASS,PASS
-VIEW-021,channels,instance detail exposes selectable Channel page with direct enabled toggle,,,,,PASS,PASS
-VIEW-022,registry,group keyword search selection writes the existing conversation registry with inherited role and shadow mode,,,,,PASS,PASS
-VIEW-023,navigation,right or Enter drills down left or Escape returns and Tab only switches top level pages,,,,,PASS,PASS
-VIEW-024,terminal,interactive view uses paired alternate screen enter exit while view once stays plain,,,,,PASS,PASS
-VIEW-025,editing,settings group search and instance wizard support cursor Home End Backspace and Delete editing,,,,,PASS,PASS
-VIEW-026,privacy,group search and view never render external conversation IDs,,,,,PASS,PASS
-VIEW-027,layout,instance settings tables align Chinese fullwidth emoji and combining characters by terminal display width,,,,,PASS,PASS
-VIEW-028,terminal,view exit requires confirmation and cancellation preserves navigation and editing state,,,,,PASS,PASS
-DOC-001,docs,README describes view as foreground startup and management entry while run remains headless,PASS,PASS,PASS,PASS,PASS,PASS
-DOC-002,docs,README and CLI help define bare view as the cross instance entry and reject view instance selection,,PASS,PASS,PASS,PASS,PASS
-DOC-003,docs,README documents semantic colors NO_COLOR and settings separators,,,PASS,PASS,PASS,PASS
-DOC-004,docs,README documents overview drill down global settings Channel toggle and TUI instance creation,,,,PASS,PASS,PASS
-DOC-005,docs,README documents Channel group search arrow navigation cursor editing and alternate screen behavior,,,,,PASS,PASS
-REG-001,regression,npm run verify pack dry run and isolated CLI smoke pass without DWS send,PASS,PASS,PASS,PASS,PASS,PASS
+case_id,area,case,round_1,round_2,round_3,round_4,round_5,round_6,status
+CTX-001,store,SQLite migration creates versioned checkpoint and member tables,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+CTX-002,store,context update and batch decision commit atomically with through sequence,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+CTX-003,members,inbound sender upsert and relevant member lookup do not inject full roster,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+CTX-004,prompt,prompts use fixed concise sections and explicit contextUpdate contract,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+CTX-005,recovery,new provider session receives existing checkpoint while ordinary resume does not duplicate it,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+CTX-006,recovery,Codex SessionStart compact hook returns current recovery version and bounded context,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+CTX-007,recovery,real Codex fixed version accepts bundled hook configuration during verify,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-001,lifecycle,interactive view starts embedded Host only when no active owner exists,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-002,lifecycle,quitting view stops only the Host started by that view,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-003,overview,global overview shows Instance index aggregate messages and global alerts without object detail tables,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-004,detail,selection opens one conversation detail without exposing raw IDs or content by default,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-005,settings,instance settings validate and save config atomically,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-006,settings,conversation responsibility mode and warm TTL changes are read on the next turn or send gate,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-007,settings,observed member role and boundary can be updated without adding the full roster to prompts,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-008,cli,--once remains read only and non TTY interactive view fails before Host side effects,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-009,registry,view discovers all initialized instances in stable order and shows zero instance guidance,,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-010,overview,bare view summarizes instances and drills down for Channels messages Conversations and Runtimes,,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-011,lifecycle,each instance independently starts or attaches and view exit stops only owners started by that view,,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-012,settings,instance selection drills from overview into the matching validated settings page,,PASS,PASS,PASS,PASS,PASS,PASS
+VIEW-013,visual,interactive TTY uses semantic ANSI colors without changing table alignment,,,PASS,PASS,PASS,PASS,PASS
+VIEW-014,fallback,NO_COLOR non TTY and view once remain plain text without ANSI,,,PASS,PASS,PASS,PASS,PASS
+VIEW-015,settings,settings columns use explicit separators and left alignment,,,PASS,PASS,PASS,PASS,PASS
+VIEW-016,navigation,top level contains only overview and global settings while instance settings are reached by overview drill down,,,,PASS,PASS,PASS,PASS
+VIEW-017,channels,DingTalk enabled toggle persists through the shared config schema and old v2 config defaults to enabled,,,,PASS,PASS,PASS,PASS
+VIEW-018,lifecycle,disabled Channel state migrates safely and Host starts no adapter or Channel owner,,,,PASS,PASS,PASS,PASS
+VIEW-019,instances,TUI creates a validated instance through shared init with Channel disabled and shows it immediately,,,,PASS,PASS,PASS,PASS
+VIEW-020,settings,global settings page contains no Agent Runtime Channel conversation or member settings,,,,PASS,PASS,PASS,PASS
+VIEW-021,channels,instance detail exposes selectable Channel page with direct enabled toggle,,,,,PASS,PASS,PASS
+VIEW-022,registry,group keyword search selection writes the existing conversation registry with inherited role and shadow mode,,,,,PASS,PASS,PASS
+VIEW-023,navigation,right or Enter drills down left or Escape returns and Tab only switches top level pages,,,,,PASS,PASS,PASS
+VIEW-024,terminal,interactive view uses paired alternate screen enter exit while view once stays plain,,,,,PASS,PASS,PASS
+VIEW-025,editing,settings group search and instance wizard support cursor Home End Backspace and Delete editing,,,,,PASS,PASS,PASS
+VIEW-026,privacy,group search and view never render external conversation IDs,,,,,PASS,PASS,PASS
+VIEW-027,layout,instance settings tables align Chinese fullwidth emoji and combining characters by terminal display width,,,,,PASS,PASS,PASS
+VIEW-028,terminal,view exit requires confirmation and cancellation preserves navigation and editing state,,,,,PASS,PASS,PASS
+VIEW-029,overview,Instance detail owns Channel Conversation Runtime recent messages and local alerts while global overview does not duplicate them,,,,,,PASS,PASS
+VIEW-030,subscriptions,old version 2 config without subscriptions defaults groups and directs to selected,,,,,,PASS,PASS
+VIEW-031,subscriptions,Channel page cycles independent group and direct none selected all modes and saves atomically,,,,,,PASS,PASS
+VIEW-032,admission,none rejects a kind selected requires an enabled registry row and group direct policies stay independent,,,,,,PASS,PASS
+VIEW-033,admission,all auto creates an unknown Conversation with inherited role shadow mode current runtime and safe local title,,,,,,PASS,PASS
+VIEW-034,admission,an explicitly disabled Conversation remains denied under all mode,,,,,,PASS,PASS
+VIEW-035,conversation,Conversation detail edits title enabled responsibility mode warm TTL and member fields,,,,,,PASS,PASS
+VIEW-036,conversation,Conversation delete requires confirmation and cascades session messages outbox worker context members onboarding lease and recovery,,,,,,PASS,PASS
+VIEW-037,instances,Instance delete requires confirmation and removes only the validated target directory after owner lifecycle handling,,,,,,PASS,PASS
+VIEW-038,lifecycle,attached Host deletion fails closed while View owned Conversation deletion stops and restarts the target Host,,,,,,PASS,PASS
+VIEW-039,channels,Channel page shows selected group and direct bindings while group search remains the only safe search flow,,,,,,PASS,PASS
+DOC-001,docs,README describes view as foreground startup and management entry while run remains headless,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+DOC-002,docs,README and CLI help define bare view as the cross instance entry and reject view instance selection,,PASS,PASS,PASS,PASS,PASS,PASS
+DOC-003,docs,README documents semantic colors NO_COLOR and settings separators,,,PASS,PASS,PASS,PASS,PASS
+DOC-004,docs,README documents overview drill down global settings Channel toggle and TUI instance creation,,,,PASS,PASS,PASS,PASS
+DOC-005,docs,README documents Channel group search arrow navigation cursor editing and alternate screen behavior,,,,,PASS,PASS,PASS
+DOC-006,docs,README documents lean overview subscription modes Conversation editing destructive confirmations and attached fail closed,,,,,,PASS,PASS
+REG-001,regression,npm run verify pack dry run and isolated CLI smoke pass without DWS send,PASS,PASS,PASS,PASS,PASS,PASS,PASS
+REG-002,regression,real PowerShell TTY validates lean overview subscription controls delete cancel alternate screen and exit confirmation,,,,,,PASS,PASS

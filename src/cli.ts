@@ -8,19 +8,23 @@ import { Store } from './store.js';
 import { dwsDoctor, resolveExactGroup, searchDwsGroups } from './dws.js';
 import { CodexCommandSession, verifyCodexCommand } from './codex-command.js';
 import { runHost } from './host.js';
-import { installUserService, removeUserService, windowsServicePlan } from './service.js';
+import {
+  installUserService, removeUserService, removeUserServiceIfInstalled, windowsServicePlan,
+} from './service.js';
 import { MAX_WORKER_WARM_SECONDS } from './types.js';
 import {
   assertInteractiveView, runView, shouldStartHostForView, type SettingEntry, type ViewInstance,
 } from './view.js';
 import { CLI_NAME } from './product.js';
-import { initializeInstance } from './instance.js';
+import {
+  deleteConversationWithLifecycle, deleteInstanceWithLifecycle, initializeInstance,
+} from './instance.js';
 
 const program = new Command();
 program
   .name(CLI_NAME)
   .description('将 Channel 消息路由到每个会话独立、可恢复的 Agent runtime session')
-  .version('0.4.0');
+  .version('0.5.0');
 
 program.command('init')
   .description('初始化一个不含凭据的用户级 Host instance')
@@ -314,6 +318,12 @@ program.command('view')
         afterSettingApplied: restartManagedHost,
         searchGroups: async (instance, query) => (await searchDwsGroups(instance.config, query))
           .map((group) => ({ title: group.title, externalId: group.openConversationId })),
+        deleteConversation: async (instance, conversationId) => {
+          await deleteConversationWithLifecycle(instance, conversationId, stopManagedHost, startManagedHost);
+        },
+        deleteInstance: async (instance) => {
+          await deleteInstanceWithLifecycle(instance, stopManagedHost, removeUserServiceIfInstalled);
+        },
       });
     } finally {
       const activeHosts = [...startedHosts.values()];

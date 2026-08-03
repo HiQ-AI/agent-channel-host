@@ -1,8 +1,9 @@
-import { access } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { access, rm } from 'node:fs/promises';
 import {
-  defaultConfig, writeInitialConfig, type HostConfig,
+  defaultConfig, loadConfig, writeInitialConfig, type HostConfig,
 } from './config.js';
-import { configPath, statePath } from './paths.js';
+import { configPath, instanceDir, statePath } from './paths.js';
 import { Store } from './store.js';
 
 export interface InitializeInstanceInput {
@@ -22,6 +23,12 @@ export interface InitializedInstance {
   config: HostConfig;
   configFile: string;
   stateFile: string;
+}
+
+export interface ManagedInstanceState {
+  name: string;
+  store: Store;
+  hostOwnership: 'attached' | 'view' | 'readonly';
 }
 
 export async function initializeInstance(
@@ -66,4 +73,64 @@ export async function initializeInstance(
     store.close();
   }
   return { config, configFile, stateFile };
+}
+
+export async function deleteInstanceData(
+  instance: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
+  const configFile = configPath(instance, env);
+  await loadConfig(instance, configFile);
+  const directory = instanceDir(instance, env);
+  await rm(directory, { recursive: true });
+  return directory;
+}
+
+export async function deleteConversationWithLifecycle<T extends ManagedInstanceState>(
+  instance: T,
+  conversationId: string,
+  stopHost: (instance: T) => Promise<void>,
+  startHost: (instance: T) => void,
+): Promise<void> {
+  if (instance.hostOwnership === 'attached') {
+    throw new Error(`Instance ${instance.name} 由外部 Host 持有；请先停止外部 Host 再删除 Conversation`);
+  }
+  const restart = instance.hostOwnership === 'view';
+  if (restart) await stopHost(instance);
+  const leaseOwner = acquireDeletionLease(instance);
+  try {
+    if (!instance.store.deleteConversation(conversationId)) throw new Error('Conversation 已不存在');
+  } finally {
+    instance.store.releaseLease('host', leaseOwner);
+    if (restart) startHost(instance);
+  }
+}
+
+export async function deleteInstanceWithLifecycle<T extends ManagedInstanceState>(
+  instance: T,
+  stopHost: (instance: T) => Promise<void>,
+  removeService: (instance: string) => Promise<unknown>,
+  removeData: (instance: string) => Promise<unknown> = deleteInstanceData,
+): Promise<void> {
+  if (instance.hostOwnership === 'attached') {
+    throw new Error(`Instance ${instance.name} 由外部 Host 持有；请先停止外部 Host 再删除 Instance`);
+  }
+  if (instance.hostOwnership === 'view') await stopHost(instance);
+  const leaseOwner = acquireDeletionLease(instance);
+  try {
+    await removeService(instance.name);
+  } catch (error) {
+    instance.store.releaseLease('host', leaseOwner);
+    throw error;
+  }
+  instance.store.close();
+  await removeData(instance.name);
+}
+
+function acquireDeletionLease(instance: ManagedInstanceState): string {
+  const owner = `management-delete:${process.pid}:${randomUUID()}`;
+  if (!instance.store.acquireLease('host', owner, Date.now(), 30_000)) {
+    throw new Error(`Instance ${instance.name} 的 Host 已重新运行；拒绝删除并请刷新状态`);
+  }
+  return owner;
 }
