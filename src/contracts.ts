@@ -1,5 +1,12 @@
 import type { Conversation, DecisionRun, NormalizedEvent, OutboxRecord } from './types.js';
 
+export class ChannelDeliveryUnknownError extends Error {
+  constructor(readonly reasonCode: string) {
+    super(`delivery_unknown:${reasonCode}`);
+    this.name = 'ChannelDeliveryUnknownError';
+  }
+}
+
 export interface ChannelDescriptor {
   channelId: string;
   profileId: string;

@@ -33,7 +33,12 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     if (path !== ':memory:') this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
-    this.migrate();
+    try {
+      this.migrate();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   close(): void {
@@ -369,6 +374,69 @@ export class Store {
         CREATE INDEX idx_runtime_session_resets_conversation
           ON runtime_session_resets(conversation_id,created_at);
         PRAGMA user_version=8;
+        COMMIT;
+      `);
+    }
+    const deliveryStateVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (deliveryStateVersion < 9) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS group_onboarding (
+          conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+          state TEXT NOT NULL CHECK(state IN ('pending','prepared','sending','submitted','failed')),
+          history_count INTEGER,
+          history_loaded_at TEXT,
+          intro_turn_id TEXT,
+          intro_text TEXT,
+          intro_uuid TEXT UNIQUE,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO group_onboarding(conversation_id,state,created_at,updated_at)
+          SELECT id,'pending',created_at,updated_at FROM conversations WHERE kind='group';
+        BEGIN IMMEDIATE;
+        CREATE TABLE outbox_v9 (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          inbound_event_id TEXT NOT NULL UNIQUE REFERENCES inbound_events(id) ON DELETE CASCADE,
+          input_sequence INTEGER NOT NULL,
+          uuid TEXT NOT NULL UNIQUE,
+          text TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('pending','sending','submitted','failed','suppressed','delivery_unknown')),
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0)
+        );
+        INSERT INTO outbox_v9(
+          id,conversation_id,inbound_event_id,input_sequence,uuid,text,state,error,created_at,updated_at,attempt_count
+        ) SELECT
+          id,conversation_id,inbound_event_id,input_sequence,uuid,text,state,error,created_at,updated_at,attempt_count
+        FROM outbox;
+        DROP TABLE outbox;
+        ALTER TABLE outbox_v9 RENAME TO outbox;
+        CREATE INDEX idx_outbox_state ON outbox(state,created_at);
+
+        CREATE TABLE group_onboarding_v9 (
+          conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+          state TEXT NOT NULL CHECK(state IN ('pending','prepared','sending','submitted','failed','delivery_unknown')),
+          history_count INTEGER,
+          history_loaded_at TEXT,
+          intro_turn_id TEXT,
+          intro_text TEXT,
+          intro_uuid TEXT UNIQUE,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO group_onboarding_v9(
+          conversation_id,state,history_count,history_loaded_at,intro_turn_id,intro_text,intro_uuid,error,created_at,updated_at
+        ) SELECT
+          conversation_id,state,history_count,history_loaded_at,intro_turn_id,intro_text,intro_uuid,error,created_at,updated_at
+        FROM group_onboarding;
+        DROP TABLE group_onboarding;
+        ALTER TABLE group_onboarding_v9 RENAME TO group_onboarding;
+        PRAGMA user_version=9;
         COMMIT;
       `);
     }
@@ -828,7 +896,7 @@ export class Store {
       const pendingGroupHistory = this.db.prepare(`
         SELECT g.conversation_id FROM group_onboarding g
         JOIN runtime_sessions s ON s.conversation_id=g.conversation_id
-        WHERE g.state<>'submitted' AND g.intro_text IS NULL
+        WHERE g.state NOT IN ('submitted','delivery_unknown') AND g.intro_text IS NULL
       `).all() as Row[];
       for (const row of pendingGroupHistory) {
         const conversationId = String(row.conversation_id);
@@ -870,7 +938,8 @@ export class Store {
         WHERE c.enabled=1 AND (
           e.id IS NOT NULL OR
           o.id IS NOT NULL OR
-          (c.kind='group' AND g.state<>'submitted' AND (g.intro_text IS NULL OR c.mode='reply'))
+          (c.kind='group' AND g.state NOT IN ('submitted','delivery_unknown')
+            AND (g.intro_text IS NULL OR c.mode='reply'))
         )
         ORDER BY c.id
       `).all() as Row[];
@@ -976,7 +1045,7 @@ export class Store {
     }
   }
 
-  finishOutbox(id: string, state: 'submitted' | 'failed', error: string | null): void {
+  finishOutbox(id: string, state: 'submitted' | 'failed' | 'delivery_unknown', error: string | null): void {
     this.db.prepare('UPDATE outbox SET state=?,error=?,updated_at=? WHERE id=?')
       .run(state, error, new Date().toISOString(), id);
   }
@@ -1017,7 +1086,7 @@ export class Store {
       UPDATE group_onboarding SET
         state='prepared',history_count=?,history_loaded_at=?,intro_turn_id=?,intro_text=?,intro_uuid=?,
         error=NULL,updated_at=?
-      WHERE conversation_id=? AND state<>'submitted'
+      WHERE conversation_id=? AND state NOT IN ('submitted','delivery_unknown')
     `).run(historyCount, now, introTurnId, introText, introUuid, now, conversationId);
     const record = this.getGroupOnboarding(conversationId);
     if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
@@ -1034,7 +1103,7 @@ export class Store {
       UPDATE group_onboarding SET
         state='submitted',history_count=?,history_loaded_at=?,intro_turn_id=?,
         intro_text=NULL,intro_uuid=NULL,error=NULL,updated_at=?
-      WHERE conversation_id=? AND state<>'submitted'
+      WHERE conversation_id=? AND state NOT IN ('submitted','delivery_unknown')
     `).run(historyCount, now, turnId, now, conversationId);
     const record = this.getGroupOnboarding(conversationId);
     if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
@@ -1045,7 +1114,8 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const current = this.getGroupOnboarding(conversationId);
-      if (!current || current.state === 'submitted' || !current.introText || !current.introUuid) {
+      if (!current || current.state === 'submitted' || current.state === 'delivery_unknown'
+        || !current.introText || !current.introUuid) {
         this.db.exec('COMMIT');
         return null;
       }
@@ -1059,7 +1129,11 @@ export class Store {
     }
   }
 
-  finishGroupOnboardingIntro(conversationId: string, state: 'submitted' | 'failed', error: string | null): void {
+  finishGroupOnboardingIntro(
+    conversationId: string,
+    state: 'submitted' | 'failed' | 'delivery_unknown',
+    error: string | null,
+  ): void {
     this.db.prepare('UPDATE group_onboarding SET state=?,error=?,updated_at=? WHERE conversation_id=?')
       .run(state, error, new Date().toISOString(), conversationId);
   }
@@ -1300,7 +1374,7 @@ export class Store {
         (SELECT COUNT(*) FROM inbound_events WHERE processing_state='failed') AS failed_messages,
         (SELECT COUNT(*) FROM outbox WHERE state='submitted') AS submitted,
         (SELECT COUNT(*) FROM outbox WHERE state IN ('pending','sending')) AS pending_outbox,
-        (SELECT COUNT(*) FROM group_onboarding WHERE state<>'submitted') AS pending_group_onboarding
+        (SELECT COUNT(*) FROM group_onboarding WHERE state IN ('pending','prepared','sending','failed')) AS pending_group_onboarding
     `).get() as Row;
     const channels = this.db.prepare(`
       SELECT channel_id,profile_id,label,state,owner_pid,connected_at,last_event_at,error,updated_at
@@ -1346,12 +1420,12 @@ export class Store {
           WHERE m.conversation_id=c.id AND m.external_user_id=c.external_id LIMIT 1) AS direct_display_name
       FROM outbox o
       JOIN conversations c ON c.id=o.conversation_id
-      WHERE o.state='failed' ORDER BY o.updated_at DESC LIMIT 5
+      WHERE o.state IN ('failed','delivery_unknown') ORDER BY o.updated_at DESC LIMIT 5
     `).all() as Row[];
     const failedOnboarding = this.db.prepare(`
       SELECT c.title,g.error,g.updated_at FROM group_onboarding g
       JOIN conversations c ON c.id=g.conversation_id
-      WHERE g.state='failed' ORDER BY g.updated_at DESC LIMIT 5
+      WHERE g.state IN ('failed','delivery_unknown') ORDER BY g.updated_at DESC LIMIT 5
     `).all() as Row[];
     const lease = this.db.prepare(
       'SELECT expires_at_ms,updated_at FROM host_lease WHERE lease_key=?',

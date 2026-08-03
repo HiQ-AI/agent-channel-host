@@ -124,7 +124,7 @@ export interface OutboxRecord {
   inputSequence: number;
   uuid: string;
   text: string;
-  state: 'pending' | 'sending' | 'submitted' | 'failed' | 'suppressed';
+  state: 'pending' | 'sending' | 'submitted' | 'failed' | 'suppressed' | 'delivery_unknown';
   attemptCount: number;
   error: string | null;
   createdAt: string;
@@ -133,7 +133,7 @@ export interface OutboxRecord {
 
 export interface GroupOnboardingRecord {
   conversationId: string;
-  state: 'pending' | 'prepared' | 'sending' | 'submitted' | 'failed';
+  state: 'pending' | 'prepared' | 'sending' | 'submitted' | 'failed' | 'delivery_unknown';
   historyCount: number | null;
   historyLoadedAt: string | null;
   introTurnId: string | null;

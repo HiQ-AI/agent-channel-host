@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { HostConfig } from './config.js';
-import type { AgentSession, ChannelAdapter } from './contracts.js';
+import { ChannelDeliveryUnknownError, type AgentSession, type ChannelAdapter } from './contracts.js';
 import type { AdmittedEvent, Conversation, DecisionRun, OutboxRecord } from './types.js';
 import type { Store } from './store.js';
 import { delay } from './process-utils.js';
@@ -90,7 +90,7 @@ export class ConversationWorker {
   private async onboardGroup(history: RecentGroupHistory | null): Promise<void> {
     let onboarding = this.store.getGroupOnboarding(this.conversation.id);
     if (!onboarding) throw new Error(`群 onboarding 状态不存在：${this.conversation.id}`);
-    if (onboarding.state === 'submitted') return;
+    if (onboarding.state === 'submitted' || onboarding.state === 'delivery_unknown') return;
     if (!onboarding.introText) {
       if (!history) throw new Error('群 onboarding 缺少最近消息上下文');
       if (history.count === 0) {
@@ -115,7 +115,7 @@ export class ConversationWorker {
         history.count,
         result.turnId,
         result.decision.replyText,
-        deterministicOnboardingUuid(this.conversation),
+        deterministicOnboardingUuid(this.conversation, result.decision.replyText),
       );
       this.log({
         type: 'GROUP_HISTORY_REPLY_PREPARED', conversationId: this.conversation.id,
@@ -135,8 +135,12 @@ export class ConversationWorker {
       this.store.finishGroupOnboardingIntro(this.conversation.id, 'submitted', null);
       this.log({ type: 'GROUP_ONBOARDING_SUBMITTED', conversationId: this.conversation.id });
     } catch (error) {
-      this.store.finishGroupOnboardingIntro(this.conversation.id, 'failed', (error as Error).message);
-      this.log({ type: 'GROUP_ONBOARDING_FAILED', conversationId: this.conversation.id, error: (error as Error).message });
+      const state = error instanceof ChannelDeliveryUnknownError ? 'delivery_unknown' : 'failed';
+      this.store.finishGroupOnboardingIntro(this.conversation.id, state, (error as Error).message);
+      this.log({
+        type: state === 'delivery_unknown' ? 'GROUP_ONBOARDING_DELIVERY_UNKNOWN' : 'GROUP_ONBOARDING_FAILED',
+        conversationId: this.conversation.id, error: (error as Error).message,
+      });
     }
   }
 
@@ -279,8 +283,12 @@ export class ConversationWorker {
       this.store.finishOutbox(claimed.id, 'submitted', null);
       this.log({ type: 'OUTBOX_SUBMITTED', conversationId: this.conversation.id, sequence, uuid: claimed.uuid });
     } catch (error) {
-      this.store.finishOutbox(claimed.id, 'failed', (error as Error).message);
-      this.log({ type: 'OUTBOX_FAILED', conversationId: this.conversation.id, sequence, error: (error as Error).message });
+      const state = error instanceof ChannelDeliveryUnknownError ? 'delivery_unknown' : 'failed';
+      this.store.finishOutbox(claimed.id, state, (error as Error).message);
+      this.log({
+        type: state === 'delivery_unknown' ? 'OUTBOX_DELIVERY_UNKNOWN' : 'OUTBOX_FAILED',
+        conversationId: this.conversation.id, sequence, error: (error as Error).message,
+      });
     }
   }
 
@@ -324,7 +332,9 @@ function deterministicUuid(event: AdmittedEvent): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-function deterministicOnboardingUuid(conversation: Conversation): string {
-  const hex = createHash('sha256').update(`${PRODUCT_ID}:onboarding:${conversation.channelId}:${conversation.channelProfileId}:${conversation.externalId}`).digest('hex');
+function deterministicOnboardingUuid(conversation: Conversation, replyText: string): string {
+  const hex = createHash('sha256').update(
+    `${PRODUCT_ID}:onboarding:${conversation.channelId}:${conversation.channelProfileId}:${conversation.externalId}:${replyText}`,
+  ).digest('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }

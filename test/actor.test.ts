@@ -4,7 +4,7 @@ import { defaultConfig } from '../src/config.js';
 import { Store } from '../src/store.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { ConversationWorker } from '../src/actor.js';
-import type { AgentSession, ChannelAdapter } from '../src/contracts.js';
+import { ChannelDeliveryUnknownError, type AgentSession, type ChannelAdapter } from '../src/contracts.js';
 import type { DecisionRun } from '../src/types.js';
 
 class FakeSession implements AgentSession {
@@ -243,6 +243,35 @@ test('群 onboarding 发送失败后以同一 UUID 重试', async () => {
   store.close();
 });
 
+test('群 onboarding 重复 UUID 进入 delivery_unknown 且重启不再盲目重试', async () => {
+  const config = defaultConfig('onboarding-delivery-unknown', '.', 'Agent');
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'cid-onboarding-delivery-unknown', title: '未知终态群',
+    responsibility: '', mode: 'reply',
+  });
+  store.prepareGroupOnboarding(conversation.id, 1, 'unknown-turn', '本轮回复', 'stable-unknown-uuid');
+  let sends = 0;
+  const sender = {
+    send: async () => {
+      sends += 1;
+      throw new ChannelDeliveryUnknownError('duplicate_uuid');
+    },
+  } as Pick<ChannelAdapter, 'send'>;
+  const first = new ConversationWorker(config, conversation, new OnboardingSession(), store, sender, () => undefined);
+  await first.start();
+  assert.equal(store.getGroupOnboarding(conversation.id)?.state, 'delivery_unknown');
+  assert.equal(store.getGroupOnboarding(conversation.id)?.error, 'delivery_unknown:duplicate_uuid');
+  assert.equal(sends, 1);
+  await first.stop();
+
+  const restarted = new ConversationWorker(config, conversation, new OnboardingSession(), store, sender, () => undefined);
+  await restarted.start();
+  assert.equal(sends, 1);
+  await restarted.stop();
+  store.close();
+});
+
 test('Worker 启动时用原 UUID 提交 reconciliation 恢复的 outbox', async () => {
   const config = defaultConfig('outbox-recovery', '.', 'Agent');
   const store = new Store(':memory:');
@@ -274,6 +303,37 @@ test('Worker 启动时用原 UUID 提交 reconciliation 恢复的 outbox', async
     await worker.stop();
     store.close();
   }
+});
+
+test('普通 outbox 重复 UUID 进入 delivery_unknown 且重启不再盲目重试', async () => {
+  const config = defaultConfig('outbox-delivery-unknown', '.', 'Agent');
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'outbox-delivery-unknown-user', title: '未知终态私聊', responsibility: '', mode: 'reply',
+  });
+  const event = store.admitEvent(conversation, normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: 'outbox-delivery-unknown-event',
+    sender_open_dingtalk_id: conversation.externalId, content: '恢复发送',
+  })!).event!;
+  const outbox = store.enqueueOutbox(event, '恢复后的回复', 'stable-delivery-unknown-uuid')!;
+  let sends = 0;
+  const sender = {
+    send: async () => {
+      sends += 1;
+      throw new ChannelDeliveryUnknownError('duplicate_uuid');
+    },
+  } as Pick<ChannelAdapter, 'send'>;
+  const first = new ConversationWorker(config, conversation, new OnboardingSession(), store, sender, () => undefined);
+  await first.start();
+  assert.equal(store.getOutbox(outbox.id)?.state, 'delivery_unknown');
+  assert.equal(sends, 1);
+  await first.stop();
+
+  const restarted = new ConversationWorker(config, conversation, new OnboardingSession(), store, sender, () => undefined);
+  await restarted.start();
+  assert.equal(sends, 1);
+  await restarted.stop();
+  store.close();
 });
 
 test('单个 conversation 的无效决策 fail closed，但 Worker 与 Channel 生命周期不被终止', async () => {

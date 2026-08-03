@@ -10,7 +10,7 @@ Host 不覆盖 Codex session 的审批、sandbox、网络、额外 writable root
 
 Runtime 返回不是精确的 `{action, replyText}` 最小结构时，当前 batch 保持 fail-closed 且不产生 outbox，但错误隔离在对应 Conversation，不应终止共享 Channel owner。Host 只接收可选的 Conversation 职责，并在首轮、职责变更后首轮及每 5 个已完成 turn 作为普通上下文提醒；它不接收实施、委派或权限字段，也不把职责提醒当成 developer/system 权限边界，避免消息代理替 Agent 做行为判断。
 
-Host 启动时会一次性恢复被中断的 claim，并重试未达 3 次上限的 failed inbox/outbox。outbox 沿用原 UUID，发送前再次检查 Conversation 是否仍允许回复以及对应入站 sequence 是否仍是最新；DWS 明确返回同 UUID 重复时只收口为 `submitted`，不会换 UUID 再发，也不会把它表述为 delivered。DWS 非零退出优先解析结构化 JSON，持久错误不包含完整 `--text` 命令参数。已完成、已提交和达到上限的记录不会自动重放。该机制降低进程中断造成的漏处理风险，但不把 DWS 易失 event bus 提升为端到端 exactly-once。
+Host 启动时会一次性恢复被中断的 claim，并重试未达 3 次上限的 failed inbox/outbox。outbox 沿用原 UUID，发送前再次检查 Conversation 是否仍允许回复以及对应入站 sequence 是否仍是最新；DWS 明确返回同 UUID 重复时记为 `delivery_unknown`，不会换 UUID 或自动重发，并保留告警供人工核实。只有 DWS 本次明确成功才记为 `submitted`，但仍不等于 delivered。DWS 非零退出优先解析结构化 JSON，持久错误不包含完整 `--text` 命令参数。已完成、已提交、结果不明和达到上限的记录不会自动重放。该机制降低进程中断造成的漏处理风险，但不把 DWS 易失 event bus 提升为端到端 exactly-once。
 
 Host 不设置 turn 超时。活动 claim 不按时间自动释放，而由 Conversation 唯一 Worker 和 Host lease 隔离；新消息抢占、Host 停止或 runtime 退出时显式收口，异常进程退出后由下次启动 reconciliation 释放。部署方应监控长期无输出的 runtime turn，并通过停止 Host 或发送新消息触发受控中断，不能依赖时间阈值自动杀进程。
 

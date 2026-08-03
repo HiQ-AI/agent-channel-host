@@ -88,7 +88,7 @@ test('ALERTS 将遗留 DWS 长错误压缩为单行脱敏摘要', () => {
   state.detailInstanceName = instance.name;
   try {
     const rendered = renderManagementView([instance], state, null, [], 72);
-    assert.match(rendered, /onboarding\/测试群: duplicate_uuid/);
+    assert.match(rendered, /onboarding\/测试群: delivery_unknown: duplicate_uuid/);
     assert.doesNotMatch(rendered, /敏感回复正文|cid-sensitive|stable-alert-uuid|Command failed:/);
     const alertLine = rendered.split('\n').find((line) => line.includes('onboarding/测试群'))!;
     assert.ok(terminalDisplayWidth(alertLine) <= 72);

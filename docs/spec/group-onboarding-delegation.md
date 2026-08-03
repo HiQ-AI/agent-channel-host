@@ -56,7 +56,7 @@
 新增 `group_onboarding`：
 
 - `conversation_id`：群 conversation 主键；
-- `state`：`pending/prepared/sending/submitted/failed`；
+- `state`：`pending/prepared/sending/submitted/failed/delivery_unknown`；
 - `history_count/history_loaded_at`：历史读取证据；
 - `intro_turn_id/intro_text/intro_uuid`：固定 thread 上生成的介绍及幂等键；
 - `error/created_at/updated_at`：恢复与诊断。

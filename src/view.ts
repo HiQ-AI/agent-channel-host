@@ -1267,7 +1267,7 @@ function renderInstanceOverview(
 function renderAlert(target: string, error: unknown, at: unknown, width: number, color: boolean): string {
   const raw = text(error) ?? 'unknown';
   const summary = /Request is repeated with uuid\b/i.test(raw)
-    ? 'duplicate_uuid'
+    ? 'delivery_unknown: duplicate_uuid'
     : /^Command failed:/i.test(raw)
       ? 'command_failed'
       : raw.replace(/\s+/g, ' ').trim();

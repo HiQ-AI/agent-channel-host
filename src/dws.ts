@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
 import type { HostConfig } from './config.js';
-import type { ChannelAdapter, ChannelHandlers } from './contracts.js';
+import { ChannelDeliveryUnknownError, type ChannelAdapter, type ChannelHandlers } from './contracts.js';
 import type { Conversation, ConversationKind, NormalizedEvent, OutboxRecord } from './types.js';
 import { delay, stopChild, withTimeout } from './process-utils.js';
 import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from './command.js';
@@ -417,10 +417,10 @@ export class DwsSender {
         '--text', record.text, '--uuid', record.uuid, '--ai-tag=true', '--yes',
       ], 45_000) as Record<string, unknown>;
     } catch (error) {
-      if (isDwsRepeatedUuidError(error)) return;
+      if (isDwsRepeatedUuidError(error)) throw new ChannelDeliveryUnknownError('duplicate_uuid');
       throw error;
     }
-    if (isDwsRepeatedUuidResponse(result)) return;
+    if (isDwsRepeatedUuidResponse(result)) throw new ChannelDeliveryUnknownError('duplicate_uuid');
     if (result.success !== true) {
       throw new Error(`DWS 发送失败：${dwsFailureSummary(result, null)}`);
     }
