@@ -9,7 +9,7 @@ Host 使用稳定 UUID 重试发送。DWS 已登记该 UUID 时以非零退出�
 
 ## 修复
 
-- `runDwsJson` 在非零退出时只从 stdout/stderr 读取完整结构化 JSON，转换成不含命令参数和消息正文的 `DwsCommandError`。
+- `execResolved` 在非零退出时保留回调取得的 stdout/stderr；`runDwsJson` 再从中读取完整结构化 JSON，转换成不含命令参数和消息正文的 `DwsCommandError`。
 - 仅当结构化错误同时满足 `reason=business_error`、`server_error_code=1001` 且消息明确为同 UUID 重复时，`DwsSender` 将调用视为幂等成功。
 - Host 继续保存 `submitted`，不把该状态表述为 delivered、已读或业务接受；UUID 保持不变，不追加第二次发送。
 - 其他 DWS 错误继续 fail-closed。

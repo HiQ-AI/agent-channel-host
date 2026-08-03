@@ -10,9 +10,10 @@
 npm run verify
 ```
 
-- 85/85 tests PASS。
+- 86/86 tests PASS。
 - `@hiq-ai/agent-channel-host@0.9.1` pack dry-run PASS，共 69 files。
 - DWS 测试覆盖结构化非零退出、重复 UUID 幂等成功和其他业务错误 fail-closed。
+- 命令层测试以真实非零 Node 子进程证明回调 stdout/stderr 会保留给上层结构化解析。
 - View 测试覆盖 72 列窗口内的遗留错误单行摘要与敏感内容反向断言。
 
 ## 真实边界

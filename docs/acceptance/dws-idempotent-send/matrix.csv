@@ -1,5 +1,5 @@
 case_id,layer,assertion,round_1
-DIS-001,dws,DWS非零退出的结构化JSON转换为脱敏错误且不包含消息正文命令参数和UUID,PASS
+DIS-001,dws,命令层保留非零退出stdout和stderr且DWS结构化JSON转换为不含消息正文命令参数和UUID的脱敏错误,PASS
 DIS-002,sender,明确的同UUID重复错误按幂等submitted收口且不换UUID不再次发送,PASS
 DIS-003,sender,非重复业务错误继续fail-closed,PASS
 DIS-004,view,遗留长错误在ALERTS中显示单行摘要且不泄露正文目标ID或UUID,PASS
