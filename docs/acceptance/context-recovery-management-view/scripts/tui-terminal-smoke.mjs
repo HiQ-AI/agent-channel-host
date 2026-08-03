@@ -64,18 +64,24 @@ try {
     { name: 'tui-smoke', config, store, hostOwnership: 'attached', notices: ['合成终端 smoke；未连接 Channel'] },
     { name: 'second-agent', config: secondConfig, store: secondStore, hostOwnership: 'attached', notices: [] },
   ], { intervalSeconds: 10, once: false, showContent: false });
-  assert.match(transcript, /\[ 总览 \]/);
-  assert.match(transcript, /instances=2/);
-  assert.match(transcript, /second-agent/);
-  assert.match(transcript, /编辑器验证群/);
-  assert.match(transcript, /跨 Channel 私聊/);
-  assert.match(transcript, /\[ 设置 \]/);
-  assert.match(transcript, /instance=second-agent/);
-  assert.match(transcript, /编辑 Agent 名称/);
+  const plainTranscript = transcript.replace(/\u001b\[[0-9;]*m/g, '');
+  assert.match(transcript, /\u001b\[[0-9;]*m/);
+  assert.match(plainTranscript, /\[ 总览 \]/);
+  assert.match(plainTranscript, /instances=2/);
+  assert.match(plainTranscript, /second-agent/);
+  assert.match(plainTranscript, /编辑器验证群/);
+  assert.match(plainTranscript, /跨 Channel 私聊/);
+  assert.match(plainTranscript, /\[ 设置 \]/);
+  assert.match(plainTranscript, /instance=second-agent/);
+  assert.match(plainTranscript, /SETTING\s+│\s+VALUE\s+│\s+EFFECT/);
+  assert.match(plainTranscript, /─+┼─+┼─+/);
+  assert.match(plainTranscript, /编辑 Agent 名称/);
   await writeFile(resultPath, JSON.stringify({
     ok: true,
     tty: { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY },
     observed: ['global-overview', 'instance-detail', 'conversation-detail', 'settings', 'instance-switch', 'editing', 'exit'],
+    colorObserved: true,
+    settingsColumnsDelimited: true,
     channelStarted: false,
   }, null, 2));
 } finally {

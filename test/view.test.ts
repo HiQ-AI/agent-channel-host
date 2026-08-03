@@ -7,7 +7,7 @@ import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import {
   createManagementViewState, createSettingEntries, handleManagementViewInput, renderManagementView, renderStatusView,
-  shouldStartHostForView, type ViewInstance,
+  shouldStartHostForView, shouldUseColor, type ViewInstance,
 } from '../src/view.js';
 
 test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完整 provider session ID', () => {
@@ -113,6 +113,55 @@ test('management view 默认显示跨会话总览，可进入详情并切换设�
   }
 });
 
+test('management view 在交互终端使用语义颜色，纯文本输出不带 ANSI', () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('colored-view', '.', 'Agent', '角色');
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'colored-group', title: '彩色验证群', responsibility: '答疑', mode: 'shadow',
+  });
+  store.setChannelConnection({
+    channelId: 'dingtalk', profileId: 'default', label: 'DingTalk', state: 'ready', ownerPid: 1234,
+  });
+  store.setRuntimeAdapter({ runtimeId: 'codex', label: 'Codex CLI', state: 'ready', model: null });
+  try {
+    const instances = [viewInstance('colored-view', config, store)];
+    const state = createManagementViewState();
+    const detail = store.conversationDetail(conversation.id);
+    const settings = createSettingEntries(config, store, conversation.id);
+    const plain = renderManagementView(instances, state, detail, settings, 120, false, false);
+    const colored = renderManagementView(instances, state, detail, settings, 120, false, true);
+
+    assert.doesNotMatch(plain, /\u001b\[/);
+    assert.match(colored, /\u001b\[1;36m/);
+    assert.match(colored, /\u001b\[1;32mready/);
+    assert.equal(stripAnsi(colored).replace(/refreshed=[^\n]+/, 'refreshed=<time>'), plain.replace(/refreshed=[^\n]+/, 'refreshed=<time>'));
+    assert.doesNotMatch(renderStatusView(instances), /\u001b\[/);
+  } finally {
+    store.close();
+  }
+});
+
+test('settings 使用清晰的列分隔符并保持左对齐', () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('settings-layout', '.', 'Agent', '角色');
+  try {
+    const state = createManagementViewState();
+    state.tab = 'settings';
+    const rendered = renderManagementView(
+      [viewInstance('settings-layout', config, store)],
+      state,
+      null,
+      createSettingEntries(config, store, null),
+      120,
+    );
+    assert.match(rendered, /SETTING\s+│\s+VALUE\s+│\s+EFFECT/);
+    assert.match(rendered, /─+┼─+┼─+/);
+    assert.match(rendered, />\s+│ Agent 名称\s+│ Agent\s+│/);
+  } finally {
+    store.close();
+  }
+});
+
 test('settings 使用同一 schema 原子保存 config，并更新 conversation 与成员资料', async () => {
   const root = resolve('.test-view-settings');
   const configFile = resolve(root, 'config.yaml');
@@ -153,6 +202,13 @@ test('view 仅在交互模式且 Host 未运行时启动 owner', () => {
   assert.equal(shouldStartHostForView(false, { hostState: 'stopped' }), true);
   assert.equal(shouldStartHostForView(false, { hostState: 'running' }), false);
   assert.equal(shouldStartHostForView(true, { hostState: 'stopped' }), false);
+});
+
+test('view 颜色遵循 TTY、NO_COLOR 与 dumb terminal', () => {
+  assert.equal(shouldUseColor(true, {}), true);
+  assert.equal(shouldUseColor(false, {}), false);
+  assert.equal(shouldUseColor(true, { NO_COLOR: '' }), false);
+  assert.equal(shouldUseColor(true, { TERM: 'dumb' }), false);
 });
 
 test('management view 按键可从总览进入详情并切换设置编辑', async () => {
@@ -211,4 +267,8 @@ test('settings 在上层 view 中显式切换 instance 后编辑对应配置', a
 
 function viewInstance(name: string, config: ReturnType<typeof defaultConfig>, store: Store): ViewInstance {
   return { name, config, store, hostOwnership: 'attached', notices: [] };
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-9;]*m/g, '');
 }
