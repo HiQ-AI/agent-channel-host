@@ -245,6 +245,10 @@ export class CodexCommandSession implements AgentSession {
     };
   }
 
+  async steer(_prompt: string): Promise<{ turnId: string }> {
+    throw new Error('Codex command runtime 不支持活动 turn 引导');
+  }
+
   async interruptActive(): Promise<boolean> {
     if (!this.child || this.child.exitCode !== null || this.interruptRequested) return false;
     this.interruptRequested = true;

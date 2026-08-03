@@ -88,6 +88,7 @@ export function resolveEventConversation(
 export class EventDrivenScheduler {
   private readonly workers = new Map<string, WorkerHandle>();
   private readonly starts = new Map<string, Promise<WorkerHandle>>();
+  private readonly startingWorkers = new Map<string, ConversationWorker>();
   private readonly closures = new Map<string, Promise<void>>();
   private readonly warmTimers = new Map<string, NodeJS.Timeout>();
   private stopping = false;
@@ -113,6 +114,11 @@ export class EventDrivenScheduler {
     const conversation = this.store.getConversation(conversationId);
     if (!conversation?.enabled) return;
     this.clearWarmTimer(conversationId);
+    const startingWorker = this.startingWorkers.get(conversationId);
+    if (startingWorker) {
+      startingWorker.signal();
+      return;
+    }
     void this.ensureWorker(conversation)
       .then(({ worker }) => {
         if (!this.stopping) worker.signal();
@@ -149,6 +155,7 @@ export class EventDrivenScheduler {
       this.log,
       (idleWorker) => this.scheduleWarmRelease(idleWorker),
     );
+    this.startingWorkers.set(conversation.id, worker);
     const leaseKey = `conversation:${conversation.id}`;
     if (!this.store.acquireLease(leaseKey, worker.workerId, Date.now(), 30_000)) {
       return Promise.reject(new Error(`conversation lease 已被其他 Worker 持有：${conversation.id}`));
@@ -162,10 +169,12 @@ export class EventDrivenScheduler {
     const handle = { worker, leaseTimer };
     const promise = worker.start().then(() => {
       this.starts.delete(conversation.id);
+      this.startingWorkers.delete(conversation.id);
       this.workers.set(conversation.id, handle);
       return handle;
     }).catch((error) => {
       this.starts.delete(conversation.id);
+      this.startingWorkers.delete(conversation.id);
       clearInterval(leaseTimer);
       this.store.releaseLease(leaseKey, worker.workerId);
       throw error;

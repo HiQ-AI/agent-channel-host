@@ -2,7 +2,7 @@
 
 `agent-channel-host` 是事件驱动的单向消息投递宿主：它从 Channel adapter 接收已授权群聊/私聊消息，维护 conversation 与 Agent runtime session 的独立映射，并确保每条消息成功进入对应 runtime session。
 
-当前可运行组合是 DingTalk DWS + Codex CLI。DingTalk 不以 `@` 作为唯一入口；每条授权消息都会逐条进入所属 conversation 的固定 Codex session。Host 不接收 Agent 的处理结果，不判断是否回复，也不代发回复；Agent 根据自己的工作目录、配置、工具和独立历史，自行决定是否处理、怎么处理、是否回复以及怎么回复。项目不运行 Codex App Server，也不提供第二套消息接收服务。
+当前可运行组合是 DingTalk DWS + Codex App Server。DingTalk 不以 `@` 作为唯一入口；每条授权消息都会进入所属 conversation 的固定 Codex session，活动 turn 中的新消息通过 `turn/steer` 立即引导同一 turn。Host 不接收 Agent 的处理结果，不判断是否回复，也不代发回复；Agent 根据自己的工作目录、配置、工具和独立历史，自行决定是否处理、怎么处理、是否回复以及怎么回复。项目不提供第二套消息接收服务。
 
 首版发布 Node.js/TypeScript npm package，命令名为 `agent-channel`，不提供 Windows portable zip/exe。
 
@@ -26,11 +26,11 @@ flowchart LR
 - 一个 instance 只持有一个 Channel owner。当前 DingTalk adapter 用跨 instance 文件锁避免同一 DWS profile 被重复消费。
 - 常驻的是 Host、DWS 长连接和 SQLite 状态，不是每个 conversation 的 provider 进程。消息到达后才启动一轮 runtime CLI；该轮完成后进程退出。
 - 每个群聊/私聊持久化自己的 `(channel, profile, conversation) → runtime + provider session ID + generation`，彼此不共享 transcript。
-- 新 Codex 会话执行 `codex exec --json`；已有会话执行 `codex exec resume <原 ID> --json`。每次 resume 都校验 `thread.started.thread_id` 必须等于原 ID，否则 fail closed，不创建第二条 session。Host 不配置 output schema，也不解析 Agent final text。
+- 新 Codex 会话执行 `thread/start`，已有会话执行 `thread/resume` 并校验必须精确恢复原 ID，否则 fail closed，不创建第二条 session。Host 不配置 output schema，也不解析 Agent final text。
 - 每个 turn 只转发当前批次内各条消息的“发送者、时间、内容”。引用和合并转发折叠进内容；Host 不附带群名、私聊标识、成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息前增加一份短提醒。
 - Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不覆盖 provider 的 developer/system 指令；Agent 的长期规则由 runtime 工作目录自行维护。
 - 每条消息先写 SQLite WAL，提交后才发进程内 ready signal；静默窗口内已到达的消息按 `maxBatchMessages` 合成一次 runtime 输入。Host 启动时释放中断的 claim，并重新投递未完成及未达 3 次上限的失败消息。`turn.completed` 只证明 runtime 已完成本次输入，不代表 Agent 已回复或业务已完成。
-- quiet window 用于合并短时间内连续到达的消息。活动 turn 开始后才到达的新消息在当前 turn 后排队，Host 不打断已经传入 runtime 的消息；command runtime 不支持向活动 turn 追加输入或并发 resume 同一 session。
+- quiet window 用于合并短时间内连续到达的消息。活动 turn 开始后才到达的新消息在 `turn/started` 确认后通过 `turn/steer` 追加到同一 turn，不打断、不排队到下一 turn，也不并发 resume 同一 session；steer 失败时 Worker fail closed，重启恢复后重试，绝不静默改投下一 turn。
 - Host 不配置 turn 超时，也不会因运行时长或新消息终止活动 turn。Host 停止或 runtime 自身退出造成的未完成 claim 在下次启动时恢复。
 - 群首次接入时只读拉取最近 50 条消息，先逐条写入 history inbox，再按时间顺序合成一个首次引导交给该群固定 session。Host 不要求自我介绍、不接收决定，也不发送回复。
 
@@ -38,7 +38,7 @@ flowchart LR
 
 1. `ChannelAdapter` 负责连接、标准化入站和错误上报。当前实现是 DingTalk DWS；新增 Slack、Teams 等 Channel 时不得自行管理 Agent session。
 2. `ConversationHost / EventDrivenScheduler` 负责 route binding、durable inbox、ready signal、lease/claim、同会话顺序合批投递、Worker 生命周期和状态快照。
-3. `RuntimeAdapter / AgentSession` 负责启动 runtime 命令、创建/恢复 session、接收一条消息并返回完成回执，以及暴露 session/process identity。当前实现是 Codex CLI；其他 runtime 各自实现这个契约。
+3. `RuntimeAdapter / AgentSession` 负责启动 runtime、创建/恢复 session、开始 turn、引导活动 turn 并返回完成回执，以及暴露 session/process identity。当前实现是 Codex App Server；其他 runtime 必须提供等价 steer/interactive 能力，不能静默退化为排队。
 
 配置也按这三类职责拆分：`channel`、`runtime`、`scheduling`。当前版本只注册 `dingtalk` 与 `codex`，未知 adapter 会明确失败。每个 Channel 内分别配置群聊/私聊的准入范围和新 Conversation 默认模式；这些策略不改变底层唯一 owner。
 
@@ -123,7 +123,7 @@ agent-channel config model `
   --effort low
 ```
 
-`doctor` 校验固定 Codex 版本，以及 `exec`/`resume` 的 JSONL、output schema 和显式 session ID 命令面。命令模式没有 App Server 的实时模型目录；模型名称或推理强度是否可用，由 `verify` 或首轮真实执行 fail closed 验证，不静默回退。
+`doctor` 校验固定 Codex 版本与 App Server stdio 控制面。模型名称、推理强度、thread resume 和 steer 由 `verify` 或首轮真实执行 fail closed 验证，不静默回退。
 
 Windows 默认数据目录：
 
@@ -141,7 +141,7 @@ Windows 默认数据目录：
 
 0.3 配置版本为 `version: 2`，删除 `protocol` 块，并把原来混在 `runtime` 中的 DWS、调度与 Codex 字段拆开。项目尚未正式部署，因此不保留两套加载路径；读取 `version: 1` 会明确失败。
 
-旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v9，新增 conversation session generation、重置审计和 `delivery_unknown` 发送终态；旧 checkpoint/成员资料列仅作为本地管理数据保留，不再自动注入 runtime。迁移会丢弃尚未提交的旧 onboarding 自我介绍草稿，保留已提交状态，再由新 session 按最近消息重新判断。旧 App Server session 或旧消息协议与当前 command runtime 不兼容时，Host 会提升 generation、审计旧 provider session ID 并创建新 session，不会错误 resume 受污染 transcript。
+旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v9，新增 conversation session generation、重置审计和 `delivery_unknown` 发送终态；旧 checkpoint/成员资料列仅作为本地管理数据保留，不再自动注入 runtime。旧决策协议或 command runtime session 与当前单向 App Server 协议不兼容时，Host 会提升 generation、审计旧 provider session ID 并创建新 session，不会错误 resume 受污染 transcript。
 
 ## 添加授权会话
 
@@ -212,7 +212,7 @@ agent-channel verify --instance triss --id '<conversation UUID>'
 
 ## Worker 生命周期
 
-群聊和私聊都保留固定逻辑 session，但 runtime 子进程只在实际 turn 中存在。默认 Worker 对象在 inbox 清空后保温 30 秒；保温期间 `view` 的 PID 通常为空，因为 Codex CLI 已退出。TTL 到期只释放宿主内对象，不删除 provider session ID 或 Codex rollout。
+群聊和私聊都保留固定逻辑 session；Worker 活跃或保温期间 App Server 进程持续存在，以便新消息立即 steer。默认 Worker 在 inbox 清空后保温 30 秒，TTL 到期关闭 App Server 进程但不删除 provider session ID 或 Codex rollout。
 
 ```powershell
 agent-channel conversation worker `
@@ -321,6 +321,6 @@ $canaryRoot = 'D:\baibu-agent\scratchpad\agent-channel-host-command-canary'
 node docs/acceptance/message-forwarding-proxy/scripts/codex-message-proxy-canary.mjs $canaryRoot
 ```
 
-自动化测试覆盖最小消息信封、实时 burst 与首次群历史合批投递、Host 零发送、SQLite admission/去重/sequence、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、claim/release/有界失败恢复、session generation 重置审计、跨 Channel 路由、固定 session resume、lease、ready signal、活动 turn 后到消息排队且不并发 resume、无 turn 超时、warm TTL、DWS 参数、错误处理、稳定 Conversation 选择、详情分区顺序、Runtime cwd 原子保存、Channel 行删除、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
+自动化测试覆盖最小消息信封、实时 burst 与首次群历史合批投递、活动 turn `steer`、Host 零发送、SQLite admission/去重/sequence、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、claim/release/有界失败恢复、session generation 重置审计、跨 Channel 路由、固定 session resume、lease、ready signal、无 turn 超时、warm TTL、DWS 参数、错误处理、稳定 Conversation 选择、详情分区顺序、Runtime cwd 原子保存、Channel 行删除、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
 
 真实 Codex canary 只验证 runtime CLI 与固定 session 恢复，不连接或发送 DingTalk。真实 DWS 收发必须在专用测试群/账号获得单独授权后执行。

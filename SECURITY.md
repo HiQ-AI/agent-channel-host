@@ -8,8 +8,8 @@ Channel 的 `subscriptions.groups/directs=all` 会把该 DWS 账号可见的未�
 
 每条实时消息和首次群历史消息先写入 SQLite WAL，再按 conversation 固定 session 串行投递。Host 只以 runtime 的 `turn.completed` 作为本次投递完成凭据；这不证明 Agent 已处理、已回复或业务已完成。Host 启动时恢复被中断的 claim，并重试未达上限的 failed inbox。旧数据库中的 decision、outbox 和 onboarding 发送字段仅作迁移遗留数据保留，不会被新运行路径执行。
 
-Host 不设置 turn 超时。活动 claim 不按时间自动释放；新消息只排队，不抢占当前 turn。Host 停止或 runtime 异常退出时显式收口，异常进程退出后的 claim 由下次启动 reconciliation 释放。
+Host 不设置 turn 超时。活动 claim 不按时间自动释放；新消息在 runtime 确认 turn 已开始后通过原生 steer 引导当前 turn，不抢占也不并发 resume。steer 拒绝或失败时 Worker fail closed，不静默排队到新 turn；Host 停止或 runtime 异常退出时显式收口，异常进程退出后的 claim 由下次启动 reconciliation 释放。
 
 Host 不覆盖 runtime 的 developer/system 指令、审批、sandbox、网络、额外 writable roots 或 MCP/skills。可选 Conversation 职责只作为低频普通上下文提醒，不能提供权限隔离。`runtime.cwd` 必须指向专用工作目录，不应指向用户主目录、磁盘根目录或混有其他敏感项目的上级目录。
 
-每轮 Codex CLI 完成后子进程退出；Worker 的 warm TTL 只释放宿主内对象，不删除 SQLite 中的 provider session ID 或 Codex 本地 rollout。View 删除 Conversation 会清理 Host 自己保存的消息和 session 映射，但不会删除 provider CLI 在其用户目录维护的本地 rollout。
+Codex App Server 在 Worker 活跃和保温期间持续运行，以提供 `turn/steer`；warm TTL 到期关闭进程，但不删除 SQLite 中的 provider session ID 或 Codex 本地 rollout。View 删除 Conversation 会清理 Host 自己保存的消息和 session 映射，但不会删除 provider 在其用户目录维护的本地 rollout。

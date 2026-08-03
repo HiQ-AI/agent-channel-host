@@ -43,6 +43,7 @@ class FakeSession implements AgentSession {
   failFirst = false;
   private resolveActive: ((result: DeliveryRun) => void) | null = null;
   private resolveStart: (() => void) | null = null;
+  steered: string[] = [];
 
   async start(): Promise<void> {
     if (this.blockStart) await new Promise<void>((resolve) => { this.resolveStart = resolve; });
@@ -68,6 +69,12 @@ class FakeSession implements AgentSession {
       return new Promise((resolve) => { this.resolveActive = resolve; });
     }
     return Promise.resolve(silentRun(`turn-${this.prompts.length}`));
+  }
+
+  async steer(prompt: string): Promise<{ turnId: string }> {
+    if (!this.resolveActive) throw new Error('没有活动 turn');
+    this.steered.push(prompt);
+    return { turnId: 'turn-active' };
   }
 
   async interruptActive(): Promise<boolean> {
@@ -216,7 +223,7 @@ test('Host 在 Worker 启动中停止时只关闭一次且不再投递 signal', 
   }
 });
 
-test('active turn 内新消息排队且不打断已传入 runtime 的消息', async () => {
+test('active turn 内新消息立即 steer 且不打断已传入 runtime 的消息', async () => {
   const config = defaultConfig('scheduler-cancel', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
@@ -245,14 +252,15 @@ test('active turn 内新消息排队且不打断已传入 runtime 的消息', as
     admit(store, conversation, 'cancel-3');
     scheduler.signal(conversation.id);
     const session = runtime.sessions[0]!;
+    await waitFor(() => session.steered.length > 0);
     assert.equal(session.interrupts, 0);
+    assert.match(session.steered.join('\n'), /cancel-2/);
+    assert.match(session.steered.join('\n'), /cancel-3/);
     session.completeActive();
     await waitFor(() => store.status().processed === 3);
     assert.equal(session.interrupts, 0);
-    assert.equal(session.prompts.length, 2);
+    assert.equal(session.prompts.length, 1);
     assert.match(session.prompts[0]!, /cancel-1/);
-    assert.match(session.prompts[1]!, /cancel-2/);
-    assert.match(session.prompts[1]!, /cancel-3/);
   } finally {
     await scheduler.stop();
     store.close();

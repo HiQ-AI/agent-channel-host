@@ -16,7 +16,7 @@ Channel event
 ```
 
 - 每条消息一个 runtime turn，不合批。
-- 新消息在当前 turn 后排队，不触发取消。
+- 新消息在当前 turn 活动时等待 runtime 的 `turn/started` 确认后，通过 RuntimeAdapter `steer` 立即追加，不触发取消、不新建 turn；steer 失败则 Worker fail closed，不允许静默排队。
 - `turn.completed` 仅是 runtime 投递完成凭据，不表示 Agent 已处理或回复。
 - runtime final text、工具调用和回复行为均不进入 Host 协议。
 - 首次群历史先逐条写入 `ingress=history` 的 durable inbox，再合成一次首次引导投递；每条消息仍保留独立 durable 状态。
@@ -33,7 +33,7 @@ interface AgentSession {
 }
 ```
 
-Codex adapter 使用 `codex exec --json` / `codex exec resume --json`，只校验固定 session ID、进程成功退出和 `turn.completed`；不再传 `--output-schema`，也不解析 `agent_message`。
+Codex adapter 使用 App Server `thread/start|resume`、`turn/start|steer`，校验固定 session ID、steer 返回同一活动 turn ID 和 `turn/completed`；不传 `outputSchema`，也不解析 `agentMessage`。
 
 ## 兼容边界
 

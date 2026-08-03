@@ -16,8 +16,33 @@ class RecordingSession implements AgentSession {
     this.prompts.push(prompt);
     return { turnId: `turn-${this.prompts.length}`, status: 'completed' };
   }
+  async steer(_prompt: string): Promise<{ turnId: string }> { return { turnId: 'turn-active' }; }
   async interruptActive(): Promise<boolean> { return false; }
   async stop(): Promise<void> {}
+}
+
+class SteeringSession extends RecordingSession {
+  private complete: ((value: DeliveryRun) => void) | null = null;
+  steered: string[] = [];
+  override deliver(prompt: string): Promise<DeliveryRun> {
+    this.prompts.push(prompt);
+    return new Promise((resolve) => { this.complete = resolve; });
+  }
+  async steer(prompt: string): Promise<{ turnId: string }> {
+    this.steered.push(prompt);
+    return { turnId: 'active-turn' };
+  }
+  finish(): void {
+    this.complete?.({ turnId: 'active-turn', status: 'completed' });
+    this.complete = null;
+  }
+}
+
+class FailingSteeringSession extends SteeringSession {
+  override async steer(prompt: string): Promise<{ turnId: string }> {
+    this.steered.push(prompt);
+    throw new Error('steer rejected');
+  }
 }
 
 test('实时消息按可用批次传入固定 runtime session，Host 不调用 Channel send', async () => {
@@ -90,6 +115,7 @@ test('runtime 投递失败保留 failed inbox，重启 reconciliation 后可再�
   const failing: AgentSession = {
     currentSessionId: 'fixed', processId: null, start: async () => undefined,
     deliver: async () => { throw new Error('runtime unavailable'); },
+    steer: async () => { throw new Error('runtime unavailable'); },
     interruptActive: async () => false, stop: async () => undefined,
   };
   const event = normalizeDwsEvent({
@@ -112,6 +138,68 @@ test('runtime 投递失败保留 failed inbox，重启 reconciliation 后可再�
     assert.equal(recovered.prompts.length, 1);
   } finally {
     await second.stop();
+    store.close();
+  }
+});
+
+test('活动 turn 中的新消息立即 steer，不等待当前 Agent 处理完成', async () => {
+  const config = defaultConfig('steer', '.', 'Agent');
+  config.scheduling.quietWindowMilliseconds = 0;
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'steer-user', title: 'Steer 私聊', responsibility: '', mode: 'reply',
+  });
+  const session = new SteeringSession();
+  const worker = new ConversationWorker(config, conversation, session, store, () => undefined);
+  const admit = (id: string) => store.admitEvent(conversation, normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: id,
+    sender_open_dingtalk_id: conversation.externalId, sender_name: '同事甲', content: id,
+  })!);
+  try {
+    await worker.start();
+    admit('首条');
+    worker.signal();
+    await waitFor(() => session.prompts.length === 1);
+    admit('追问');
+    worker.signal();
+    await waitFor(() => session.steered.length === 1);
+    assert.match(session.steered[0]!, /内容：追问/);
+    assert.equal(store.status().processed, 0);
+    session.finish();
+    await waitFor(() => store.status().processed === 2);
+  } finally {
+    await worker.stop();
+    store.close();
+  }
+});
+
+test('活动 turn 引导失败时 fail closed，不把新消息静默排队成下一 turn', async () => {
+  const config = defaultConfig('steer-fail', '.', 'Agent');
+  config.scheduling.quietWindowMilliseconds = 0;
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'steer-fail-user', title: 'Steer 失败私聊', responsibility: '', mode: 'reply',
+  });
+  const session = new FailingSteeringSession();
+  const worker = new ConversationWorker(config, conversation, session, store, () => undefined);
+  const admit = (id: string) => store.admitEvent(conversation, normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: id,
+    sender_open_dingtalk_id: conversation.externalId, sender_name: '同事甲', content: id,
+  })!);
+  try {
+    await worker.start();
+    admit('首条');
+    worker.signal();
+    await waitFor(() => session.prompts.length === 1);
+    admit('必须引导');
+    worker.signal();
+    await waitFor(() => session.steered.length === 1);
+    session.finish();
+    await waitFor(() => store.status().failed_messages === 1);
+    assert.equal(session.prompts.length, 1);
+    assert.equal(store.pendingEventCount(conversation.id), 1);
+  } finally {
+    await worker.stop();
     store.close();
   }
 });

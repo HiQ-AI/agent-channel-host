@@ -12,8 +12,13 @@ export class ConversationWorker {
   private draining: Promise<void> | null = null;
   private started = false;
   private closed = false;
+  private blockedAfterError = false;
   private signalGeneration = 0;
   private lastSignalAtMs = 0;
+  private activeEvents: AdmittedEvent[] | null = null;
+  private steering: Promise<void> | null = null;
+  private steerRequested = false;
+  private steeringError: Error | null = null;
 
   constructor(
     private readonly config: HostConfig,
@@ -84,18 +89,25 @@ export class ConversationWorker {
     );
     if (events.length > 0) {
       try {
+        this.activeEvents = [...events];
+        this.steeringError = null;
         const result = await this.session.deliver(batchPrompt(events));
+        await this.awaitSteeringIdle();
+        const deliveredEvents = this.activeEvents;
+        this.activeEvents = null;
         if (result.status !== 'completed') {
-          this.store.releaseClaimedEvents(events, this.workerId);
+          this.store.releaseClaimedEvents(deliveredEvents, this.workerId);
           throw new Error('群最近消息未成功传入 runtime');
         }
-        this.store.recordBatchDecision(events, this.workerId, result.turnId, 'completed', null, null);
+        this.store.recordBatchDecision(deliveredEvents, this.workerId, result.turnId, 'completed', null, null);
         this.log({
           type: 'GROUP_HISTORY_DELIVERED', conversationId: this.conversation.id,
-          sequences: events.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
+          sequences: deliveredEvents.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
         });
       } catch (error) {
-        this.store.recordBatchDecision(events, this.workerId, null, 'failed', null, null, (error as Error).message);
+        const failedEvents = this.activeEvents ?? events;
+        this.activeEvents = null;
+        this.store.recordBatchDecision(failedEvents, this.workerId, null, 'failed', null, null, (error as Error).message);
         throw error;
       }
     }
@@ -105,6 +117,7 @@ export class ConversationWorker {
 
   signal(): void {
     if (this.closed) throw new Error('conversation worker 已关闭');
+    if (this.blockedAfterError) return;
     this.signalGeneration += 1;
     this.lastSignalAtMs = Date.now();
     this.store.setWorkerState({
@@ -112,7 +125,8 @@ export class ConversationWorker {
       runtimeId: this.conversation.runtimeId, state: this.draining ? 'running' : 'warm',
       processId: this.session.processId, lastSignalAt: new Date(this.lastSignalAtMs).toISOString(),
     });
-    if (!this.draining) this.startDrain();
+    if (this.activeEvents) this.startSteer();
+    else if (this.started && !this.draining) this.startDrain();
   }
 
   isBusy(): boolean { return this.draining !== null || Boolean(this.session.hasBackgroundWork?.()); }
@@ -120,7 +134,7 @@ export class ConversationWorker {
   private startDrain(): void {
     this.draining = this.drain().finally(() => {
       this.draining = null;
-      if (!this.closed && this.store.pendingEventCount(this.conversation.id) > 0) this.startDrain();
+      if (!this.closed && !this.blockedAfterError && this.store.pendingEventCount(this.conversation.id) > 0) this.startDrain();
       else if (!this.closed) this.onIdle(this);
     });
   }
@@ -140,23 +154,30 @@ export class ConversationWorker {
         claimedFromSequence: events[0]!.sequence, claimedToSequence: events.at(-1)!.sequence,
       });
       try {
+        this.activeEvents = [...events];
+        this.steeringError = null;
         const result = await this.session.deliver(batchPrompt(events));
+        await this.awaitSteeringIdle();
+        const deliveredEvents = this.activeEvents;
+        this.activeEvents = null;
         if (result.status !== 'completed') {
-          this.store.releaseClaimedEvents(events, this.workerId);
+          this.store.releaseClaimedEvents(deliveredEvents, this.workerId);
           this.log({
             type: 'MESSAGE_DELIVERY_INTERRUPTED', conversationId: this.conversation.id,
-            sequences: events.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
+            sequences: deliveredEvents.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
           });
           break;
         }
-        this.store.recordBatchDecision(events, this.workerId, result.turnId, 'completed', null, null);
+        this.store.recordBatchDecision(deliveredEvents, this.workerId, result.turnId, 'completed', null, null);
         this.log({
           type: 'MESSAGE_DELIVERED', conversationId: this.conversation.id,
-          sequences: events.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
+          sequences: deliveredEvents.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
         });
       } catch (error) {
-        this.store.recordBatchDecision(events, this.workerId, null, 'failed', null, null, (error as Error).message);
-        this.onError(error as Error, events);
+        const failedEvents = this.activeEvents ?? events;
+        this.activeEvents = null;
+        this.store.recordBatchDecision(failedEvents, this.workerId, null, 'failed', null, null, (error as Error).message);
+        this.onError(error as Error, failedEvents);
         break;
       }
     }
@@ -167,6 +188,53 @@ export class ConversationWorker {
         claimedFromSequence: null, claimedToSequence: null,
       });
     }
+  }
+
+  private startSteer(): void {
+    if (!this.activeEvents) return;
+    if (this.steering) {
+      this.steerRequested = true;
+      return;
+    }
+    this.steering = this.steerPending().finally(() => {
+      this.steering = null;
+      if (this.activeEvents && this.steerRequested) {
+        this.steerRequested = false;
+        this.startSteer();
+      }
+    });
+  }
+
+  private async steerPending(): Promise<void> {
+    await this.waitForQuietWindow();
+    if (!this.activeEvents) return;
+    const events = this.store.claimPendingEvents(
+      this.conversation,
+      this.workerId,
+      this.config.scheduling.maxBatchMessages,
+      'live',
+    );
+    if (events.length === 0) return;
+    try {
+      const accepted = await this.session.steer(batchPrompt(events));
+      this.activeEvents.push(...events);
+      this.log({
+        type: 'MESSAGE_STEERED', conversationId: this.conversation.id,
+        sequences: events.map((event) => event.sequence), turnIdPrefix: accepted.turnId.slice(0, 12),
+      });
+    } catch (error) {
+      this.store.releaseClaimedEvents(events, this.workerId);
+      this.steeringError = error as Error;
+      this.log({
+        type: 'MESSAGE_STEER_FAILED', conversationId: this.conversation.id,
+        sequences: events.map((event) => event.sequence), error: (error as Error).message,
+      });
+    }
+  }
+
+  private async awaitSteeringIdle(): Promise<void> {
+    while (this.steering) await this.steering;
+    if (this.steeringError) throw new Error(`活动 turn 引导失败：${this.steeringError.message}`);
   }
 
   private async waitForQuietWindow(): Promise<void> {
@@ -180,6 +248,7 @@ export class ConversationWorker {
   }
 
   private onError(error: Error, events: AdmittedEvent[]): void {
+    if (this.steeringError) this.blockedAfterError = true;
     this.store.setWorkerState({
       conversationId: this.conversation.id, workerId: this.workerId,
       runtimeId: this.conversation.runtimeId, state: 'error', processId: this.session.processId,
