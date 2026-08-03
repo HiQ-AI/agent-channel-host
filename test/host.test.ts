@@ -280,6 +280,57 @@ test('启动 reconciliation 释放旧 claim 并只唤醒有 pending work 的 con
   }
 });
 
+test('Host 重启后重新处理可恢复 failed message，并继续使用原 Conversation', async () => {
+  const root = resolve('.test-host-failed-recovery');
+  const path = resolve(root, 'state.sqlite3');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const config = defaultConfig('scheduler-failed-recovery', '.', 'Agent', 'role');
+  config.scheduling.quietWindowMilliseconds = 0;
+  let store = new Store(path);
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'failed-recovery-user', title: '失败恢复私聊', responsibility: '回答问题', mode: 'shadow',
+  });
+  admit(store, conversation, 'failed-before-restart');
+  const firstRuntime = new FakeRuntime();
+  firstRuntime.failFirst = true;
+  const firstScheduler = new EventDrivenScheduler(
+    config,
+    store,
+    new Map([['dingtalk\0default', new FakeChannel()]]),
+    new Map([['codex', firstRuntime]]),
+    () => undefined,
+  );
+  try {
+    firstScheduler.signal(conversation.id);
+    await waitFor(() => store.status().failed_messages === 1);
+  } finally {
+    await firstScheduler.stop();
+    store.close();
+  }
+
+  store = new Store(path);
+  const secondRuntime = new FakeRuntime();
+  const secondScheduler = new EventDrivenScheduler(
+    config,
+    store,
+    new Map([['dingtalk\0default', new FakeChannel()]]),
+    new Map([['codex', secondRuntime]]),
+    () => undefined,
+  );
+  try {
+    assert.deepEqual(secondScheduler.reconcile(), [conversation.id]);
+    await waitFor(() => store.status().processed === 1);
+    assert.equal(store.status().failed_messages, 0);
+    assert.equal(secondRuntime.sessions.length, 1);
+    assert.match(secondRuntime.sessions[0]!.prompts[0]!, /failed-before-restart/);
+  } finally {
+    await secondScheduler.stop();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('可嵌入 Host 由 AbortSignal 停止，第二个 owner 不覆盖运行状态', async () => {
   const root = resolve('.test-embedded-host');
   await rm(root, { recursive: true, force: true });

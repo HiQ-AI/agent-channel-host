@@ -169,16 +169,22 @@ try {
   assert.match(plainTranscript, /编辑器验证群/);
   assert.match(plainTranscript, /INSTANCES/);
   assert.doesNotMatch(initialFrame, /^CHANNELS$|^CONVERSATIONS$|^RUNTIMES$|编辑器验证群|跨 Channel 私聊/m);
+  const instanceDetailFrame = plainTranscript.split('\u001b[H\u001b[2J')
+    .find((frame) => frame.includes('实例详情 / tui-smoke'));
+  assert.ok(instanceDetailFrame);
+  assert.ok(instanceDetailFrame.indexOf('CONVERSATIONS') < instanceDetailFrame.indexOf('MESSAGES received='));
   assert.match(plainTranscript, /Channel 设置 \/ tui-smoke \/ dingtalk\/default/);
   assert.match(plainTranscript, /群聊订阅\s+│\s+all/);
   assert.match(plainTranscript, /群聊默认模式\s+│\s+reply/);
   assert.match(plainTranscript, /私聊订阅\s+│\s+all/);
   assert.match(plainTranscript, /私聊默认模式\s+│\s+reply/);
   assert.match(plainTranscript, /GROUPS[\s\S]*DIRECTS/);
+  assert.match(plainTranscript, /d 删除会话/);
   assert.match(plainTranscript, /群组搜索 \/ tui-smoke \/ dingtalk\/default/);
   assert.match(plainTranscript, /合成搜索结果群/);
   assert.doesNotMatch(plainTranscript, /synthetic-search-result-id/);
   assert.match(plainTranscript, /Instance 设置 \/ tui-smoke/);
+  assert.match(plainTranscript, /Runtime cwd\s+│/);
   assert.match(plainTranscript, /小·小鹏/);
   assert.match(plainTranscript, /SETTING\s+│\s+VALUE\s+│\s+EFFECT/);
   assert.match(plainTranscript, /─+┼─+┼─+/);
@@ -225,9 +231,12 @@ try {
   await writeFile(resultPath, JSON.stringify({
     ok: true,
     tty: { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY },
-    observed: ['lean-global-overview', 'instance-detail', 'channel-detail', 'channel-toggle', 'group-subscription', 'group-default-mode', 'direct-subscription', 'direct-default-mode', 'group-search', 'group-bind', 'conversation-detail', 'delete-confirmation', 'delete-cancel', 'instance-delete', 'immediate-delete-refresh', 'instance-settings', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit-confirmation', 'exit-cancel', 'exit'],
+    observed: ['lean-global-overview', 'instance-detail', 'conversation-before-messages', 'channel-detail', 'channel-toggle', 'channel-delete-action', 'group-subscription', 'group-default-mode', 'direct-subscription', 'direct-default-mode', 'group-search', 'group-bind', 'conversation-detail', 'delete-confirmation', 'delete-cancel', 'instance-delete', 'immediate-delete-refresh', 'instance-settings', 'runtime-cwd-setting', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit-confirmation', 'exit-cancel', 'exit'],
     colorObserved: true,
     settingsColumnsDelimited: true,
+    conversationBeforeMessages: true,
+    runtimeCwdObserved: true,
+    channelDeleteActionObserved: true,
     instanceCreated: true,
     channelToggleObserved: channelToggles.length === 2,
     groupSearchObserved: groupSearches.length === 1,

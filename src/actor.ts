@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { HostConfig } from './config.js';
 import type { AgentSession, ChannelAdapter } from './contracts.js';
-import type { AdmittedEvent, Conversation, Decision, DecisionRun } from './types.js';
+import type { AdmittedEvent, Conversation, Decision, DecisionRun, OutboxRecord } from './types.js';
 import type { Store } from './store.js';
 import { delay } from './process-utils.js';
 import { fetchRecentGroupHistory, type RecentGroupHistory } from './dws.js';
@@ -54,6 +54,7 @@ export class ConversationWorker {
       }
       await this.session.start();
       if (this.conversation.kind === 'group') await this.onboardGroup(history);
+      await this.retryPendingOutbox();
       this.started = true;
       this.store.setWorkerState({
         conversationId: this.conversation.id,
@@ -226,7 +227,7 @@ export class ConversationWorker {
         });
         if (result.decision) await this.handleDecision(events.at(-1)!, result.decision);
       } catch (error) {
-        this.store.recordBatchDecision(events, this.workerId, null, 'failed', null);
+        this.store.recordBatchDecision(events, this.workerId, null, 'failed', null, null, (error as Error).message);
         this.onError(error as Error, events);
         break;
       }
@@ -262,15 +263,25 @@ export class ConversationWorker {
       this.log({ type: 'OUTBOX_SUPPRESSED', conversationId: this.conversation.id, sequence: event.sequence, reason: 'newer-message-admitted' });
       return;
     }
+    await this.submitOutbox(record, event.sequence);
+  }
+
+  private async retryPendingOutbox(): Promise<void> {
+    for (const record of this.store.listPendingOutbox(this.conversation.id)) {
+      await this.submitOutbox(record, record.inputSequence);
+    }
+  }
+
+  private async submitOutbox(record: OutboxRecord, sequence: number): Promise<void> {
     const claimed = this.store.claimOutboxIfFresh(record.id);
     if (!claimed) return;
     try {
       await this.sender.send(this.conversation, claimed);
       this.store.finishOutbox(claimed.id, 'submitted', null);
-      this.log({ type: 'OUTBOX_SUBMITTED', conversationId: this.conversation.id, sequence: event.sequence, uuid: claimed.uuid });
+      this.log({ type: 'OUTBOX_SUBMITTED', conversationId: this.conversation.id, sequence, uuid: claimed.uuid });
     } catch (error) {
       this.store.finishOutbox(claimed.id, 'failed', (error as Error).message);
-      this.log({ type: 'OUTBOX_FAILED', conversationId: this.conversation.id, sequence: event.sequence, error: (error as Error).message });
+      this.log({ type: 'OUTBOX_FAILED', conversationId: this.conversation.id, sequence, error: (error as Error).message });
     }
   }
 

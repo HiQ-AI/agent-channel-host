@@ -30,7 +30,7 @@ flowchart LR
 - 新 Codex 会话执行 `codex exec --json --output-schema`；已有会话执行 `codex exec resume <原 ID>`。每次 resume 都校验 `thread.started.thread_id` 必须等于原 ID，否则 fail closed，不创建第二条 session。
 - 正常 turn 依赖 runtime 自己的 transcript，不重复注入整段历史。Host 只维护短小、版本化的 conversation checkpoint；Codex 自动压缩后由本包内置的 `SessionStart(source=compact)` hook 在下一次模型请求前恢复必要状态。
 - 群成员、组织角色、会话角色和职责边界保存在独立成员资料中。每批只提供本批发送者与正文明确提到的已知成员，不把完整群成员表长期塞入 session。
-- 每条消息先写 SQLite WAL，提交后才发进程内 ready signal。Worker 不轮询 DWS 或 SQLite；Host 重启时只 reconciliation 未完成工作。
+- 每条消息先写 SQLite WAL，提交后才发进程内 ready signal。Worker 不轮询 DWS 或 SQLite；Host 启动时一次性 reconciliation：释放中断的 claim、重新处理未完成及未达 3 次上限的失败消息，并用原 UUID 重试未确认的 outbox。已完成消息和已提交 outbox 不重放，达到上限的失败项保留终止状态。
 - quiet window 默认 300 ms，一次最多合并 20 条消息；每条消息仍保留 sender、时间和 sequence。active turn 期间的新消息会终止旧 CLI 进程，释放旧 claim，再与新消息合并处理。
 - 群首次 onboarding 是持久工作：只读拉取最近 50 条消息进入该群独立 session，再准备一次自我介绍。`shadow` 只保存不发送；切换 `reply` 并重启后用同一 UUID 发送。
 - 模型文本不会直接发送。runtime 必须返回 JSON Schema 约束的决定，宿主再执行字段、职责、签名、委派证据、conversation mode 和双重 freshness 门禁。
@@ -110,7 +110,7 @@ Windows 默认数据目录：
 
 0.3 配置版本为 `version: 2`，删除 `protocol` 块，并把原来混在 `runtime` 中的 DWS、调度与 Codex 字段拆开。项目尚未正式部署，因此不保留两套加载路径；读取 `version: 1` 会明确失败。
 
-旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v6，旧表会原地增加 checkpoint、成员资料、policy version、runtime recovery capability 和 Channel disabled 状态；旧 App Server session 的协议指纹与 command runtime 不兼容，请为测试 conversation 使用新 instance 或显式清理对应预览状态，Host 不会偷偷创建第二个 provider session。
+旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v7，旧表会原地增加 checkpoint、成员资料、policy version、runtime recovery capability、Channel disabled 状态，以及 inbox/outbox 失败次数与最后错误；旧 App Server session 的协议指纹与 command runtime 不兼容，请为测试 conversation 使用新 instance 或显式清理对应预览状态，Host 不会偷偷创建第二个 provider session。
 
 ## 添加授权会话
 
@@ -215,20 +215,20 @@ agent-channel view
 `view` 会从用户状态目录发现全部已初始化 instance。顶层固定为 `总览 | 全局设置`，不会把某个 instance 的配置误称为全局设置：
 
 - `总览` 只展示 INSTANCES 索引、跨实例消息汇总和全局告警，不重复铺开具体 Channel、Conversation、Runtime 或最近消息。Instance 行保留 Host/owner、Channel/Conversation 数、pending 和 alert 数，便于先判断应下钻到哪里。`↑/↓` 选择，`Enter/→` 下钻，`Esc/←` 逐层返回；`Tab` 只切换顶层“总览 / 全局设置”。
-- Instance 详情集中展示该实例的 Channel、最近消息、Conversation、Runtime 和告警。进入 Channel 后，五项依次为 `enabled/disabled`、群聊订阅、群聊默认模式、私聊订阅、私聊默认模式；后续分区展示指定群聊和指定私聊。群聊末行“搜索并绑定指定群聊”支持输入关键词、选择候选并写入现有 conversation registry；外部群 ID 不在界面展示。
+- Instance 详情集中展示该实例的 Channel、Conversation、消息汇总与最近消息、Runtime 和告警，其中 `CONVERSATIONS` 固定在 `MESSAGES` 上方。Conversation 选择以稳定 ID 跟踪，标题更新或跨 Channel 排序刷新后下钻仍打开当前高亮项。进入 Channel 后，五项依次为 `enabled/disabled`、群聊订阅、群聊默认模式、私聊订阅、私聊默认模式；后续分区展示指定群聊和指定私聊。群聊末行“搜索并绑定指定群聊”支持输入关键词、选择候选并写入现有 conversation registry；外部群 ID 不在界面展示。
 - 新绑定群组使用“群聊默认模式”，职责继承该 Instance 的 Agent 默认角色，runtime 使用 Instance 当前配置。绑定不创建第二套接收服务；Channel disabled 时可先配置群组，重新启用后继续复用原 registry 和 session 映射。
 - 指定私聊继续使用稳定 `openDingTalkId` 登记，不按姓名猜测 ID；事件提供人员姓名时以姓名作为显示标题，确实拿不到时显示不泄露原始 ID 的稳定占位。通过 `conversation add --open-dingtalk-id` 添加后会出现在 Channel 的 DIRECTS 分区，并可下钻修改或删除。
 - `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 
-每个 Instance 设置页可修改 Agent 身份、runtime model/effort 和合批参数。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、职责、mode、warm TTL 和已观察成员资料；`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑，只有名称、职责等自由文本才使用光标编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
+每个 Instance 设置页可修改 Agent 身份、Runtime cwd、runtime model/effort 和合批参数。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；View-owned Host 随配置重启，attached Host 提示外部重启。若已有 provider session 记录的 cwd 与新值不一致，后续 resume 明确 fail closed，不会静默迁移或创建第二条 session。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、职责、mode、warm TTL 和已观察成员资料；`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑，只有名称、职责等自由文本才使用光标编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
 
 ### 删除 Instance 与 Conversation
 
 删除都是二次确认操作：第一次按 `d` 只显示目标和影响，Enter 或再次按 `d` 执行，Esc/`←` 取消。
 
 - 在总览或 Instance 详情删除 Instance：停止当前 View 启动的 Host，移除可能存在的同名 Windows 用户计划任务，关闭数据库，再精确删除该 Instance 的配置、SQLite/WAL、recovery、日志和本地 session 映射。
-- 在 Conversation 详情删除：停止目标 View-owned Host，级联删除消息、decision、outbox、runtime session/worker、checkpoint、成员、onboarding 和 Worker lease，同时删除外置 recovery 文件；随后恢复该 Instance Host。
+- 在 Channel 的 GROUPS/DIRECTS 选中会话，或在 Conversation 详情删除：停止目标 View-owned Host，级联删除消息、decision、outbox、runtime session/worker、checkpoint、成员、onboarding 和 Worker lease，同时删除外置 recovery 文件；随后恢复该 Instance Host。两处都使用同一个二次确认和生命周期 action。
 - attached Host 仍存活时两种删除都 fail closed。View 不会越权修改外部进程持有的内存态；先用原进程管理方式停止 Host，再重新进入 `view` 删除。
 - 删除动作执行期间暂停周期刷新，避免读取已关闭的 Store；成功后由当前输入动作立即重绘，顶部计数、实例/会话列表、消息汇总、告警、选中项和确认状态无需等待下一次定时刷新。
 - Windows 上计划任务不存在按原始字节识别本地代码页，不会因中文错误乱码阻断删除；权限错误或无法识别的查询失败仍然 fail closed。
@@ -279,6 +279,7 @@ agent-channel service remove --instance triss
 ## 可靠性与安全边界
 
 - SQLite WAL 保证 Host 收到事件后的本地 admission/outbox 原子性。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
+- Host 启动恢复只重试未达 3 次上限的 failed inbox 与未确认 outbox；outbox 沿用原 UUID，并在实际发送前再次校验 Conversation 权限和最新消息 sequence。达到上限、已完成或已提交的记录不会自动重放。
 - `submitted` 只表示 DWS 发送调用成功，不等于对端已读或业务已接受。
 - Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner 加群聊/私聊两个共享 bus consumer。
 - Codex 每轮固定 `approval_policy=never`、`sandbox_mode=workspace-write`、network disabled，额外 writable roots 为空；`runtime.cwd` 必须指向专用工作目录。
@@ -299,6 +300,6 @@ $canaryRoot = 'D:\baibu-agent\scratchpad\agent-channel-host-command-canary'
 node docs/acceptance/command-driven-runtime/scripts/codex-command-resume-canary.mjs $canaryRoot
 ```
 
-自动化测试覆盖 SQLite admission/去重/sequence、checkpoint 与成员资料、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、claim/release/reconciliation、跨 Channel 路由、runtime session 迁移、compaction recovery、outbox freshness、lease、ready signal、quiet-window burst、active command cancel、warm TTL、群 onboarding、DWS 参数、结构化决定、命令新建/resume、错误/超时、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
+自动化测试覆盖 SQLite admission/去重/sequence、checkpoint 与成员资料、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、claim/release/有界失败恢复、原 UUID outbox 重试、跨 Channel 路由、runtime session 迁移、compaction recovery、outbox freshness、lease、ready signal、quiet-window burst、active command cancel、warm TTL、群 onboarding、DWS 参数、结构化决定、命令新建/resume、错误/超时、稳定 Conversation 选择、详情分区顺序、Runtime cwd 原子保存、Channel 行删除、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
 
 真实 Codex canary 只验证 runtime CLI 与固定 session 恢复，不连接或发送 DingTalk。真实 DWS 收发必须在专用测试群/账号获得单独授权后执行。

@@ -86,6 +86,70 @@ test('pending message 可事务 claim、释放并在 Host 重启时 reconciliati
   store.close();
 });
 
+test('启动 reconciliation 恢复可重试 failed inbox/outbox，并跳过完成项和失败上限', () => {
+  const store = new Store(':memory:');
+  const inbox = store.addConversation({
+    kind: 'direct', externalId: 'recover-inbox', title: '恢复私聊', responsibility: '回答问题', mode: 'shadow',
+  });
+  const makeEvent = (externalId: string, id: string) => normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: id,
+    sender_open_dingtalk_id: externalId, content: id,
+  })!;
+  for (let index = 1; index <= 5; index += 1) store.admitEvent(inbox, makeEvent(inbox.externalId, `recover-${index}`));
+  store.db.prepare("UPDATE inbound_events SET processing_state='claimed',claim_owner='dead-worker' WHERE conversation_id=? AND sequence=2")
+    .run(inbox.id);
+  store.db.prepare("UPDATE inbound_events SET processing_state='failed',failure_count=1,last_error='temporary' WHERE conversation_id=? AND sequence=3")
+    .run(inbox.id);
+  store.db.prepare("UPDATE inbound_events SET processing_state='failed',failure_count=3,last_error='terminal' WHERE conversation_id=? AND sequence=4")
+    .run(inbox.id);
+  store.db.prepare("UPDATE inbound_events SET processing_state='completed' WHERE conversation_id=? AND sequence=5").run(inbox.id);
+
+  const send = store.addConversation({
+    kind: 'direct', externalId: 'recover-outbox', title: '恢复发送', responsibility: '回答问题', mode: 'reply',
+  });
+  const outboundEvent = store.admitEvent(send, makeEvent(send.externalId, 'recover-outbox-event')).event!;
+  const original = store.enqueueOutbox(outboundEvent, '恢复回复', '00000000-0000-4000-8000-000000000777')!;
+  store.db.prepare("UPDATE outbox SET state='failed',attempt_count=1,error='temporary-send' WHERE id=?").run(original.id);
+
+  const exhaustedSend = store.addConversation({
+    kind: 'direct', externalId: 'exhausted-outbox', title: '达到重试上限', responsibility: '回答问题', mode: 'reply',
+  });
+  const exhaustedEvent = store.admitEvent(
+    exhaustedSend,
+    makeEvent(exhaustedSend.externalId, 'exhausted-outbox-event'),
+  ).event!;
+  const exhausted = store.enqueueOutbox(exhaustedEvent, '不应继续发送', '00000000-0000-4000-8000-000000000779')!;
+  store.db.prepare("UPDATE inbound_events SET processing_state='completed' WHERE id=?").run(exhaustedEvent.id);
+  store.db.prepare("UPDATE outbox SET state='sending',attempt_count=3 WHERE id=?").run(exhausted.id);
+
+  const completedSend = store.addConversation({
+    kind: 'direct', externalId: 'completed-outbox', title: '已发送', responsibility: '回答问题', mode: 'reply',
+  });
+  const completedEvent = store.admitEvent(completedSend, makeEvent(completedSend.externalId, 'completed-outbox-event')).event!;
+  const submitted = store.enqueueOutbox(completedEvent, '已发送回复', '00000000-0000-4000-8000-000000000778')!;
+  store.db.prepare("UPDATE inbound_events SET processing_state='completed' WHERE id=?").run(completedEvent.id);
+  store.db.prepare("UPDATE outbox SET state='submitted',attempt_count=1 WHERE id=?").run(submitted.id);
+
+  assert.deepEqual(store.recoverPendingWork(), [inbox.id, send.id].sort());
+  const states = store.db.prepare(`
+    SELECT sequence,processing_state,failure_count FROM inbound_events
+    WHERE conversation_id=? ORDER BY sequence
+  `).all(inbox.id) as Array<{ sequence: number; processing_state: string; failure_count: number }>;
+  assert.deepEqual(states.map((row) => [row.sequence, row.processing_state, row.failure_count]), [
+    [1, 'admitted', 0], [2, 'admitted', 0], [3, 'admitted', 1], [4, 'failed', 3], [5, 'completed', 0],
+  ]);
+  const pending = store.listPendingOutbox(send.id);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.uuid, original.uuid);
+  assert.equal(store.getOutbox(submitted.id)?.state, 'submitted');
+  assert.equal(store.getOutbox(exhausted.id)?.state, 'failed');
+  assert.equal(store.getOutbox(exhausted.id)?.error, 'recovery-attempt-limit');
+  const claimed = store.claimOutboxIfFresh(original.id);
+  assert.equal(claimed?.uuid, original.uuid);
+  assert.equal(claimed?.attemptCount, 2);
+  store.close();
+});
+
 test('outbox 在有更新消息时拒绝旧决定，发送前再次检查 freshness', () => {
   const store = new Store(':memory:');
   const conversation = store.addConversation({
@@ -263,7 +327,7 @@ test('v1 会话迁移后补 onboarding 和每类生命周期默认值', () => {
     assert.equal(migrated.getConversation('group-v1')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v1')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 7);
     assert.equal(migrated.getConversation('group-v1')?.policyVersion, 1);
     migrated.close();
   } finally {
@@ -297,7 +361,7 @@ test('v2 会话迁移到当前 schema 时得到固定逻辑 session 和按需 Wo
     assert.equal(migrated.getConversation('group-v2')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v2')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 7);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -349,7 +413,7 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
     assert.equal(session?.protocolFingerprint, 'codex-cli 0.145.0:schema-v3');
     assert.equal(migrated.getConversation('group-v3')?.workerWarmSeconds, 30);
     assert.deepEqual(migrated.db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 7);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -386,7 +450,7 @@ test('v5 Channel 状态表迁移后保留旧记录并允许 disabled', () => {
       `).get() as { state: string; label: string };
       assert.equal(row.state, 'disabled');
       assert.equal(row.label, 'DingTalk DWS');
-      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 7);
     } finally {
       migrated.close();
     }

@@ -1,5 +1,6 @@
 import type { ChannelSubscriptionMode, HostConfig } from './config.js';
 import { CHANNEL_SUBSCRIPTION_MODES, configuredChannels, validateConfig, writeConfig } from './config.js';
+import { resolve } from 'node:path';
 import type { Store } from './store.js';
 import type { Conversation, ConversationMode } from './types.js';
 import { CLI_NAME } from './product.js';
@@ -32,6 +33,7 @@ export interface ManagementViewState {
   instanceFocus: 'channels' | 'conversations';
   selectedChannel: number;
   selectedConversation: number;
+  selectedConversationId: string | null;
   selectedChannelItem: number;
   selectedSetting: number;
   detailInstanceName: string | null;
@@ -120,6 +122,7 @@ export function createManagementViewState(): ManagementViewState {
     instanceFocus: 'channels',
     selectedChannel: 0,
     selectedConversation: 0,
+    selectedConversationId: null,
     selectedChannelItem: 0,
     selectedSetting: 0,
     detailInstanceName: null,
@@ -181,9 +184,7 @@ export async function runView(
     const detailInstance = state.detailInstanceName
       ? instances.find((instance) => instance.name === state.detailInstanceName) ?? null
       : selectedInstance;
-    const conversations = detailInstance?.store.listConversations() ?? [];
-    if (state.selectedConversation >= conversations.length) state.selectedConversation = Math.max(0, conversations.length - 1);
-    const selectedId = conversations[state.selectedConversation]?.id ?? null;
+    const selectedId = state.selectedConversationId;
     const detailId = state.detailConversationId ?? selectedId;
     const detail = detailInstance && detailId ? detailInstance.store.conversationDetail(detailId, options.showContent) : null;
     const settingsInstance = state.settingsInstanceName
@@ -295,6 +296,7 @@ export async function handleManagementViewInput(
       state.detailInstanceName = null;
       state.detailChannel = null;
       state.detailConversationId = null;
+      state.selectedConversationId = null;
       state.settingsInstanceName = null;
       state.selectedInstance = instances.length === 0 ? 0 : Math.min(index, instances.length - 1);
       state.notice = `Instance ${confirmation.label} 已删除`;
@@ -304,7 +306,16 @@ export async function handleManagementViewInput(
       await actions.deleteConversation(target, confirmation.conversationId);
       state.detailConversationId = null;
       state.settingsInstanceName = null;
-      state.selectedConversation = clamp(state.selectedConversation, 0, Math.max(0, target.store.listConversations().length - 1));
+      const remaining = target.store.listConversations();
+      state.selectedConversation = clamp(state.selectedConversation, 0, Math.max(0, remaining.length - 1));
+      state.selectedConversationId = remaining[state.selectedConversation]?.id ?? null;
+      if (state.detailChannel) {
+        state.selectedChannelItem = clamp(
+          state.selectedChannelItem,
+          0,
+          Math.max(0, channelManagementItems(target, state.detailChannel).length - 1),
+        );
+      }
       state.notice = `Conversation ${confirmation.label} 已删除`;
     }
     state.destructiveConfirmation = null;
@@ -415,6 +426,16 @@ export async function handleManagementViewInput(
       };
       return;
     }
+    if (state.detailChannel && detailInstance) {
+      const item = channelManagementItems(detailInstance, state.detailChannel)[state.selectedChannelItem];
+      if (item?.kind === 'conversation') {
+        state.destructiveConfirmation = {
+          kind: 'conversation', instanceName: detailInstance.name,
+          conversationId: item.conversation.id, label: item.conversation.title,
+        };
+      }
+      return;
+    }
     if (!state.detailChannel && !state.settingsInstanceName) {
       const target = detailInstance ?? overviewInstance;
       if (target && (state.detailInstanceName || state.selectedInstance < instances.length)) {
@@ -445,6 +466,7 @@ export async function handleManagementViewInput(
         state.instanceFocus = 'channels';
         state.selectedChannel = 0;
         state.selectedConversation = 0;
+        state.selectedConversationId = null;
       } else if (state.detailChannel && detailInstance) {
         const total = channelManagementItems(detailInstance, state.detailChannel).length;
         state.selectedChannelItem = clamp(state.selectedChannelItem + direction, 0, Math.max(0, total - 1));
@@ -492,6 +514,7 @@ export async function handleManagementViewInput(
         state.instanceFocus = 'channels';
         state.selectedChannel = 0;
         state.selectedConversation = 0;
+        state.selectedConversationId = null;
       } else if (state.detailChannel) {
         if (!detailInstance) return;
         await activateChannelItem(state, detailInstance, actions);
@@ -507,7 +530,7 @@ export async function handleManagementViewInput(
           };
           state.selectedChannelItem = 0;
         } else {
-          state.detailConversationId = selectedConversationId(detailInstance.store, state.selectedConversation);
+          state.detailConversationId = state.selectedConversationId;
         }
       }
       return;
@@ -552,6 +575,7 @@ async function activateChannelItem(
   }
   if (item.kind === 'conversation') {
     state.detailConversationId = item.conversation.id;
+    state.selectedConversationId = item.conversation.id;
     state.notice = null;
     return;
   }
@@ -641,6 +665,7 @@ async function handleGroupSearchInput(
   }
   state.groupSearch = null;
   state.detailConversationId = conversation.id;
+  state.selectedConversationId = conversation.id;
   const index = instance.store.listConversations().findIndex((item) => item.id === conversation!.id);
   state.selectedConversation = Math.max(0, index);
 }
@@ -735,6 +760,10 @@ export function createSettingEntries(
       if (!value.trim()) throw new Error('回复签名不能为空');
       next.identity.signature = value.trim();
     }),
+    restartSetting(configSetting('runtime.cwd', 'Runtime cwd', config.runtime.cwd, 'Runtime 工作目录；已有 session cwd 不兼容时拒绝恢复', config, store, configFile, (next, value) => {
+      if (!value.trim()) throw new Error('Runtime cwd 不能为空');
+      next.runtime.cwd = resolve(value.trim());
+    })),
     configSetting('runtime.model', 'Runtime 模型', config.runtime.model, '下一 turn；attach 模式建议重启', config, store, configFile, (next, value) => {
       if (!value.trim()) throw new Error('Runtime 模型不能为空');
       next.runtime.model = value.trim();
@@ -933,6 +962,10 @@ function selectSetting(entry: SettingEntry, options: readonly string[]): Setting
   return { ...entry, input: 'select', options };
 }
 
+function restartSetting(entry: SettingEntry): SettingEntry {
+  return { ...entry, restartHost: true };
+}
+
 function nextOption(entry: SettingEntry): string {
   if (!entry.options || entry.options.length === 0) throw new Error(`${entry.label} 缺少候选值`);
   const current = entry.options.indexOf(entry.value);
@@ -1031,7 +1064,7 @@ export function renderManagementView(
           : state.detailConversationId
             ? ansi('e/s 修改  d 删除  ←/Esc 返回  q 退出', 'dim', color)
             : state.detailChannel
-              ? ansi('↑/↓ 选择  →/Enter 操作、选择下一项或下钻  ←/Esc 返回 Instance  q 退出', 'dim', color)
+              ? ansi('↑/↓ 选择  →/Enter 操作、选择下一项或下钻  d 删除会话  ←/Esc 返回 Instance  q 退出', 'dim', color)
           : state.detailInstanceName
             ? ansi('↑/↓ 选择  →/Enter 下钻  s Instance 设置  d 删除 Instance  ←/Esc 返回  q 退出', 'dim', color)
             : ansi('↑/↓ 选择  →/Enter 下钻  a 新增  d 删除 Instance  Tab 全局设置  q 退出', 'dim', color));
@@ -1118,6 +1151,15 @@ function renderInstanceOverview(
     width,
     semanticTable(color, state.instanceFocus === 'channels' ? state.selectedChannel : -1, 2),
   ));
+  lines.push('', heading('CONVERSATIONS', color));
+  lines.push(...table(
+    ['', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'WORKER', 'SESSION', 'CONTEXT', 'MEMBERS', 'RUNTIME'],
+    conversations.map((row, index) => [
+      state.instanceFocus === 'conversations' && index === state.selectedConversation ? '>' : ' ', row.channelId, row.title, row.mode, row.pending,
+      row.workerState, row.sessionState, `v${row.contextVersion ?? 0}@${row.contextThroughSequence ?? 0}`,
+      row.memberCount ?? 0, row.runtimeId,
+    ]), width, semanticTable(color, state.instanceFocus === 'conversations' ? state.selectedConversation : -1, 2),
+  ));
   lines.push('', messageSummary({
     received: number(snapshot.received),
     pending: number(snapshot.pending_messages),
@@ -1134,15 +1176,6 @@ function renderInstanceOverview(
     if (messageHeaders.includes('PREVIEW')) values.push(row.preview ?? '-');
     return values;
   }), width, semanticTable(color)));
-  lines.push('', heading('CONVERSATIONS', color));
-  lines.push(...table(
-    ['', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'WORKER', 'SESSION', 'CONTEXT', 'MEMBERS', 'RUNTIME'],
-    conversations.map((row, index) => [
-      state.instanceFocus === 'conversations' && index === state.selectedConversation ? '>' : ' ', row.channelId, row.title, row.mode, row.pending,
-      row.workerState, row.sessionState, `v${row.contextVersion ?? 0}@${row.contextThroughSequence ?? 0}`,
-      row.memberCount ?? 0, row.runtimeId,
-    ]), width, semanticTable(color, state.instanceFocus === 'conversations' ? state.selectedConversation : -1, 2),
-  ));
   lines.push('', heading('RUNTIMES', color));
   lines.push(...table(
     ['RUNTIME', 'LABEL', 'STATE', 'MODEL', 'RECOVERY', 'ERROR'],
@@ -1386,10 +1419,6 @@ export function renderStatusView(instances: ViewInstance[], showContent = false,
   return lines.join('\n');
 }
 
-function selectedConversationId(store: Store, index: number): string | null {
-  return store.listConversations()[index]?.id ?? null;
-}
-
 function channelGroups(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
   return channelConversations(instance, target).filter((conversation) => conversation.kind === 'group');
 }
@@ -1464,6 +1493,7 @@ function moveInstanceSelection(state: ManagementViewState, instance: ViewInstanc
   } else {
     state.instanceFocus = 'conversations';
     state.selectedConversation = next - channelCount;
+    state.selectedConversationId = instance.store.listConversations()[state.selectedConversation]?.id ?? null;
   }
 }
 
@@ -1485,7 +1515,14 @@ function normalizeSelection(state: ManagementViewState, instances: ViewInstance[
     : null;
   if (detailInstance) {
     state.selectedChannel = clamp(state.selectedChannel, 0, Math.max(0, configuredChannels(detailInstance.config).length - 1));
-    state.selectedConversation = clamp(state.selectedConversation, 0, Math.max(0, detailInstance.store.listConversations().length - 1));
+    const conversations = detailInstance.store.listConversations();
+    const selectedById = state.selectedConversationId
+      ? conversations.findIndex((conversation) => conversation.id === state.selectedConversationId)
+      : -1;
+    state.selectedConversation = selectedById >= 0
+      ? selectedById
+      : clamp(state.selectedConversation, 0, Math.max(0, conversations.length - 1));
+    state.selectedConversationId = conversations[state.selectedConversation]?.id ?? null;
   }
   if (state.detailChannel && (
     !detailInstance

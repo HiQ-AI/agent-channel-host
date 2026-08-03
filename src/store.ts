@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { DEFAULT_WORKER_WARM_SECONDS, MAX_WORKER_WARM_SECONDS } from './types.js';
+import { DEFAULT_WORKER_WARM_SECONDS, MAX_RECOVERY_ATTEMPTS, MAX_WORKER_WARM_SECONDS } from './types.js';
 import type {
   AdmittedEvent,
   Conversation,
@@ -322,6 +322,21 @@ export class Store {
         COMMIT;
       `);
     }
+    const channelVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (channelVersion < 7) {
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE inbound_events ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0
+          CHECK(failure_count >= 0);
+        ALTER TABLE inbound_events ADD COLUMN last_error TEXT;
+        UPDATE inbound_events SET failure_count=1 WHERE processing_state='failed';
+        ALTER TABLE outbox ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0
+          CHECK(attempt_count >= 0);
+        UPDATE outbox SET attempt_count=1 WHERE state IN ('sending','submitted','failed');
+        PRAGMA user_version=7;
+        COMMIT;
+      `);
+    }
   }
 
   addConversation(input: {
@@ -434,7 +449,7 @@ export class Store {
   }
 
   listConversations(enabledOnly = false): Conversation[] {
-    const sql = `SELECT * FROM conversations${enabledOnly ? ' WHERE enabled=1' : ''} ORDER BY kind,title`;
+    const sql = `SELECT * FROM conversations${enabledOnly ? ' WHERE enabled=1' : ''} ORDER BY kind,title,id`;
     return (this.db.prepare(sql).all() as Row[]).map((row) => mapConversation(row)!);
   }
 
@@ -667,6 +682,7 @@ export class Store {
     turnStatus: 'completed' | 'failed',
     decision: Decision | null,
     subagentThreadId: string | null = null,
+    error: string | null = null,
   ): void {
     if (events.length === 0) return;
     this.db.exec('BEGIN IMMEDIATE');
@@ -683,7 +699,9 @@ export class Store {
           delegation=excluded.delegation,subagent_thread_id=excluded.subagent_thread_id,created_at=excluded.created_at
       `);
       const complete = this.db.prepare(`
-        UPDATE inbound_events SET processing_state=?,claim_owner=NULL,claim_expires_at_ms=NULL,claimed_at=NULL
+        UPDATE inbound_events SET processing_state=?,
+          failure_count=failure_count+?,last_error=?,
+          claim_owner=NULL,claim_expires_at_ms=NULL,claimed_at=NULL
         WHERE id=? AND processing_state='claimed' AND claim_owner=?
       `);
       const now = new Date().toISOString();
@@ -702,7 +720,7 @@ export class Store {
           isTail ? subagentThreadId : null,
           now,
         );
-        complete.run(turnStatus, event.id, workerId);
+        complete.run(turnStatus, turnStatus === 'failed' ? 1 : 0, turnStatus === 'failed' ? error : null, event.id, workerId);
       }
       if (turnStatus === 'completed' && decision?.contextUpdate) {
         const current = this.db.prepare(`
@@ -749,6 +767,19 @@ export class Store {
         WHERE processing_state='claimed'
       `).run();
       this.db.prepare(`
+        UPDATE inbound_events SET processing_state='admitted',claim_owner=NULL,
+          claim_expires_at_ms=NULL,claimed_at=NULL
+        WHERE processing_state='failed' AND failure_count<?
+      `).run(MAX_RECOVERY_ATTEMPTS);
+      this.db.prepare(`
+        UPDATE outbox SET state='pending',updated_at=?
+        WHERE state IN ('sending','failed') AND attempt_count<?
+      `).run(now, MAX_RECOVERY_ATTEMPTS);
+      this.db.prepare(`
+        UPDATE outbox SET state='failed',error=COALESCE(error,'recovery-attempt-limit'),updated_at=?
+        WHERE state='sending' AND attempt_count>=?
+      `).run(now, MAX_RECOVERY_ATTEMPTS);
+      this.db.prepare(`
         UPDATE runtime_workers SET worker_id=NULL,state='stopped',process_id=NULL,
           claimed_from_sequence=NULL,claimed_to_sequence=NULL,warm_until=NULL,
           error=CASE WHEN state IN ('starting','running') THEN 'host-restarted' ELSE error END,
@@ -758,9 +789,11 @@ export class Store {
         SELECT DISTINCT c.id
         FROM conversations c
         LEFT JOIN inbound_events e ON e.conversation_id=c.id AND e.processing_state='admitted'
+        LEFT JOIN outbox o ON o.conversation_id=c.id AND o.state='pending'
         LEFT JOIN group_onboarding g ON g.conversation_id=c.id
         WHERE c.enabled=1 AND (
           e.id IS NOT NULL OR
+          o.id IS NOT NULL OR
           (c.kind='group' AND g.state<>'submitted' AND (g.intro_text IS NULL OR c.mode='reply'))
         )
         ORDER BY c.id
@@ -805,7 +838,11 @@ export class Store {
       decision?.workType ?? null, decision?.delegation ?? null, subagentThreadId,
       new Date().toISOString(),
     );
-    this.db.prepare('UPDATE inbound_events SET processing_state=? WHERE id=?').run(turnStatus, eventId);
+    this.db.prepare(`
+      UPDATE inbound_events SET processing_state=?,
+        failure_count=failure_count+?,last_error=?
+      WHERE id=?
+    `).run(turnStatus, turnStatus === 'failed' ? 1 : 0, null, eventId);
   }
 
   enqueueOutbox(event: AdmittedEvent, text: string, uuid: string): OutboxRecord | null {
@@ -839,13 +876,23 @@ export class Store {
         return null;
       }
       const now = new Date().toISOString();
+      const conversation = this.getConversation(row.conversationId);
+      if (!conversation?.enabled || conversation.mode !== 'reply') {
+        this.db.prepare("UPDATE outbox SET state='suppressed',error='conversation-not-reply',updated_at=? WHERE id=?")
+          .run(now, id);
+        this.db.exec('COMMIT');
+        return null;
+      }
       if (this.latestSequence(row.conversationId) !== row.inputSequence) {
         this.db.prepare("UPDATE outbox SET state='suppressed',error='newer-message-admitted',updated_at=? WHERE id=?")
           .run(now, id);
         this.db.exec('COMMIT');
         return null;
       }
-      this.db.prepare("UPDATE outbox SET state='sending',updated_at=? WHERE id=? AND state='pending'").run(now, id);
+      this.db.prepare(`
+        UPDATE outbox SET state='sending',attempt_count=attempt_count+1,error=NULL,updated_at=?
+        WHERE id=? AND state='pending'
+      `).run(now, id);
       this.db.exec('COMMIT');
       return this.getOutbox(id);
     } catch (error) {
@@ -861,6 +908,13 @@ export class Store {
 
   getOutbox(id: string): OutboxRecord | null {
     return mapOutbox(this.db.prepare('SELECT * FROM outbox WHERE id=?').get(id) as Row | undefined);
+  }
+
+  listPendingOutbox(conversationId: string): OutboxRecord[] {
+    return (this.db.prepare(`
+      SELECT * FROM outbox WHERE conversation_id=? AND state='pending'
+      ORDER BY input_sequence,id
+    `).all(conversationId) as Row[]).map((row) => mapOutbox(row)!);
   }
 
   latestSequence(conversationId: string): number {
@@ -1181,7 +1235,7 @@ export class Store {
       LEFT JOIN runtime_sessions s ON s.conversation_id=c.id
       LEFT JOIN conversation_context x ON x.conversation_id=c.id
       LEFT JOIN runtime_adapters r ON r.runtime_id=c.runtime_id
-      ORDER BY c.channel_id,c.title
+      ORDER BY c.kind,c.title,c.id
     `).all() as Row[];
     const messages = this.db.prepare(`
       SELECT e.conversation_id,e.sequence,e.received_at,e.processing_state,e.sender_name,e.sender_id,e.body_json,
@@ -1442,7 +1496,8 @@ function mapOutbox(row: Row | undefined): OutboxRecord | null {
   return {
     id: String(row.id), conversationId: String(row.conversation_id), inboundEventId: String(row.inbound_event_id),
     inputSequence: Number(row.input_sequence), uuid: String(row.uuid), text: String(row.text),
-    state: row.state as OutboxRecord['state'], error: row.error ? String(row.error) : null,
+    state: row.state as OutboxRecord['state'], attemptCount: Number(row.attempt_count ?? 0),
+    error: row.error ? String(row.error) : null,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }

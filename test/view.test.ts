@@ -135,6 +135,8 @@ test('management view 明确分离总览内 INSTANCES 与全局设置', () => {
     assert.match(instanceView, /RUNTIMES/);
     assert.match(instanceView, /RECENT MESSAGES/);
     assert.match(instanceView, /私聊 A/);
+    assert.ok(instanceView.indexOf('CONVERSATIONS') < instanceView.indexOf('MESSAGES received='));
+    assert.ok(instanceView.indexOf('CONVERSATIONS') < instanceView.indexOf('RECENT MESSAGES'));
 
     state.detailConversationId = first.id;
     const detailView = renderManagementView(instances, state, detail, settings, 140);
@@ -234,6 +236,16 @@ test('settings 使用同一 schema 原子保存 config，并更新 conversation 
     assert.equal(config.identity.name, '新 Agent');
     assert.match(await readFile(configFile, 'utf8'), /name: 新 Agent/);
     entries = createSettingEntries(config, store, conversation.id, configFile);
+    const runtimeCwd = entries.find((entry) => entry.key === 'runtime.cwd');
+    assert.ok(runtimeCwd);
+    assert.equal(runtimeCwd.value, resolve('.'));
+    assert.equal(runtimeCwd.restartHost, true);
+    const changedCwd = resolve(root, 'runtime-cwd');
+    await runtimeCwd.apply(changedCwd);
+    assert.equal(config.runtime.cwd, changedCwd);
+    assert.match(await readFile(configFile, 'utf8'), /runtime-cwd/);
+    await assert.rejects(runtimeCwd.apply('  '), /Runtime cwd 不能为空/);
+    entries = createSettingEntries(config, store, conversation.id, configFile);
     assert.equal(entries.find((entry) => entry.key === 'runtime.effort')?.input, 'select');
     assert.deepEqual(entries.find((entry) => entry.key === 'runtime.effort')?.options, ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
     assert.equal(entries.find((entry) => entry.key.endsWith(':mode'))?.input, 'select');
@@ -313,6 +325,47 @@ test('management view 使用右键下钻、左键返回并可进入 instance 设
     assert.equal(state.exitConfirmation, true);
     await handleManagementViewInput('q', state, instances, () => { stopped = true; });
     assert.equal(stopped, true);
+  } finally {
+    store.close();
+  }
+});
+
+test('CONVERSATIONS 以稳定 ID 选择，跨 Channel 排序和标题刷新后下钻不漂移', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('stable-conversation-selection', '.', 'Agent', '角色');
+  const selected = store.addConversation({
+    channelId: 'z-channel', channelProfileId: 'workspace', runtimeId: 'codex',
+    kind: 'direct', externalId: 'selected-direct', title: 'A 私聊', responsibility: '答疑', mode: 'shadow',
+  });
+  const sibling = store.addConversation({
+    channelId: 'a-channel', channelProfileId: 'workspace', runtimeId: 'codex',
+    kind: 'direct', externalId: 'sibling-direct', title: 'B 私聊', responsibility: '答疑', mode: 'shadow',
+  });
+  store.addConversation({
+    channelId: 'a-channel', channelProfileId: 'workspace', runtimeId: 'codex',
+    kind: 'group', externalId: 'group-row', title: '群聊', responsibility: '答疑', mode: 'shadow',
+  });
+  const instance = viewInstance('stable-conversation-selection', config, store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.instanceFocus = 'conversations';
+  state.selectedConversation = 0;
+  state.selectedConversationId = selected.id;
+  try {
+    assert.deepEqual(
+      (store.status().conversations as Array<{ id: string }>).map((row) => row.id),
+      store.listConversations().map((conversation) => conversation.id),
+    );
+    store.setConversationTitle(selected.id, 'Z 私聊');
+    await handleManagementViewInput('\u001b[C', state, [instance], () => undefined);
+    assert.equal(state.selectedConversationId, selected.id);
+    assert.equal(state.detailConversationId, selected.id);
+    assert.equal(state.selectedConversation, 1);
+    assert.notEqual(state.detailConversationId, sibling.id);
+    const rendered = renderManagementView(
+      [instance], state, store.conversationDetail(state.detailConversationId!), [], 120,
+    );
+    assert.match(rendered, /会话详情 \/ Z 私聊/);
   } finally {
     store.close();
   }
@@ -637,7 +690,10 @@ test('Channel 页面分别选择群聊/私聊订阅与默认模式，并展示�
   state.detailInstanceName = instance.name;
   state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
   let restarts = 0;
-  const actions = { afterSettingApplied: async () => { restarts += 1; return 'Host 已重启'; } };
+  const actions = {
+    afterSettingApplied: async () => { restarts += 1; return 'Host 已重启'; },
+    deleteConversation: async (_instance: ViewInstance, id: string) => { store.deleteConversation(id); },
+  };
   try {
     state.selectedChannelItem = 1;
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
@@ -669,6 +725,26 @@ test('Channel 页面分别选择群聊/私聊订阅与默认模式，并展示�
     state.selectedChannelItem = 7;
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     assert.equal(state.detailConversationId, direct.id);
+    state.detailConversationId = null;
+    state.selectedChannelItem = 5;
+    await handleManagementViewInput('d', state, [instance], () => undefined, actions);
+    assert.equal(state.destructiveConfirmation?.conversationId, group.id);
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(store.getConversation(group.id), null);
+    assert.ok(state.detailChannel);
+    assert.equal(state.destructiveConfirmation, null);
+    state.selectedChannelItem = 6;
+    await handleManagementViewInput('d', state, [instance], () => undefined, actions);
+    assert.equal(
+      (state.destructiveConfirmation as { conversationId: string | null } | null)?.conversationId,
+      direct.id,
+    );
+    await handleManagementViewInput('d', state, [instance], () => undefined, actions);
+    assert.equal(store.getConversation(direct.id), null);
+    assert.ok(state.detailChannel);
+    state.selectedChannelItem = 0;
+    await handleManagementViewInput('d', state, [instance], () => undefined, actions);
+    assert.equal(state.destructiveConfirmation, null);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
