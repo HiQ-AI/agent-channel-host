@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { HostConfig } from './config.js';
 import type { ChannelAdapter, RuntimeAdapter } from './contracts.js';
 import { statePath } from './paths.js';
@@ -6,7 +7,7 @@ import { OwnerLock } from './owner-lock.js';
 import { DwsChannelAdapter } from './dws.js';
 import { CodexRuntimeAdapter } from './codex-runtime.js';
 import { ConversationWorker } from './actor.js';
-import type { Conversation } from './types.js';
+import type { Conversation, NormalizedEvent } from './types.js';
 
 interface WorkerHandle {
   worker: ConversationWorker;
@@ -20,6 +21,64 @@ export interface HostRunOptions {
   channel?: ChannelAdapter;
   runtime?: RuntimeAdapter;
   ownerLock?: { ownerId: string; acquire(): Promise<void>; release(): Promise<void> };
+}
+
+export interface ConversationResolution {
+  conversation: Conversation | null;
+  created: boolean;
+  reason: 'authorized' | 'auto-created' | 'subscription-none' | 'conversation-disabled' | 'conversation-not-authorized';
+}
+
+export function resolveEventConversation(
+  config: HostConfig,
+  store: Store,
+  event: NormalizedEvent,
+): ConversationResolution {
+  const subscription = event.kind === 'group'
+    ? config.channel.subscriptions.groups
+    : config.channel.subscriptions.directs;
+  if (subscription === 'none') {
+    return { conversation: null, created: false, reason: 'subscription-none' };
+  }
+  const existing = store.findConversation(
+    event.channelId,
+    event.channelProfileId,
+    event.kind,
+    event.conversationExternalId,
+  );
+  if (existing) {
+    return existing.enabled
+      ? { conversation: existing, created: false, reason: 'authorized' }
+      : { conversation: null, created: false, reason: 'conversation-disabled' };
+  }
+  if (subscription === 'selected') {
+    return { conversation: null, created: false, reason: 'conversation-not-authorized' };
+  }
+  let created: Conversation;
+  try {
+    created = store.addConversation({
+      channelId: event.channelId,
+      channelProfileId: event.channelProfileId,
+      kind: event.kind,
+      externalId: event.conversationExternalId,
+      title: event.conversationTitle?.trim() || anonymousConversationTitle(event),
+      responsibility: config.identity.role,
+      mode: 'shadow',
+      runtimeId: config.runtime.id,
+    });
+  } catch (error) {
+    const concurrent = store.findConversation(
+      event.channelId,
+      event.channelProfileId,
+      event.kind,
+      event.conversationExternalId,
+    );
+    if (!concurrent) throw error;
+    return concurrent.enabled
+      ? { conversation: concurrent, created: false, reason: 'authorized' }
+      : { conversation: null, created: false, reason: 'conversation-disabled' };
+  }
+  return { conversation: created, created: true, reason: 'auto-created' };
 }
 
 export class EventDrivenScheduler {
@@ -295,19 +354,21 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
       await channel.start({
         onEvent: (normalized) => {
           store.noteChannelEvent(normalized.channelId, normalized.channelProfileId, normalized.receivedAt);
-          const conversation = store.findEnabledConversation(
-            normalized.channelId,
-            normalized.channelProfileId,
-            normalized.kind,
-            normalized.conversationExternalId,
-          );
+          const resolution = resolveEventConversation(config, store, normalized);
+          const conversation = resolution.conversation;
           if (!conversation) {
             log({
-              type: 'EVENT_REJECTED', reason: 'conversation-not-authorized',
+              type: 'EVENT_REJECTED', reason: resolution.reason,
               channelId: normalized.channelId, kind: normalized.kind,
               fingerprintPrefix: normalized.fingerprint.slice(0, 12),
             });
             return;
+          }
+          if (resolution.created) {
+            log({
+              type: 'CONVERSATION_AUTO_CREATED', conversationId: conversation.id,
+              channelId: normalized.channelId, kind: normalized.kind, mode: conversation.mode,
+            });
           }
           const admitted = store.admitEvent(conversation, normalized);
           if (!admitted.admitted || !admitted.event) {
@@ -372,4 +433,9 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
 
 function channelKey(channelId: string, profileId: string): string {
   return `${channelId}\u0000${profileId}`;
+}
+
+function anonymousConversationTitle(event: NormalizedEvent): string {
+  const digest = createHash('sha256').update(event.conversationExternalId).digest('hex').slice(0, 8);
+  return `${event.kind === 'group' ? '未命名群聊' : '未命名私聊'} · ${digest}`;
 }

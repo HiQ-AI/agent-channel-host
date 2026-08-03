@@ -85,10 +85,8 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     assert.match(viewed.stdout, /INSTANCES/);
     assert.match(viewed.stdout, /test/);
     assert.match(viewed.stdout, /custom-model/);
-    assert.match(viewed.stdout, /CHANNELS/);
     assert.match(viewed.stdout, /MESSAGES received=0 pending=0/);
-    assert.match(viewed.stdout, /CONVERSATIONS/);
-    assert.match(viewed.stdout, /RUNTIMES/);
+    assert.doesNotMatch(viewed.stdout, /^CHANNELS$|^CONVERSATIONS$|^RUNTIMES$/m);
     assert.match(viewed.stdout, /^agent-channel view /);
     assert.doesNotMatch(viewed.stdout, /open-test-user|open-warm-user/);
     await assert.rejects(execFileAsync(process.execPath, [

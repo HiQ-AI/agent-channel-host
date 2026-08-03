@@ -54,6 +54,7 @@ export interface NormalizedEvent {
   eventId: string | null;
   messageId: string | null;
   conversationExternalId: string;
+  conversationTitle: string | null;
   kind: ConversationKind;
   senderId: string | null;
   senderName: string | null;

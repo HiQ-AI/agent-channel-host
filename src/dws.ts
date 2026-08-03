@@ -181,6 +181,9 @@ export function normalizeDwsEvent(
     eventId,
     messageId,
     conversationExternalId: externalId,
+    conversationTitle: text(firstValue(source, [
+      'conversation_title', 'conversationTitle', 'conversation_name', 'conversationName', 'group_name', 'groupName',
+    ])),
     kind,
     senderId: text(source.sender_open_dingtalk_id) ?? text(source.sender_id),
     senderName: text(source.sender) ?? text(source.sender_name),

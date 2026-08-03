@@ -49,3 +49,20 @@ export async function removeUserService(instance: string, check: boolean): Promi
   await rm(plan.launcherPath, { force: true });
   return plan;
 }
+
+export async function removeUserServiceIfInstalled(instance: string): Promise<boolean> {
+  if (process.platform !== 'win32') return false;
+  const plan = windowsServicePlan(instance, process.argv[1]!);
+  try {
+    await execFileAsync('schtasks.exe', ['/Query', '/TN', plan.taskName], { encoding: 'utf8', windowsHide: true });
+  } catch (error) {
+    const failure = error as Error & { stdout?: string; stderr?: string };
+    const detail = `${failure.stdout ?? ''}\n${failure.stderr ?? ''}\n${failure.message}`;
+    if (/cannot find|does not exist|找不到/i.test(detail)) return false;
+    throw new Error(`无法查询 Windows 用户计划任务 ${plan.taskName}：${failure.message}`);
+  }
+  await execFileAsync('schtasks.exe', ['/End', '/TN', plan.taskName], { encoding: 'utf8', windowsHide: true }).catch(() => undefined);
+  await execFileAsync('schtasks.exe', ['/Delete', '/TN', plan.taskName, '/F'], { encoding: 'utf8', windowsHide: true });
+  await rm(plan.launcherPath, { force: true });
+  return true;
+}

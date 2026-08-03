@@ -4,7 +4,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { defaultConfig } from '../src/config.js';
 import type { AgentSession, ChannelAdapter, ChannelHandlers, RuntimeAdapter } from '../src/contracts.js';
-import { EventDrivenScheduler, runHost } from '../src/host.js';
+import { EventDrivenScheduler, resolveEventConversation, runHost } from '../src/host.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import type { Conversation, DecisionRun, OutboxRecord } from '../src/types.js';
@@ -323,6 +323,44 @@ test('Channel disabled 时 Host 不启动 Channel 且不获取其 owner', async 
     if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
     else process.env.AGENT_CHANNEL_HOME = previous;
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Channel 群聊/私聊订阅策略在唯一事件流准入，all 自动建 shadow 档且 disabled 优先拒绝', () => {
+  const config = defaultConfig('subscription-policy', '.', '翠丝', '负责编辑器答疑');
+  const store = new Store(':memory:');
+  try {
+    const groupEvent = normalizeDwsEvent({
+      type: 'user_im_message_receive_group_all', event_id: 'group-policy-1', conversation_id: 'group-policy',
+      conversation_title: '编辑器讨论群', content: '问题',
+    })!;
+    assert.equal(resolveEventConversation(config, store, groupEvent).reason, 'conversation-not-authorized');
+    assert.equal(store.listConversations().length, 0);
+
+    config.channel.subscriptions.groups = 'all';
+    const auto = resolveEventConversation(config, store, groupEvent);
+    assert.equal(auto.reason, 'auto-created');
+    assert.equal(auto.conversation?.title, '编辑器讨论群');
+    assert.equal(auto.conversation?.responsibility, config.identity.role);
+    assert.equal(auto.conversation?.mode, 'shadow');
+    assert.equal(store.listConversations().length, 1);
+
+    store.setConversationEnabled(auto.conversation!.id, false);
+    assert.equal(resolveEventConversation(config, store, groupEvent).reason, 'conversation-disabled');
+    config.channel.subscriptions.groups = 'none';
+    assert.equal(resolveEventConversation(config, store, groupEvent).reason, 'subscription-none');
+
+    const directEvent = normalizeDwsEvent({
+      type: 'user_im_message_receive_o2o_all', event_id: 'direct-policy-1',
+      sender_open_dingtalk_id: 'direct-policy', sender_name: '同事甲', content: '私聊',
+    })!;
+    assert.equal(resolveEventConversation(config, store, directEvent).reason, 'conversation-not-authorized');
+    config.channel.subscriptions.directs = 'all';
+    const direct = resolveEventConversation(config, store, directEvent);
+    assert.equal(direct.reason, 'auto-created');
+    assert.match(direct.conversation?.title ?? '', /^未命名私聊 · [0-9a-f]{8}$/);
+  } finally {
+    store.close();
   }
 });
 

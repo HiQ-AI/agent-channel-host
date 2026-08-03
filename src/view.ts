@@ -1,5 +1,5 @@
-import type { HostConfig } from './config.js';
-import { configuredChannels, validateConfig, writeConfig } from './config.js';
+import type { ChannelSubscriptionMode, HostConfig } from './config.js';
+import { CHANNEL_SUBSCRIPTION_MODES, configuredChannels, validateConfig, writeConfig } from './config.js';
 import type { Store } from './store.js';
 import type { Conversation } from './types.js';
 import { CLI_NAME } from './product.js';
@@ -40,6 +40,7 @@ export interface ManagementViewState {
   editing: { key: string; label: string; value: string; cursor: number } | null;
   creatingInstance: InstanceCreationDraft | null;
   groupSearch: GroupSearchDraft | null;
+  destructiveConfirmation: DestructiveConfirmation | null;
   exitConfirmation: boolean;
   notice: string | null;
 }
@@ -78,6 +79,15 @@ export interface ManagementViewActions {
   startInstance?(instance: ViewInstance): Promise<void>;
   afterSettingApplied?(instance: ViewInstance, entry: SettingEntry): Promise<string | void>;
   searchGroups?(instance: ViewInstance, query: string): Promise<ChannelGroupCandidate[]>;
+  deleteInstance?(instance: ViewInstance): Promise<void>;
+  deleteConversation?(instance: ViewInstance, conversationId: string): Promise<void>;
+}
+
+interface DestructiveConfirmation {
+  kind: 'instance' | 'conversation';
+  instanceName: string;
+  conversationId: string | null;
+  label: string;
 }
 
 type InstanceCreationStep = 'instance' | 'cwd' | 'name' | 'role';
@@ -117,6 +127,7 @@ export function createManagementViewState(): ManagementViewState {
     editing: null,
     creatingInstance: null,
     groupSearch: null,
+    destructiveConfirmation: null,
     exitConfirmation: false,
     notice: null,
   };
@@ -259,6 +270,44 @@ export async function handleManagementViewInput(
     }
     return;
   }
+  if (state.destructiveConfirmation) {
+    if (key === '\u0003') {
+      state.destructiveConfirmation = null;
+      state.exitConfirmation = true;
+      return;
+    }
+    if (key === '\u001b' || key === '\u001b[D') {
+      state.destructiveConfirmation = null;
+      state.notice = '已取消删除';
+      return;
+    }
+    if (key.toLowerCase() !== 'd' && key !== '\r' && key !== '\n') return;
+    const confirmation = state.destructiveConfirmation;
+    const target = instances.find((instance) => instance.name === confirmation.instanceName);
+    if (!target) throw new Error('删除目标已不存在');
+    if (confirmation.kind === 'instance') {
+      if (!actions.deleteInstance) throw new Error('当前 View 入口未提供 Instance 删除能力');
+      await actions.deleteInstance(target);
+      const index = instances.indexOf(target);
+      if (index >= 0) instances.splice(index, 1);
+      state.detailInstanceName = null;
+      state.detailChannel = null;
+      state.detailConversationId = null;
+      state.settingsInstanceName = null;
+      state.selectedInstance = clamp(index, 0, instances.length);
+      state.notice = `Instance ${confirmation.label} 已删除`;
+    } else {
+      if (!confirmation.conversationId) throw new Error('删除目标缺少 conversation ID');
+      if (!actions.deleteConversation) throw new Error('当前 View 入口未提供 Conversation 删除能力');
+      await actions.deleteConversation(target, confirmation.conversationId);
+      state.detailConversationId = null;
+      state.settingsInstanceName = null;
+      state.selectedConversation = clamp(state.selectedConversation, 0, Math.max(0, target.store.listConversations().length - 1));
+      state.notice = `Conversation ${confirmation.label} 已删除`;
+    }
+    state.destructiveConfirmation = null;
+    return;
+  }
   if (key === '\u0003') {
     state.exitConfirmation = true;
     return;
@@ -348,6 +397,32 @@ export async function handleManagementViewInput(
     state.notice = null;
     return;
   }
+  if (state.tab === 'overview' && state.detailConversationId && detailInstance && key.toLowerCase() === 'e') {
+    state.settingsInstanceName = detailInstance.name;
+    state.selectedSetting = 0;
+    state.notice = null;
+    return;
+  }
+  if (state.tab === 'overview' && key.toLowerCase() === 'd') {
+    if (state.detailConversationId && detailInstance) {
+      const conversation = detailInstance.store.getConversation(state.detailConversationId);
+      if (!conversation) throw new Error('Conversation 已不存在');
+      state.destructiveConfirmation = {
+        kind: 'conversation', instanceName: detailInstance.name,
+        conversationId: conversation.id, label: conversation.title,
+      };
+      return;
+    }
+    if (!state.detailChannel && !state.settingsInstanceName) {
+      const target = detailInstance ?? overviewInstance;
+      if (target && (state.detailInstanceName || state.selectedInstance < instances.length)) {
+        state.destructiveConfirmation = {
+          kind: 'instance', instanceName: target.name, conversationId: null, label: target.name,
+        };
+      }
+      return;
+    }
+  }
   const direction = key === '\u001b[A' || key.toLowerCase() === 'k' ? -1
     : key === '\u001b[B' || key.toLowerCase() === 'j' ? 1 : 0;
   if (direction !== 0) {
@@ -369,7 +444,7 @@ export async function handleManagementViewInput(
         state.selectedChannel = 0;
         state.selectedConversation = 0;
       } else if (state.detailChannel && detailInstance) {
-        const total = channelGroups(detailInstance, state.detailChannel).length + 2;
+        const total = channelManagementItems(detailInstance, state.detailChannel).length;
         state.selectedChannelItem = clamp(state.selectedChannelItem + direction, 0, Math.max(0, total - 1));
       } else {
         moveInstanceSelection(state, detailInstance, direction);
@@ -438,19 +513,31 @@ async function activateChannelItem(
   actions: ManagementViewActions,
 ): Promise<void> {
   const target = state.detailChannel!;
-  const groups = channelGroups(instance, target);
-  if (state.selectedChannelItem === 0) {
+  const item = channelManagementItems(instance, target)[state.selectedChannelItem];
+  if (!item) return;
+  if (item.kind === 'enabled') {
     const entry = createChannelSettingEntry(instance.config, instance.store, target, instance.configFile);
     await entry.apply(entry.value === 'enabled' ? 'disabled' : 'enabled');
     const actionNotice = await actions.afterSettingApplied?.(instance, entry);
     state.notice = actionNotice ?? `${entry.label} 已切换为 ${entry.value === 'enabled' ? 'disabled' : 'enabled'}`;
     return;
   }
-  if (state.selectedChannelItem <= groups.length) {
-    state.detailConversationId = groups[state.selectedChannelItem - 1]!.id;
+  if (item.kind === 'groups-subscription' || item.kind === 'directs-subscription') {
+    const kind = item.kind === 'groups-subscription' ? 'groups' : 'directs';
+    const entry = createChannelSubscriptionSettingEntry(instance.config, instance.store, target, kind, instance.configFile);
+    const current = CHANNEL_SUBSCRIPTION_MODES.indexOf(entry.value as ChannelSubscriptionMode);
+    const next = CHANNEL_SUBSCRIPTION_MODES[(current + 1) % CHANNEL_SUBSCRIPTION_MODES.length]!;
+    await entry.apply(next);
+    const actionNotice = await actions.afterSettingApplied?.(instance, entry);
+    state.notice = actionNotice ?? `${entry.label} 已切换为 ${next}`;
+    return;
+  }
+  if (item.kind === 'conversation') {
+    state.detailConversationId = item.conversation.id;
     state.notice = null;
     return;
   }
+  if (item.kind !== 'search-group') return;
   if (!actions.searchGroups) throw new Error('当前 View 入口未提供群搜索能力');
   state.groupSearch = { target, phase: 'query', query: '', cursor: 0, results: [], selected: 0 };
   state.notice = null;
@@ -651,7 +738,21 @@ export function createSettingEntries(
   if (!conversationId) return entries;
   const conversation = store.getConversation(conversationId);
   if (!conversation) return entries;
+  const enabledEntry = storeSetting(
+    `conversation:${conversationId}:enabled`, `会话启用 · ${conversation.title}`,
+    conversation.enabled ? 'enabled' : 'disabled', '即时准入策略', async (value) => {
+      if (value !== 'enabled' && value !== 'disabled') throw new Error('会话状态必须是 enabled 或 disabled');
+      if (!store.setConversationEnabled(conversationId, value === 'enabled')) throw new Error('conversation 不存在');
+      await publishCurrentRecovery(config, store, conversationId);
+    },
+  );
+  enabledEntry.input = 'toggle';
   entries.push(
+    storeSetting(`conversation:${conversationId}:title`, `会话名称 · ${conversation.title}`, conversation.title, '仅修改本地显示名称', async (value) => {
+      if (!store.setConversationTitle(conversationId, value)) throw new Error('conversation 不存在');
+      await publishCurrentRecovery(config, store, conversationId);
+    }),
+    enabledEntry,
     storeSetting(`conversation:${conversationId}:responsibility`, `会话职责 · ${conversation.title}`, conversation.responsibility, '下一 turn', async (value) => {
       if (!store.setConversationResponsibility(conversationId, value)) throw new Error('conversation 不存在');
       await publishCurrentRecovery(config, store, conversationId);
@@ -711,6 +812,37 @@ export function createChannelSettingEntry(
   );
   entry.section = 'channels';
   entry.input = 'toggle';
+  entry.restartHost = true;
+  return entry;
+}
+
+export function createChannelSubscriptionSettingEntry(
+  config: HostConfig,
+  store: Store,
+  target: Pick<ChannelTarget, 'channelId' | 'profileId'>,
+  kind: 'groups' | 'directs',
+  configFile?: string,
+): SettingEntry {
+  const channel = configuredChannels(config)
+    .find((item) => item.id === target.channelId && item.profileId === target.profileId);
+  if (!channel) throw new Error(`Channel 不存在：${target.channelId}/${target.profileId}`);
+  const label = kind === 'groups' ? '群聊订阅' : '私聊订阅';
+  const entry = configSetting(
+    `channel:${channel.id}:${channel.profileId}:subscriptions:${kind}`,
+    label,
+    channel.subscriptions[kind],
+    'none/selected/all；View owner 即时重启',
+    config,
+    store,
+    configFile,
+    (next, value) => {
+      if (!CHANNEL_SUBSCRIPTION_MODES.includes(value as ChannelSubscriptionMode)) {
+        throw new Error('订阅模式必须是 none、selected 或 all');
+      }
+      next.channel.subscriptions[kind] = value as ChannelSubscriptionMode;
+    },
+  );
+  entry.section = 'channels';
   entry.restartHost = true;
   return entry;
 }
@@ -805,7 +937,25 @@ export function renderManagementView(
       `退出 View 将停止 ${ansi(String(owned), owned > 0 ? 'yellow-bold' : 'dim', color)} 个由当前 View 启动的 Host；attached/readonly Host 保持运行。`,
     );
   }
-  lines.push('', state.exitConfirmation
+  if (state.destructiveConfirmation) {
+    const confirmation = state.destructiveConfirmation;
+    const target = instances.find((instance) => instance.name === confirmation.instanceName);
+    lines.push('', heading('删除确认', color));
+    if (confirmation.kind === 'instance') {
+      lines.push(
+        ansi(`将删除 Instance ${confirmation.label} 的配置、SQLite/WAL、recovery、日志和本地 session 映射。`, 'red-bold', color),
+        `Host owner=${statusText(target?.hostOwnership ?? 'unknown', color)}；attached Host 存活时会拒绝删除。`,
+      );
+    } else {
+      lines.push(
+        ansi(`将删除 Conversation ${confirmation.label} 及其消息、session、outbox、worker、context、成员和 recovery。`, 'red-bold', color),
+        `Instance=${confirmation.instanceName}；删除后不能用原 provider session 恢复。`,
+      );
+    }
+  }
+  lines.push('', state.destructiveConfirmation
+    ? ansi('Enter/d 确认删除  Esc/← 取消', 'red-bold', color)
+    : state.exitConfirmation
     ? ansi('Enter/q/Ctrl+C 确认退出  Esc/← 取消', 'yellow-bold', color)
     : state.creatingInstance
     ? ansi(`新增 Instance · ${creationStepLabel(state.creatingInstance.step)}：${renderTextCursor(state.creatingInstance.value, state.creatingInstance.cursor)}  ←/→ 移动  Enter 下一步  Esc 取消`, 'cyan-bold', color)
@@ -820,12 +970,12 @@ export function renderManagementView(
         : state.settingsInstanceName
           ? ansi('↑/↓ 选择  →/Enter 编辑  ←/Esc 返回  q 退出', 'dim', color)
           : state.detailConversationId
-            ? ansi('s Instance 设置  ←/Esc 返回  q 退出', 'dim', color)
+            ? ansi('e/s 修改  d 删除  ←/Esc 返回  q 退出', 'dim', color)
             : state.detailChannel
               ? ansi('↑/↓ 选择  →/Enter 操作或下钻  ←/Esc 返回 Instance  q 退出', 'dim', color)
           : state.detailInstanceName
-            ? ansi('↑/↓ 选择  →/Enter 下钻  s Instance 设置  ←/Esc 返回  q 退出', 'dim', color)
-            : ansi('↑/↓ 选择  →/Enter 下钻  a 新增 Instance  Tab 全局设置  q 退出', 'dim', color));
+            ? ansi('↑/↓ 选择  →/Enter 下钻  s Instance 设置  d 删除 Instance  ←/Esc 返回  q 退出', 'dim', color)
+            : ansi('↑/↓ 选择  →/Enter 下钻  a 新增  d 删除 Instance  Tab 全局设置  q 退出', 'dim', color));
   return lines.join('\n');
 }
 
@@ -837,17 +987,16 @@ function renderGlobalOverview(
 ): string[] {
   const lines = [heading('INSTANCES', color)];
   lines.push(...table(
-    ['', 'INSTANCE', 'AGENT', 'HOST', 'PID', 'CHANNELS', 'CONVERSATIONS', 'PENDING', 'RUNTIMES', 'OWNER'],
+    ['', 'INSTANCE', 'AGENT', 'HOST', 'OWNER', 'CHANNELS', 'CONVERSATIONS', 'PENDING', 'ALERTS'],
     [...snapshots.map(({ instance, snapshot }, index) => {
       const host = object(snapshot.host);
       return [
         index === state.selectedInstance ? '>' : ' ', instance.name, instance.config.identity.name,
-        host.state ?? 'unknown', host.pid ?? '-', array(snapshot.channels).length, array(snapshot.conversations).length,
-        number(snapshot.pending_messages), array(snapshot.runtimeAdapters).length,
-        instance.hostOwnership,
+        host.state ?? 'unknown', instance.hostOwnership, array(snapshot.channels).length, array(snapshot.conversations).length,
+        number(snapshot.pending_messages), array(snapshot.alerts).length,
       ];
     }), [
-      state.selectedInstance >= snapshots.length ? '>' : ' ', '+ 新增 Instance', '-', '-', '-', '-', '-', '-', '-', '-',
+      state.selectedInstance >= snapshots.length ? '>' : ' ', '+ 新增 Instance', '-', '-', '-', '-', '-', '-', '-',
     ]],
     width,
     semanticTable(color, state.selectedInstance, 2),
@@ -855,15 +1004,6 @@ function renderGlobalOverview(
   if (snapshots.length === 0) {
     lines.push('', ansi('尚未初始化 instance。交互模式可按 a 创建；也可运行 agent-channel init --instance <name> --cwd <path>。', 'yellow-bold', color));
   }
-
-  const channels = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.channels));
-  lines.push('', heading('CHANNELS', color));
-  lines.push(...table(
-    ['INSTANCE', 'CHANNEL', 'PROFILE', 'STATE', 'PID', 'LAST EVENT', 'ERROR'],
-    channels.map((row) => [row.instance, row.channelId, row.profileId, row.state, row.pid, age(row.lastEventAt), row.error ?? '-']),
-    width,
-    semanticTable(color),
-  ));
 
   const totals = snapshots.reduce((result, { snapshot }) => ({
     received: result.received + number(snapshot.received),
@@ -874,36 +1014,7 @@ function renderGlobalOverview(
     outbox: result.outbox + number(snapshot.pending_outbox),
     submitted: result.submitted + number(snapshot.submitted),
   }), { received: 0, pending: 0, claimed: 0, processed: 0, failed: 0, outbox: 0, submitted: 0 });
-  const messages = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.messages));
   lines.push('', messageSummary(totals, color));
-  const messageHeaders = ['INSTANCE', 'CHANNEL', 'CONVERSATION', 'SEQ', 'SENDER', 'STATE', 'ACTION', 'AGE'];
-  if (messages.some((row) => row.preview !== undefined)) messageHeaders.push('PREVIEW');
-  lines.push(...table(messageHeaders, messages.map((row) => {
-    const values: unknown[] = [row.instance, row.channelId, row.title, row.sequence, row.sender ?? '-', row.state, row.action ?? '-', age(row.receivedAt)];
-    if (messageHeaders.includes('PREVIEW')) values.push(row.preview ?? '-');
-    return values;
-  }), width, semanticTable(color)));
-
-  const conversations = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.conversations));
-  lines.push('', heading('CONVERSATIONS', color));
-  lines.push(...table(
-    ['INSTANCE', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'WORKER', 'SESSION', 'CONTEXT', 'RUNTIME'],
-    conversations.map((row) => [
-      row.instance, row.channelId, row.title, row.mode, row.pending, row.workerState,
-      row.sessionState, `v${row.contextVersion ?? 0}@${row.contextThroughSequence ?? 0}`, row.runtimeId,
-    ]),
-    width,
-    semanticTable(color),
-  ));
-
-  const runtimes = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.runtimeAdapters));
-  lines.push('', heading('RUNTIMES', color));
-  lines.push(...table(
-    ['INSTANCE', 'RUNTIME', 'LABEL', 'STATE', 'MODEL', 'RECOVERY', 'ERROR'],
-    runtimes.map((row) => [row.instance, row.runtimeId, row.label, row.state, row.model ?? '-', row.contextRecovery ?? '-', row.error ?? '-']),
-    width,
-    semanticTable(color),
-  ));
   const alerts = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.alerts));
   if (alerts.length > 0) {
     lines.push('', heading('ALERTS', color), ...alerts.map((row) => ansi(`- ${row.instance}/${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`, 'red-bold', color)));
@@ -932,6 +1043,7 @@ function renderInstanceOverview(
   });
   const conversations = array(snapshot.conversations);
   const runtimeAdapters = array(snapshot.runtimeAdapters);
+  const messages = array(snapshot.messages);
   const alerts = array(snapshot.alerts);
   const host = object(snapshot.host);
   const lines = [
@@ -955,7 +1067,15 @@ function renderInstanceOverview(
     failed: number(snapshot.failed_messages),
     outbox: number(snapshot.pending_outbox),
     submitted: number(snapshot.submitted),
-  }, color), '', heading('CONVERSATIONS', color));
+  }, color), '', heading('RECENT MESSAGES', color));
+  const messageHeaders = ['CHANNEL', 'CONVERSATION', 'SEQ', 'SENDER', 'STATE', 'ACTION', 'AGE'];
+  if (messages.some((row) => row.preview !== undefined)) messageHeaders.push('PREVIEW');
+  lines.push(...table(messageHeaders, messages.map((row) => {
+    const values: unknown[] = [row.channelId, row.title, row.sequence, row.sender ?? '-', row.state, row.action ?? '-', age(row.receivedAt)];
+    if (messageHeaders.includes('PREVIEW')) values.push(row.preview ?? '-');
+    return values;
+  }), width, semanticTable(color)));
+  lines.push('', heading('CONVERSATIONS', color));
   lines.push(...table(
     ['', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'WORKER', 'SESSION', 'CONTEXT', 'MEMBERS', 'RUNTIME'],
     conversations.map((row, index) => [
@@ -991,7 +1111,9 @@ function renderChannelManagement(
   const connection = array(snapshot.channels)
     .find((row) => row.channelId === target.channelId && row.profileId === target.profileId) ?? {};
   const groups = channelGroups(instance, target);
-  const selectedGroupRow = state.selectedChannelItem > 0 ? state.selectedChannelItem - 1 : -1;
+  const directs = channelDirects(instance, target);
+  const items = channelManagementItems(instance, target);
+  const selected = items[state.selectedChannelItem];
   const lines = [
     `${heading(`Channel 设置 / ${instance.name} / ${channel.id}/${channel.profileId}`, color)}  Agent=${instance.config.identity.name}`,
     `配置=${statusText(channel.enabled ? 'enabled' : 'disabled', color)}  连接=${statusText(text(connection.state) ?? (channel.enabled ? 'stopped' : 'disabled'), color)}  owner=${text(connection.pid) ?? '-'}`,
@@ -1001,26 +1123,45 @@ function renderChannelManagement(
     '', heading('CHANNEL', color),
     ...table(
       ['', 'ACTION', 'VALUE', 'EFFECT'],
-      [[state.selectedChannelItem === 0 ? '>' : ' ', '启用 / 停用', channel.enabled ? 'enabled' : 'disabled', '切换目标 Instance 的 Channel owner']],
+      [
+        [selected?.kind === 'enabled' ? '>' : ' ', '启用 / 停用', channel.enabled ? 'enabled' : 'disabled', '切换目标 Instance 的 Channel owner'],
+        [selected?.kind === 'groups-subscription' ? '>' : ' ', '群聊订阅', channel.subscriptions.groups, subscriptionEffect(channel.subscriptions.groups)],
+        [selected?.kind === 'directs-subscription' ? '>' : ' ', '私聊订阅', channel.subscriptions.directs, subscriptionEffect(channel.subscriptions.directs)],
+      ],
       width,
       {
         separator: ' │ ', dividerSeparator: '─┼─', dividerFill: '─',
-        decorate: tableDecorator(color, state.selectedChannelItem === 0 ? 0 : -1, 2),
+        decorate: tableDecorator(color, ['enabled', 'groups-subscription', 'directs-subscription'].indexOf(selected?.kind ?? ''), 2),
       },
     ),
     '', heading('GROUPS', color),
     ...table(
       ['', 'GROUP', 'STATE', 'MODE', 'RESPONSIBILITY', 'RUNTIME'],
       [
-        ...groups.map((group, index) => [
-          state.selectedChannelItem === index + 1 ? '>' : ' ', group.title,
+        ...groups.map((group) => [
+          selected?.kind === 'conversation' && selected.conversation.id === group.id ? '>' : ' ', group.title,
           group.enabled ? 'enabled' : 'disabled', group.mode, group.responsibility, group.runtimeId,
         ]),
-        [state.selectedChannelItem === groups.length + 1 ? '>' : ' ', '+ 搜索并绑定群组', '-', 'shadow', '默认继承 Agent 角色', instance.config.runtime.id],
+        [selected?.kind === 'search-group' ? '>' : ' ', '+ 搜索并绑定指定群聊', '-', 'shadow', '默认继承 Agent 角色', instance.config.runtime.id],
       ],
       width,
-      semanticTable(color, selectedGroupRow, 2),
+      semanticTable(color, selected?.kind === 'conversation'
+        ? groups.findIndex((group) => group.id === selected.conversation.id)
+        : selected?.kind === 'search-group' ? groups.length : -1, 2),
     ),
+    '', heading('DIRECTS', color),
+    ...table(
+      ['', 'DIRECT', 'STATE', 'MODE', 'RESPONSIBILITY', 'RUNTIME'],
+      directs.map((direct) => [
+        selected?.kind === 'conversation' && selected.conversation.id === direct.id ? '>' : ' ', direct.title,
+        direct.enabled ? 'enabled' : 'disabled', direct.mode, direct.responsibility, direct.runtimeId,
+      ]),
+      width,
+      semanticTable(color, selected?.kind === 'conversation'
+        ? directs.findIndex((direct) => direct.id === selected.conversation.id)
+        : -1, 2),
+    ),
+    ansi('指定私聊使用稳定 openDingTalkId 登记；当前不按姓名猜测 ID。可用 conversation add 添加后在此管理。', 'dim', color),
   ];
   return lines;
 }
@@ -1184,11 +1325,42 @@ function selectedConversationId(store: Store, index: number): string | null {
 }
 
 function channelGroups(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
+  return channelConversations(instance, target).filter((conversation) => conversation.kind === 'group');
+}
+
+function channelDirects(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
+  return channelConversations(instance, target).filter((conversation) => conversation.kind === 'direct');
+}
+
+function channelConversations(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
   return instance.store.listConversations().filter((conversation) => (
-    conversation.kind === 'group'
-    && conversation.channelId === target.channelId
+    conversation.channelId === target.channelId
     && conversation.channelProfileId === target.profileId
   ));
+}
+
+type ChannelManagementItem =
+  | { kind: 'enabled' | 'groups-subscription' | 'directs-subscription' | 'search-group' }
+  | { kind: 'conversation'; conversation: Conversation };
+
+function channelManagementItems(
+  instance: ViewInstance,
+  target: Pick<ChannelTarget, 'channelId' | 'profileId'>,
+): ChannelManagementItem[] {
+  return [
+    { kind: 'enabled' },
+    { kind: 'groups-subscription' },
+    { kind: 'directs-subscription' },
+    ...channelGroups(instance, target).map((conversation) => ({ kind: 'conversation' as const, conversation })),
+    { kind: 'search-group' },
+    ...channelDirects(instance, target).map((conversation) => ({ kind: 'conversation' as const, conversation })),
+  ];
+}
+
+function subscriptionEffect(mode: ChannelSubscriptionMode): string {
+  if (mode === 'none') return '拒绝该类全部消息';
+  if (mode === 'all') return '未知会话自动以 shadow 建档';
+  return '仅准入已启用的指定会话';
 }
 
 function findChannelGroup(
@@ -1252,6 +1424,10 @@ function normalizeSelection(state: ManagementViewState, instances: ViewInstance[
   if (state.settingsInstanceName && !instances.some((instance) => instance.name === state.settingsInstanceName)) {
     state.settingsInstanceName = null;
     state.selectedSetting = 0;
+  }
+  if (state.destructiveConfirmation
+    && !instances.some((instance) => instance.name === state.destructiveConfirmation!.instanceName)) {
+    state.destructiveConfirmation = null;
   }
 }
 

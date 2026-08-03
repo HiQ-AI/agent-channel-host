@@ -9,6 +9,9 @@ channel:
   enabled: true
   profileId: default
   command: dws
+  subscriptions:
+    groups: selected
+    directs: selected
 runtime:
   id: codex
   command: codex

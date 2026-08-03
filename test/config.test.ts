@@ -10,6 +10,7 @@ test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   assert.equal(current.version, 2);
   assert.deepEqual(current.channel, {
     id: 'dingtalk', enabled: true, profileId: 'default', command: 'dws',
+    subscriptions: { groups: 'selected', directs: 'selected' },
   });
   assert.equal(current.runtime.id, 'codex');
   assert.equal(current.runtime.command, 'codex');
@@ -20,7 +21,7 @@ test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   assert.equal(current.scheduling.maxBatchMessages, 20);
 });
 
-test('既有 v2 配置缺少 channel.enabled 时保持启用', async () => {
+test('既有 v2 配置缺少 Channel 新字段时保持启用并默认 selected', async () => {
   const root = resolve('.test-config-v2-channel-default');
   const path = resolve(root, 'config.yaml');
   await rm(root, { recursive: true, force: true });
@@ -30,9 +31,11 @@ test('既有 v2 配置缺少 channel.enabled 时保持启用', async () => {
       channel: Record<string, unknown>;
     };
     delete legacy.channel.enabled;
+    delete legacy.channel.subscriptions;
     await writeFile(path, YAML.stringify(legacy), 'utf8');
     const loaded = await loadConfig('legacy-v2', path);
     assert.equal(loaded.channel.enabled, true);
+    assert.deepEqual(loaded.channel.subscriptions, { groups: 'selected', directs: 'selected' });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

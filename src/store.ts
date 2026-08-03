@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_WORKER_WARM_SECONDS, MAX_WORKER_WARM_SECONDS } from './types.js';
 import type {
@@ -374,6 +374,14 @@ export class Store {
     return Number(result.changes) === 1;
   }
 
+  setConversationTitle(id: string, title: string): boolean {
+    const value = title.trim();
+    if (!value) throw new Error('title 不能为空');
+    const result = this.db.prepare('UPDATE conversations SET title=?,policy_version=policy_version+1,updated_at=? WHERE id=?')
+      .run(value, new Date().toISOString(), id);
+    return Number(result.changes) === 1;
+  }
+
   setConversationMode(id: string, mode: ConversationMode): boolean {
     const result = this.db.prepare('UPDATE conversations SET mode=?,policy_version=policy_version+1,updated_at=? WHERE id=?')
       .run(mode, new Date().toISOString(), id);
@@ -400,6 +408,18 @@ export class Store {
     return mapConversation(this.db.prepare('SELECT * FROM conversations WHERE id=?').get(id) as Row | undefined);
   }
 
+  findConversation(
+    channelId: string,
+    channelProfileId: string,
+    kind: ConversationKind,
+    externalId: string,
+  ): Conversation | null {
+    return mapConversation(this.db.prepare(
+      `SELECT * FROM conversations
+       WHERE channel_id=? AND channel_profile_id=? AND kind=? AND external_id=?`,
+    ).get(channelId, channelProfileId, kind, externalId) as Row | undefined);
+  }
+
   findEnabledConversation(
     channelId: string,
     channelProfileId: string,
@@ -415,6 +435,28 @@ export class Store {
   listConversations(enabledOnly = false): Conversation[] {
     const sql = `SELECT * FROM conversations${enabledOnly ? ' WHERE enabled=1' : ''} ORDER BY kind,title`;
     return (this.db.prepare(sql).all() as Row[]).map((row) => mapConversation(row)!);
+  }
+
+  deleteConversation(id: string): boolean {
+    const existing = this.getConversation(id);
+    if (!existing) return false;
+    const recovery = this.path === ':memory:' ? null : this.recoveryContextFile(id);
+    const stagedRecovery = recovery && existsSync(recovery) ? `${recovery}.${process.pid}.deleting` : null;
+    if (recovery && stagedRecovery) renameSync(recovery, stagedRecovery);
+    this.db.exec('BEGIN IMMEDIATE');
+    let changes = 0;
+    try {
+      this.db.prepare('DELETE FROM host_lease WHERE lease_key=?').run(`conversation:${id}`);
+      const result = this.db.prepare('DELETE FROM conversations WHERE id=?').run(id);
+      changes = Number(result.changes);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      if (recovery && stagedRecovery && existsSync(stagedRecovery)) renameSync(stagedRecovery, recovery);
+      throw error;
+    }
+    if (stagedRecovery) rmSync(stagedRecovery, { force: true });
+    return changes === 1;
   }
 
   getConversationContext(conversationId: string): ConversationContext | null {
@@ -1324,6 +1366,7 @@ function mapAdmittedEvent(row: Row, conversation: Conversation): AdmittedEvent {
     eventId: row.event_id ? String(row.event_id) : null,
     messageId: row.message_id ? String(row.message_id) : null,
     conversationExternalId: conversation.externalId,
+    conversationTitle: conversation.title,
     kind: conversation.kind,
     senderId: row.sender_id ? String(row.sender_id) : null,
     senderName: row.sender_name ? String(row.sender_name) : null,

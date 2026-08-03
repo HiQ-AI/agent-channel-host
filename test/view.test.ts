@@ -57,8 +57,10 @@ test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完�
     assert.match(serialized, /provider-ses/);
     assert.match(serialized, /张\*\*\*三/);
     const rendered = renderStatusView([viewInstance('test', defaultConfig('test', '.', 'Agent', '角色'), store)], false, 120);
-    for (const section of ['CHANNELS', 'MESSAGES', 'CONVERSATIONS', 'RUNTIMES']) assert.match(rendered, new RegExp(section));
-    assert.match(rendered, /gpt-test/);
+    assert.match(rendered, /INSTANCES/);
+    assert.match(rendered, /MESSAGES/);
+    assert.doesNotMatch(rendered, /^CHANNELS$|^CONVERSATIONS$|^RUNTIMES$/m);
+    assert.doesNotMatch(rendered, /gpt-test/);
     assert.doesNotMatch(rendered, /open-secret-user|高度敏感|provider-session-complete-secret/);
     assert.match(JSON.stringify(store.status(true)), /高度敏感的消息正文/);
   } finally {
@@ -90,12 +92,16 @@ test('management view 明确分离总览内 INSTANCES 与全局设置', () => {
     assert.match(overview, /\[ 总览 \]\s+全局设置/);
     assert.match(overview, /management-view/);
     assert.match(overview, /second-agent/);
-    assert.match(overview, /私聊 A/);
-    assert.match(overview, /群 B/);
-    assert.match(overview, /dingtalk/);
-    assert.match(overview, /slack/);
+    assert.doesNotMatch(overview, /私聊 A|群 B|dingtalk|slack/);
 
     state.detailInstanceName = 'management-view';
+    const instanceView = renderManagementView(instances, state, detail, settings, 140);
+    assert.match(instanceView, /CHANNELS/);
+    assert.match(instanceView, /CONVERSATIONS/);
+    assert.match(instanceView, /RUNTIMES/);
+    assert.match(instanceView, /RECENT MESSAGES/);
+    assert.match(instanceView, /私聊 A/);
+
     state.detailConversationId = first.id;
     const detailView = renderManagementView(instances, state, detail, settings, 140);
     assert.match(detailView, /会话详情 \/ 私聊 A/);
@@ -138,6 +144,7 @@ test('management view 在交互终端使用语义颜色，纯文本输出不带 
   try {
     const instances = [viewInstance('colored-view', config, store)];
     const state = createManagementViewState();
+    state.detailInstanceName = 'colored-view';
     const detail = store.conversationDetail(conversation.id);
     const settings = createSettingEntries(config, store, conversation.id);
     const plain = renderManagementView(instances, state, detail, settings, 120, false, false);
@@ -199,12 +206,16 @@ test('settings 使用同一 schema 原子保存 config，并更新 conversation 
     await assert.rejects(entries.find((entry) => entry.key === 'runtime.effort')!.apply('light'), /Invalid option/);
 
     entries = createSettingEntries(config, store, conversation.id, configFile);
+    await entries.find((entry) => entry.key.endsWith(':title'))!.apply('更新后的私聊');
+    await entries.find((entry) => entry.key.endsWith(':enabled'))!.apply('disabled');
     await entries.find((entry) => entry.key.endsWith(':responsibility'))!.apply('新职责边界');
     await entries.find((entry) => entry.key.endsWith(':mode'))!.apply('reply');
     await entries.find((entry) => entry.key.endsWith(':organizationRole'))!.apply('产品经理');
     assert.equal(store.getConversation(conversation.id)?.responsibility, '新职责边界');
     assert.equal(store.getConversation(conversation.id)?.mode, 'reply');
-    assert.equal(store.getConversation(conversation.id)?.policyVersion, 3);
+    assert.equal(store.getConversation(conversation.id)?.title, '更新后的私聊');
+    assert.equal(store.getConversation(conversation.id)?.enabled, false);
+    assert.equal(store.getConversation(conversation.id)?.policyVersion, 5);
     assert.equal(store.listConversationMembers(conversation.id)[0]?.organizationRole, '产品经理');
   } finally {
     store.close();
@@ -438,7 +449,7 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，默认继�
   const state = createManagementViewState();
   state.detailInstanceName = instance.name;
   state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
-  state.selectedChannelItem = 1;
+  state.selectedChannelItem = 3;
   const searches: string[] = [];
   const actions = {
     searchGroups: async (_instance: ViewInstance, query: string) => {
@@ -472,7 +483,7 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，默认继�
     assert.deepEqual(searches, ['编辑器']);
 
     await handleManagementViewInput('\u001b[D', state, instances, () => undefined, actions);
-    state.selectedChannelItem = 1;
+    state.selectedChannelItem = 3;
     await handleManagementViewInput('\u001b[C', state, instances, () => undefined, actions);
     assert.equal(state.detailConversationId, bound[0]?.id);
     assert.equal(store.listConversations().length, 1);
@@ -530,7 +541,7 @@ test('设置、群搜索和 Instance 向导支持光标移动、Home End 及前�
 
     state.settingsInstanceName = null;
     state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
-    state.selectedChannelItem = 1;
+    state.selectedChannelItem = 3;
     const actions = { searchGroups: async () => [] };
     await handleManagementViewInput('\u001b[C', state, instances, () => undefined, actions);
     await handleManagementViewInput('编器', state, instances, () => undefined, actions);
@@ -558,6 +569,99 @@ test('设置、群搜索和 Instance 向导支持光标移动、Home End 及前�
     assert.equal(createState.creatingInstance?.cursor, 3);
   } finally {
     store.close();
+  }
+});
+
+test('Channel 页面分别配置群聊/私聊订阅并展示两类指定绑定', async () => {
+  const root = resolve('.test-view-channel-subscriptions');
+  const configFile = resolve(root, 'config.yaml');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const store = new Store(':memory:');
+  const config = defaultConfig('channel-subscriptions', '.', 'Agent', 'role');
+  const group = store.addConversation({
+    kind: 'group', externalId: 'group-binding', title: '指定群聊', responsibility: '答疑', mode: 'shadow',
+  });
+  const direct = store.addConversation({
+    kind: 'direct', externalId: 'direct-binding', title: '指定私聊', responsibility: '答疑', mode: 'shadow',
+  });
+  const instance = { ...viewInstance('channel-subscriptions', config, store), configFile };
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
+  let restarts = 0;
+  const actions = { afterSettingApplied: async () => { restarts += 1; return 'Host 已重启'; } };
+  try {
+    state.selectedChannelItem = 1;
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(config.channel.subscriptions.groups, 'all');
+    state.selectedChannelItem = 2;
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(config.channel.subscriptions.directs, 'all');
+    assert.equal(restarts, 2);
+    const loaded = await loadConfig(instance.name, configFile);
+    assert.deepEqual(loaded.channel.subscriptions, { groups: 'all', directs: 'all' });
+    const rendered = renderManagementView([instance], state, null, [], 120);
+    assert.match(rendered, /群聊订阅\s+│ all/);
+    assert.match(rendered, /私聊订阅\s+│ all/);
+    assert.match(rendered, /GROUPS[\s\S]*指定群聊/);
+    assert.match(rendered, /DIRECTS[\s\S]*指定私聊/);
+    state.selectedChannelItem = 3;
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(state.detailConversationId, group.id);
+    state.detailConversationId = null;
+    state.selectedChannelItem = 5;
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(state.detailConversationId, direct.id);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Instance 与 Conversation 删除均需二次确认，取消无副作用并由 action 执行生命周期', async () => {
+  const firstStore = new Store(':memory:');
+  const secondStore = new Store(':memory:');
+  const first = viewInstance('delete-instance', defaultConfig('delete-instance', '.', 'Agent', 'role'), firstStore);
+  const second = viewInstance('keep-instance', defaultConfig('keep-instance', '.', 'Agent', 'role'), secondStore);
+  const conversation = firstStore.addConversation({
+    kind: 'group', externalId: 'delete-conversation', title: '待删除会话', responsibility: '答疑', mode: 'shadow',
+  });
+  const instances = [first, second];
+  const state = createManagementViewState();
+  state.detailInstanceName = first.name;
+  state.detailConversationId = conversation.id;
+  let deletedConversation = '';
+  let deletedInstance = '';
+  const actions = {
+    deleteConversation: async (instance: ViewInstance, id: string) => {
+      deletedConversation = `${instance.name}/${id}`;
+      instance.store.deleteConversation(id);
+    },
+    deleteInstance: async (instance: ViewInstance) => { deletedInstance = instance.name; },
+  };
+  try {
+    await handleManagementViewInput('d', state, instances, () => undefined, actions);
+    assert.equal(state.destructiveConfirmation?.kind, 'conversation');
+    assert.match(renderManagementView(instances, state, firstStore.conversationDetail(conversation.id), [], 120), /删除确认/);
+    await handleManagementViewInput('\u001b', state, instances, () => undefined, actions);
+    assert.ok(firstStore.getConversation(conversation.id));
+    await handleManagementViewInput('d', state, instances, () => undefined, actions);
+    await handleManagementViewInput('\r', state, instances, () => undefined, actions);
+    assert.equal(deletedConversation, `${first.name}/${conversation.id}`);
+    assert.equal(firstStore.getConversation(conversation.id), null);
+    assert.equal(state.detailConversationId, null);
+
+    state.detailInstanceName = null;
+    state.selectedInstance = 0;
+    await handleManagementViewInput('d', state, instances, () => undefined, actions);
+    assert.equal(state.destructiveConfirmation?.kind, 'instance');
+    await handleManagementViewInput('d', state, instances, () => undefined, actions);
+    assert.equal(deletedInstance, first.name);
+    assert.deepEqual(instances.map((instance) => instance.name), [second.name]);
+  } finally {
+    firstStore.close();
+    secondStore.close();
   }
 });
 
