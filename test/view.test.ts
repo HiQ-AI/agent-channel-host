@@ -7,7 +7,8 @@ import { anonymousConversationTitle } from '../src/conversation-title.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import {
-  createManagementViewState, createSettingEntries, handleManagementViewInput, renderManagementView, renderStatusView,
+  createManagementViewState, createSettingEntries, handleManagementViewInput, renderManagementView,
+  renderPendingOperation, renderStatusView,
   shouldStartHostForView, shouldUseColor, terminalDisplayWidth, VIEW_ALTERNATE_SCREEN_ENTER, VIEW_ALTERNATE_SCREEN_EXIT,
   type ViewInstance,
 } from '../src/view.js';
@@ -747,6 +748,49 @@ test('Channel 页面分别选择群聊/私聊订阅与默认模式，并展示�
     assert.equal(state.destructiveConfirmation, null);
   } finally {
     store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('耗时设置在等待前进入进度态，持续帧不读取 Store，完成后自动清理', async () => {
+  const root = resolve('.test-view-pending-operation');
+  const configFile = resolve(root, 'config.yaml');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const store = new Store(':memory:');
+  const config = defaultConfig('pending-operation', '.', 'Agent', 'role');
+  const instance = { ...viewInstance('pending-operation', config, store), configFile };
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
+  state.selectedChannelItem = 4;
+  let release!: () => void;
+  const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+  let lifecycleCalls = 0;
+  try {
+    const handling = handleManagementViewInput('\r', state, [instance], () => undefined, {
+      afterSettingApplied: async () => {
+        lifecycleCalls += 1;
+        await gate;
+        return 'Host 已重启';
+      },
+    });
+    assert.equal(state.pendingOperation?.label, '应用 私聊默认模式');
+    const startedAt = state.pendingOperation!.startedAt;
+    store.close();
+    const first = renderPendingOperation('稳定页面\n不会读取已关闭 Store', state.pendingOperation!, 80, 8, 0, false, startedAt + 500);
+    const second = renderPendingOperation('稳定页面\n不会读取已关闭 Store', state.pendingOperation!, 80, 8, 1, false, startedAt + 700);
+    assert.match(first, /⠋ 处理中：应用 私聊默认模式  已用时 0\.5s/);
+    assert.match(first, /输入已暂时锁定，完成后自动刷新/);
+    assert.match(second, /⠙ 处理中/);
+    release();
+    await handling;
+    assert.equal(state.pendingOperation, null);
+    assert.equal(state.notice, 'Host 已重启');
+    assert.equal(lifecycleCalls, 1);
+    assert.equal(config.channel.defaultModes.directs, 'reply');
+  } finally {
+    try { store.close(); } catch {}
     await rm(root, { recursive: true, force: true });
   }
 });

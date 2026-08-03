@@ -45,6 +45,7 @@ export interface ManagementViewState {
   groupSearch: GroupSearchDraft | null;
   destructiveConfirmation: DestructiveConfirmation | null;
   exitConfirmation: boolean;
+  pendingOperation: { label: string; startedAt: number } | null;
   notice: string | null;
 }
 
@@ -134,6 +135,7 @@ export function createManagementViewState(): ManagementViewState {
     groupSearch: null,
     destructiveConfirmation: null,
     exitConfirmation: false,
+    pendingOperation: null,
     notice: null,
   };
 }
@@ -152,6 +154,29 @@ export function shouldUseColor(isTTY: boolean, env: NodeJS.ProcessEnv = process.
   return isTTY && env.NO_COLOR === undefined && env.TERM !== 'dumb';
 }
 
+export function renderPendingOperation(
+  lastStableFrame: string,
+  operation: { label: string; startedAt: number },
+  width: number,
+  height: number,
+  frame: number,
+  color = false,
+  now = Date.now(),
+): string {
+  const spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][frame % 10]!;
+  const elapsedSeconds = Math.max(0, (now - operation.startedAt) / 1_000).toFixed(1);
+  const safeWidth = Math.max(1, width);
+  const baseLines = lastStableFrame.split('\n').slice(0, Math.max(1, height - 3));
+  const status = truncate(`${spinner} 处理中：${operation.label}  已用时 ${elapsedSeconds}s`, safeWidth);
+  const hint = truncate('操作在后台串行执行；为避免重复提交，输入已暂时锁定，完成后自动刷新。', safeWidth);
+  return [
+    ...baseLines,
+    ansi('─'.repeat(Math.min(safeWidth, 120)), 'cyan', color),
+    ansi(status, 'yellow-bold', color),
+    ansi(hint, 'dim', color),
+  ].join('\n');
+}
+
 export async function runView(
   instances: ViewInstance[],
   options: ViewOptions,
@@ -167,7 +192,10 @@ export async function runView(
   let rawMode = false;
   let alternateScreen = false;
   let timer: NodeJS.Timeout | null = null;
+  let progressTimer: NodeJS.Timeout | null = null;
   let inputBusy = false;
+  let progressFrame = 0;
+  let lastStableFrame = '';
   let stopRequested = false;
   let renderFailure: Error | null = null;
   let resolveStop!: () => void;
@@ -209,7 +237,22 @@ export async function runView(
       color,
     );
   };
-  const paint = () => process.stdout.write(`\u001b[H\u001b[2J${render()}\n`);
+  const paint = () => {
+    lastStableFrame = render();
+    process.stdout.write(`\u001b[H\u001b[2J${lastStableFrame}\n`);
+  };
+  const paintProgress = () => {
+    if (!state.pendingOperation) return;
+    process.stdout.write(`\u001b[H\u001b[2J${renderPendingOperation(
+      lastStableFrame,
+      state.pendingOperation,
+      process.stdout.columns ?? 120,
+      process.stdout.rows ?? 30,
+      progressFrame,
+      color,
+    )}\n`);
+    progressFrame += 1;
+  };
   const repaint = () => {
     if (stopRequested || inputBusy) return;
     try {
@@ -222,7 +265,12 @@ export async function runView(
   const onData = (chunk: Buffer) => {
     if (inputBusy) return;
     inputBusy = true;
-    void handleManagementViewInput(chunk.toString('utf8'), state, instances, requestStop, actions)
+    const handling = handleManagementViewInput(chunk.toString('utf8'), state, instances, requestStop, actions);
+    if (state.pendingOperation) {
+      progressFrame = 0;
+      paintProgress();
+    }
+    void handling
       .catch((error) => { state.notice = (error as Error).message; })
       .finally(() => {
         inputBusy = false;
@@ -241,10 +289,14 @@ export async function runView(
     alternateScreen = true;
     paint();
     timer = setInterval(repaint, options.intervalSeconds * 1_000);
+    progressTimer = setInterval(() => {
+      if (inputBusy && state.pendingOperation) paintProgress();
+    }, 120);
     await stopped;
     if (renderFailure) throw renderFailure;
   } finally {
     if (timer) clearInterval(timer);
+    if (progressTimer) clearInterval(progressTimer);
     process.stdin.removeListener('data', onData);
     process.removeListener('SIGINT', onSignal);
     process.removeListener('SIGTERM', onSignal);
@@ -290,7 +342,7 @@ export async function handleManagementViewInput(
     if (!target) throw new Error('删除目标已不存在');
     if (confirmation.kind === 'instance') {
       if (!actions.deleteInstance) throw new Error('当前 View 入口未提供 Instance 删除能力');
-      await actions.deleteInstance(target);
+      await withPendingOperation(state, `删除 Instance ${confirmation.label}`, () => actions.deleteInstance!(target));
       const index = instances.indexOf(target);
       if (index >= 0) instances.splice(index, 1);
       state.detailInstanceName = null;
@@ -303,7 +355,11 @@ export async function handleManagementViewInput(
     } else {
       if (!confirmation.conversationId) throw new Error('删除目标缺少 conversation ID');
       if (!actions.deleteConversation) throw new Error('当前 View 入口未提供 Conversation 删除能力');
-      await actions.deleteConversation(target, confirmation.conversationId);
+      await withPendingOperation(
+        state,
+        `删除 Conversation ${confirmation.label}`,
+        () => actions.deleteConversation!(target, confirmation.conversationId!),
+      );
       state.detailConversationId = null;
       state.settingsInstanceName = null;
       const remaining = target.store.listConversations();
@@ -363,8 +419,10 @@ export async function handleManagementViewInput(
       )
         .find((item) => item.key === state.editing!.key);
       if (!entry) throw new Error('设置项已变化，请重新选择');
-      await entry.apply(state.editing.value);
-      const actionNotice = await actions.afterSettingApplied?.(settingsInstance, entry);
+      const editingValue = state.editing.value;
+      const actionNotice = await applySettingWithProgress(
+        state, settingsInstance, entry, editingValue, actions,
+      );
       state.notice = actionNotice ?? `${entry.label} 已保存`;
       state.editing = null;
       return;
@@ -489,15 +547,14 @@ export async function handleManagementViewInput(
         )[state.selectedSetting];
         if (!entry) return;
         if (entry.input === 'toggle') {
-          await entry.apply(entry.value === 'enabled' ? 'disabled' : 'enabled');
-          const actionNotice = await actions.afterSettingApplied?.(settingsInstance, entry);
-          state.notice = actionNotice ?? `${entry.label} 已切换为 ${entry.value === 'enabled' ? 'disabled' : 'enabled'}`;
+          const next = entry.value === 'enabled' ? 'disabled' : 'enabled';
+          const actionNotice = await applySettingWithProgress(state, settingsInstance, entry, next, actions);
+          state.notice = actionNotice ?? `${entry.label} 已切换为 ${next}`;
           return;
         }
         if (entry.input === 'select') {
           const next = nextOption(entry);
-          await entry.apply(next);
-          const actionNotice = await actions.afterSettingApplied?.(settingsInstance, entry);
+          const actionNotice = await applySettingWithProgress(state, settingsInstance, entry, next, actions);
           state.notice = actionNotice ?? `${entry.label} 已选择 ${next}`;
           return;
         }
@@ -549,9 +606,9 @@ async function activateChannelItem(
   if (!item) return;
   if (item.kind === 'enabled') {
     const entry = createChannelSettingEntry(instance.config, instance.store, target, instance.configFile);
-    await entry.apply(entry.value === 'enabled' ? 'disabled' : 'enabled');
-    const actionNotice = await actions.afterSettingApplied?.(instance, entry);
-    state.notice = actionNotice ?? `${entry.label} 已切换为 ${entry.value === 'enabled' ? 'disabled' : 'enabled'}`;
+    const next = entry.value === 'enabled' ? 'disabled' : 'enabled';
+    const actionNotice = await applySettingWithProgress(state, instance, entry, next, actions);
+    state.notice = actionNotice ?? `${entry.label} 已切换为 ${next}`;
     return;
   }
   if (item.kind === 'groups-subscription' || item.kind === 'directs-subscription') {
@@ -559,8 +616,7 @@ async function activateChannelItem(
     const entry = createChannelSubscriptionSettingEntry(instance.config, instance.store, target, kind, instance.configFile);
     const current = CHANNEL_SUBSCRIPTION_MODES.indexOf(entry.value as ChannelSubscriptionMode);
     const next = CHANNEL_SUBSCRIPTION_MODES[(current + 1) % CHANNEL_SUBSCRIPTION_MODES.length]!;
-    await entry.apply(next);
-    const actionNotice = await actions.afterSettingApplied?.(instance, entry);
+    const actionNotice = await applySettingWithProgress(state, instance, entry, next, actions);
     state.notice = actionNotice ?? `${entry.label} 已切换为 ${next}`;
     return;
   }
@@ -568,8 +624,7 @@ async function activateChannelItem(
     const kind = item.kind === 'groups-default-mode' ? 'groups' : 'directs';
     const entry = createChannelDefaultModeSettingEntry(instance.config, instance.store, target, kind, instance.configFile);
     const next = nextOption(entry);
-    await entry.apply(next);
-    const actionNotice = await actions.afterSettingApplied?.(instance, entry);
+    const actionNotice = await applySettingWithProgress(state, instance, entry, next, actions);
     state.notice = actionNotice ?? `${entry.label} 已选择 ${next}`;
     return;
   }
@@ -621,7 +676,12 @@ async function handleGroupSearchInput(
     const query = draft.query.trim();
     if (!query) throw new Error('群搜索关键词不能为空');
     const seen = new Set<string>();
-    draft.results = (await actions.searchGroups(instance, query)).filter((candidate) => {
+    const candidates = await withPendingOperation(
+      state,
+      `搜索群组“${query}”`,
+      () => actions.searchGroups!(instance, query),
+    );
+    draft.results = candidates.filter((candidate) => {
       if (!candidate.title.trim() || !candidate.externalId.trim() || seen.has(candidate.externalId)) return false;
       seen.add(candidate.externalId);
       return true;
@@ -715,7 +775,11 @@ async function handleInstanceCreationInput(
 
   if (!actions.createInstance) throw new Error('当前 View 入口未提供 instance 创建能力');
   const input = { ...draft.values, role: value } as NewInstanceInput;
-  const created = await actions.createInstance(input);
+  const created = await withPendingOperation(state, `创建 Instance ${input.instance}`, async () => {
+    const next = await actions.createInstance!(input);
+    await actions.startInstance?.(next);
+    return next;
+  });
   state.creatingInstance = null;
   instances.push(created);
   state.selectedInstance = instances.length - 1;
@@ -727,7 +791,6 @@ async function handleInstanceCreationInput(
   state.instanceFocus = 'channels';
   state.selectedChannel = 0;
   state.selectedChannelItem = 0;
-  await actions.startInstance?.(created);
   state.notice = `Instance ${created.name} 已创建；Channel 默认 disabled，可在当前页确认后启用`;
 }
 
@@ -964,6 +1027,33 @@ function selectSetting(entry: SettingEntry, options: readonly string[]): Setting
 
 function restartSetting(entry: SettingEntry): SettingEntry {
   return { ...entry, restartHost: true };
+}
+
+async function withPendingOperation<T>(
+  state: ManagementViewState,
+  label: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (state.pendingOperation) throw new Error(`已有操作正在处理：${state.pendingOperation.label}`);
+  state.pendingOperation = { label, startedAt: Date.now() };
+  try {
+    return await operation();
+  } finally {
+    state.pendingOperation = null;
+  }
+}
+
+function applySettingWithProgress(
+  state: ManagementViewState,
+  instance: ViewInstance,
+  entry: SettingEntry,
+  value: string,
+  actions: ManagementViewActions,
+): Promise<string | void> {
+  return withPendingOperation(state, `应用 ${entry.label}`, async () => {
+    await entry.apply(value);
+    return actions.afterSettingApplied?.(instance, entry);
+  });
 }
 
 function nextOption(entry: SettingEntry): string {
