@@ -5,7 +5,7 @@ import {
 } from './config.js';
 import { configPath, discoverInstances, statePath } from './paths.js';
 import { Store } from './store.js';
-import { dwsDoctor, resolveExactGroup } from './dws.js';
+import { dwsDoctor, resolveExactGroup, searchDwsGroups } from './dws.js';
 import { CodexCommandSession, verifyCodexCommand } from './codex-command.js';
 import { runHost } from './host.js';
 import { installUserService, removeUserService, windowsServicePlan } from './service.js';
@@ -312,6 +312,8 @@ program.command('view')
           if (!options.once) startManagedHost(instance);
         },
         afterSettingApplied: restartManagedHost,
+        searchGroups: async (instance, query) => (await searchDwsGroups(instance.config, query))
+          .map((group) => ({ title: group.title, externalId: group.openConversationId })),
       });
     } finally {
       const activeHosts = [...startedHosts.values()];

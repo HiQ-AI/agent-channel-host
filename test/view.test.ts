@@ -7,7 +7,8 @@ import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import {
   createManagementViewState, createSettingEntries, handleManagementViewInput, renderManagementView, renderStatusView,
-  shouldStartHostForView, shouldUseColor, type ViewInstance,
+  shouldStartHostForView, shouldUseColor, terminalDisplayWidth, VIEW_ALTERNATE_SCREEN_ENTER, VIEW_ALTERNATE_SCREEN_EXIT,
+  type ViewInstance,
 } from '../src/view.js';
 
 test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完整 provider session ID', () => {
@@ -224,7 +225,7 @@ test('view 颜色遵循 TTY、NO_COLOR 与 dumb terminal', () => {
   assert.equal(shouldUseColor(true, { TERM: 'dumb' }), false);
 });
 
-test('management view 按键可从总览进入详情并切换到 instance 设置编辑', async () => {
+test('management view 使用右键下钻、左键返回并可进入 instance 设置编辑', async () => {
   const store = new Store(':memory:');
   const config = defaultConfig('view-input', '.', 'Agent', '角色');
   const conversation = store.addConversation({
@@ -234,21 +235,98 @@ test('management view 按键可从总览进入详情并切换到 instance 设置
   const instances = [viewInstance('view-input', config, store)];
   let stopped = false;
   try {
-    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
     assert.equal(state.detailInstanceName, 'view-input');
-    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    assert.equal(state.instanceFocus, 'channels');
+    await handleManagementViewInput('\u001b[B', state, instances, () => { stopped = true; });
+    assert.equal(state.instanceFocus, 'conversations');
+    await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
     assert.equal(state.detailConversationId, conversation.id);
-    await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
+    await handleManagementViewInput('\u001b[D', state, instances, () => { stopped = true; });
     assert.equal(state.detailConversationId, null);
     await handleManagementViewInput('s', state, instances, () => { stopped = true; });
     assert.equal(state.tab, 'overview');
     assert.equal(state.settingsInstanceName, 'view-input');
-    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
     assert.equal(state.editing?.key, 'identity.name');
     await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
     assert.equal(state.editing, null);
     await handleManagementViewInput('q', state, instances, () => { stopped = true; });
+    assert.equal(stopped, false);
+    assert.equal(state.exitConfirmation, true);
+    await handleManagementViewInput('q', state, instances, () => { stopped = true; });
     assert.equal(stopped, true);
+  } finally {
+    store.close();
+  }
+});
+
+test('退出确认说明 Host 影响，取消后保留编辑现场且 Ctrl+C/Enter 二次确认', async () => {
+  const firstStore = new Store(':memory:');
+  const secondStore = new Store(':memory:');
+  const first = viewInstance('exit-owned', defaultConfig('exit-owned', '.', '小小鹏', '编辑器答疑'), firstStore);
+  const second = viewInstance('exit-attached', defaultConfig('exit-attached', '.', '翠丝', '方案评审'), secondStore);
+  first.hostOwnership = 'view';
+  const instances = [first, second];
+  const state = createManagementViewState();
+  state.detailInstanceName = first.name;
+  state.settingsInstanceName = first.name;
+  let stopped = false;
+  try {
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    assert.equal(state.editing?.value, '小小鹏');
+    await handleManagementViewInput('\u0003', state, instances, () => { stopped = true; });
+    assert.equal(stopped, false);
+    assert.equal(state.exitConfirmation, true);
+    assert.equal(state.editing?.value, '小小鹏');
+    const confirmation = renderManagementView(
+      instances, state, null, createSettingEntries(first.config, first.store, null), 96,
+    );
+    assert.match(confirmation, /退出确认/);
+    assert.match(confirmation, /停止 1 个由当前 View 启动的 Host/);
+    assert.match(confirmation, /attached\/readonly Host 保持运行/);
+
+    await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
+    assert.equal(state.exitConfirmation, false);
+    assert.equal(state.editing?.value, '小小鹏');
+    await handleManagementViewInput('q', state, instances, () => { stopped = true; });
+    assert.equal(state.editing?.value, '小小鹏q');
+    assert.equal(state.exitConfirmation, false);
+    await handleManagementViewInput('\u0003', state, instances, () => { stopped = true; });
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    assert.equal(stopped, true);
+  } finally {
+    firstStore.close();
+    secondStore.close();
+  }
+});
+
+test('Instance 设置表按终端显示宽度对齐中文、全角、emoji 与组合字符', () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('display-width', '.', '小小鹏🙂', '回答编辑器需求、方案以及 bug 排查');
+  config.identity.signature = 'Ａgent e\u0301';
+  const instance = viewInstance('display-width', config, store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.settingsInstanceName = instance.name;
+  try {
+    assert.equal(terminalDisplayWidth('Agent 名称'), 10);
+    assert.equal(terminalDisplayWidth('Ａ'), 2);
+    assert.equal(terminalDisplayWidth('🙂'), 2);
+    assert.equal(terminalDisplayWidth('e\u0301'), 1);
+    const rendered = renderManagementView(
+      [instance], state, null, createSettingEntries(config, store, null), 96,
+    );
+    const lines = rendered.split('\n');
+    const headingIndex = lines.findIndex((line) => line === 'INSTANCE');
+    assert.notEqual(headingIndex, -1);
+    const rows = lines.slice(headingIndex + 1).filter((line) => line.includes('│'));
+    assert.ok(rows.length > 2);
+    const expected = rows[0]!.split('│').slice(0, -1).map(terminalDisplayWidth);
+    for (const row of rows.slice(1)) {
+      assert.deepEqual(row.split('│').slice(0, -1).map(terminalDisplayWidth), expected);
+      assert.ok(terminalDisplayWidth(row) <= 94);
+    }
   } finally {
     store.close();
   }
@@ -283,7 +361,7 @@ test('INSTANCES 在上层 view 中显式选择 instance 后编辑对应配置', 
   }
 });
 
-test('instance Channel toggle 原子持久化并通知 Host 生命周期管理器', async () => {
+test('Channel 独立页面第一项可直接 toggle，并原子持久化及通知 Host 生命周期管理器', async () => {
   const root = resolve('.test-view-channel-toggle');
   const configFile = resolve(root, 'config.yaml');
   await rm(root, { recursive: true, force: true });
@@ -295,18 +373,20 @@ test('instance Channel toggle 原子持久化并通知 Host 生命周期管理�
   const state = createManagementViewState();
   state.tab = 'overview';
   state.detailInstanceName = instance.name;
-  state.settingsInstanceName = instance.name;
-  const entries = createSettingEntries(config, store, null, configFile);
-  state.selectedSetting = entries.findIndex((entry) => entry.key === 'channel:dingtalk:default:enabled');
+  state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
+  state.selectedChannelItem = 0;
   let appliedKey = '';
   try {
-    await handleManagementViewInput('\r', state, instances, () => undefined, {
+    await handleManagementViewInput('\u001b[C', state, instances, () => undefined, {
       afterSettingApplied: async (_target, entry) => { appliedKey = entry.key; return '目标 Host 已重启'; },
     });
     assert.equal(config.channel.enabled, false);
     assert.equal((await loadConfig('toggle-channel', configFile)).channel.enabled, false);
     assert.equal(appliedKey, 'channel:dingtalk:default:enabled');
     assert.equal(state.notice, '目标 Host 已重启');
+    const rendered = renderManagementView(instances, state, null, [], 120);
+    assert.match(rendered, /Channel 设置 \/ toggle-channel \/ dingtalk\/default/);
+    assert.match(rendered, />\s+│ 启用 \/ 停用\s+│ disabled/);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -341,12 +421,143 @@ test('TUI 可在 INSTANCES 中通过受校验向导新增并启动 instance', as
     assert.equal(instances.length, 1);
     assert.equal(instances[0]?.name, 'new-agent');
     assert.equal(instances[0]?.config.channel.enabled, false);
-    assert.equal(state.settingsInstanceName, 'new-agent');
+    assert.deepEqual(state.detailChannel, { instanceName: 'new-agent', channelId: 'dingtalk', profileId: 'default' });
     assert.equal(started, 'new-agent');
     assert.equal(createdInputs[0]?.name, 'DingTalk Agent');
     assert.match(createdInputs[0]?.role ?? '', /职责范围/);
   } finally {
     for (const store of createdStores) store.close();
+  }
+});
+
+test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，默认继承角色且重复选择不新增', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('group-search', '.', '小小鹏', '回答编辑器方案与 bug 排查');
+  const instance = viewInstance('group-search', config, store);
+  const instances = [instance];
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
+  state.selectedChannelItem = 1;
+  const searches: string[] = [];
+  const actions = {
+    searchGroups: async (_instance: ViewInstance, query: string) => {
+      searches.push(query);
+      return [
+        { title: '广场＆编辑器迭代中...', externalId: 'synthetic-open-conversation-id' },
+        { title: '重复候选', externalId: 'synthetic-open-conversation-id' },
+        { title: '', externalId: 'invalid' },
+      ];
+    },
+  };
+  try {
+    await handleManagementViewInput('\u001b[C', state, instances, () => undefined, actions);
+    assert.equal(state.groupSearch?.phase, 'query');
+    await handleManagementViewInput('编辑器', state, instances, () => undefined, actions);
+    await handleManagementViewInput('\r', state, instances, () => undefined, actions);
+    assert.equal(state.groupSearch?.phase, 'results');
+    assert.equal(state.groupSearch?.results.length, 1);
+    const searchView = renderManagementView(instances, state, null, [], 120);
+    assert.match(searchView, /广场＆编辑器迭代中/);
+    assert.doesNotMatch(searchView, /synthetic-open-conversation-id/);
+    await handleManagementViewInput('\u001b[C', state, instances, () => undefined, actions);
+    const bound = store.listConversations();
+    assert.equal(bound.length, 1);
+    assert.equal(bound[0]?.kind, 'group');
+    assert.equal(bound[0]?.responsibility, config.identity.role);
+    assert.equal(bound[0]?.mode, 'shadow');
+    assert.equal(bound[0]?.channelId, 'dingtalk');
+    assert.equal(bound[0]?.runtimeId, 'codex');
+    assert.equal(state.detailConversationId, bound[0]?.id);
+    assert.deepEqual(searches, ['编辑器']);
+
+    await handleManagementViewInput('\u001b[D', state, instances, () => undefined, actions);
+    state.selectedChannelItem = 1;
+    await handleManagementViewInput('\u001b[C', state, instances, () => undefined, actions);
+    assert.equal(state.detailConversationId, bound[0]?.id);
+    assert.equal(store.listConversations().length, 1);
+  } finally {
+    store.close();
+  }
+});
+
+test('Tab 只切顶层，左右键负责层级导航，alternate screen 序列成对', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('navigation', '.', 'Agent', '角色');
+  const state = createManagementViewState();
+  const instances = [viewInstance('navigation', config, store)];
+  try {
+    await handleManagementViewInput('\u001b[C', state, instances, () => undefined);
+    assert.equal(state.detailInstanceName, 'navigation');
+    assert.equal(state.tab, 'overview');
+    await handleManagementViewInput('\t', state, instances, () => undefined);
+    assert.equal(state.tab, 'overview');
+    await handleManagementViewInput('\u001b[D', state, instances, () => undefined);
+    assert.equal(state.detailInstanceName, null);
+    await handleManagementViewInput('\t', state, instances, () => undefined);
+    assert.equal(state.tab, 'settings');
+    await handleManagementViewInput('\u001b[D', state, instances, () => undefined);
+    assert.equal(state.tab, 'overview');
+    assert.equal(VIEW_ALTERNATE_SCREEN_ENTER, '\u001b[?1049h\u001b[?25l');
+    assert.equal(VIEW_ALTERNATE_SCREEN_EXIT, '\u001b[?25h\u001b[?1049l');
+  } finally {
+    store.close();
+  }
+});
+
+test('设置、群搜索和 Instance 向导支持光标移动、Home End 及前后删除', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('cursor-edit', '.', 'Agent', '角色');
+  const instance = viewInstance('cursor-edit', config, store);
+  const instances = [instance];
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.settingsInstanceName = instance.name;
+  try {
+    await handleManagementViewInput('\r', state, instances, () => undefined);
+    await handleManagementViewInput('\u001b[D', state, instances, () => undefined);
+    await handleManagementViewInput('\u001b[D', state, instances, () => undefined);
+    await handleManagementViewInput('X', state, instances, () => undefined);
+    assert.equal(state.editing?.value, 'AgeXnt');
+    assert.equal(state.editing?.cursor, 4);
+    await handleManagementViewInput('\u001b[H', state, instances, () => undefined);
+    await handleManagementViewInput('\u001b[3~', state, instances, () => undefined);
+    await handleManagementViewInput('\u001b[F', state, instances, () => undefined);
+    await handleManagementViewInput('\b', state, instances, () => undefined);
+    assert.equal(state.editing?.value, 'geXn');
+    assert.match(renderManagementView(instances, state, null, createSettingEntries(config, store, null), 120), /geXn█/);
+    await handleManagementViewInput('\u001b', state, instances, () => undefined);
+
+    state.settingsInstanceName = null;
+    state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
+    state.selectedChannelItem = 1;
+    const actions = { searchGroups: async () => [] };
+    await handleManagementViewInput('\u001b[C', state, instances, () => undefined, actions);
+    await handleManagementViewInput('编器', state, instances, () => undefined, actions);
+    await handleManagementViewInput('\u001b[D', state, instances, () => undefined, actions);
+    await handleManagementViewInput('辑', state, instances, () => undefined, actions);
+    assert.equal(state.groupSearch?.query, '编辑器');
+    assert.equal(state.groupSearch?.cursor, 2);
+    await handleManagementViewInput('\u001b[H', state, instances, () => undefined, actions);
+    await handleManagementViewInput('\u001b[C', state, instances, () => undefined, actions);
+    await handleManagementViewInput('\u001b[3~', state, instances, () => undefined, actions);
+    await handleManagementViewInput('辑', state, instances, () => undefined, actions);
+    assert.equal(state.groupSearch?.query, '编辑器');
+
+    const createState = createManagementViewState();
+    await handleManagementViewInput('a', createState, [], () => undefined, {
+      createInstance: async () => { throw new Error('本用例不提交向导'); },
+    });
+    await handleManagementViewInput('ew', createState, [], () => undefined);
+    await handleManagementViewInput('\u001b[H', createState, [], () => undefined);
+    await handleManagementViewInput('n', createState, [], () => undefined);
+    await handleManagementViewInput('\u001b[F', createState, [], () => undefined);
+    await handleManagementViewInput('\b', createState, [], () => undefined);
+    await handleManagementViewInput('w', createState, [], () => undefined);
+    assert.equal(createState.creatingInstance?.value, 'new');
+    assert.equal(createState.creatingInstance?.cursor, 3);
+  } finally {
+    store.close();
   }
 });
 

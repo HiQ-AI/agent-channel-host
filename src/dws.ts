@@ -19,6 +19,11 @@ export interface RecentGroupHistory {
   prompt: string;
 }
 
+export interface DwsGroupSearchResult {
+  title: string;
+  openConversationId: string;
+}
+
 export async function runDwsJson(config: HostConfig, args: string[], timeoutMs = 30_000): Promise<unknown> {
   const fullArgs = [...args, '--format', 'json', ...profileArgs(config)];
   const command = await resolveCommand(config.channel.command);
@@ -36,18 +41,47 @@ export async function runDwsJson(config: HostConfig, args: string[], timeoutMs =
   }
 }
 
-export async function resolveExactGroup(config: HostConfig, title: string): Promise<{ title: string; openConversationId: string }> {
-  const result = await runDwsJson(config, ['chat', 'search', '--query', title]) as Record<string, unknown>;
-  const resultBody = result.result as Record<string, unknown> | undefined;
+export async function searchDwsGroups(
+  config: HostConfig,
+  query: string,
+  runner: typeof runDwsJson = runDwsJson,
+): Promise<DwsGroupSearchResult[]> {
+  const keyword = query.trim();
+  if (!keyword) throw new Error('群搜索关键词不能为空');
+  return parseDwsGroupSearch(await runner(config, ['chat', 'search', '--query', keyword]));
+}
+
+export function parseDwsGroupSearch(value: unknown): DwsGroupSearchResult[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS 群搜索返回结构无效');
+  const body = value as Record<string, unknown>;
+  if (body.success === false) {
+    throw new Error(`DWS 群搜索失败：${text(body.errorMsg) ?? text(body.errorCode) ?? 'unknown'}`);
+  }
+  const result = body.result;
+  const resultBody = result && typeof result === 'object' && !Array.isArray(result)
+    ? result as Record<string, unknown>
+    : null;
   const groups = Array.isArray(resultBody?.groups) ? resultBody.groups : [];
-  const exact = groups.filter((item) => {
+  const seen = new Set<string>();
+  const projected: DwsGroupSearchResult[] = [];
+  for (const item of groups) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const group = item as Record<string, unknown>;
-    return group.title === title && typeof group.openConversationId === 'string';
-  }) as Array<Record<string, unknown>>;
+    const title = text(group.title)?.trim();
+    const openConversationId = text(group.openConversationId)?.trim();
+    if (!title || !openConversationId || seen.has(openConversationId)) continue;
+    seen.add(openConversationId);
+    projected.push({ title, openConversationId });
+  }
+  return projected;
+}
+
+export async function resolveExactGroup(config: HostConfig, title: string): Promise<{ title: string; openConversationId: string }> {
+  const exact = (await searchDwsGroups(config, title)).filter((group) => group.title === title);
   if (exact.length !== 1) {
     throw new Error(`群名“${title}”精确匹配数量为 ${exact.length}，拒绝猜测 ID`);
   }
-  return { title, openConversationId: String(exact[0]!.openConversationId) };
+  return exact[0]!;
 }
 
 export async function fetchRecentGroupHistory(
