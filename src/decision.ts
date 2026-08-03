@@ -1,13 +1,14 @@
 import type { ConversationContextUpdate, Decision } from './types.js';
 
 export interface TurnEvidence {
+  spawnedSubagentCallIds: string[];
   spawnedSubagentThreadIds: string[];
   waitedForSubagent: boolean;
   mainWorkItems: string[];
 }
 
 export function emptyTurnEvidence(): TurnEvidence {
-  return { spawnedSubagentThreadIds: [], waitedForSubagent: false, mainWorkItems: [] };
+  return { spawnedSubagentCallIds: [], spawnedSubagentThreadIds: [], waitedForSubagent: false, mainWorkItems: [] };
 }
 
 export function validateDecision(value: Decision, signature: string, evidence = emptyTurnEvidence()): void {
@@ -29,12 +30,15 @@ export function validateDecision(value: Decision, signature: string, evidence = 
     throw new Error(`主会话禁止直接实施：${evidence.mainWorkItems.join(',')}`);
   }
   if (value.workType === 'implementation') {
-    if (value.delegation !== 'started' || evidence.spawnedSubagentThreadIds.length === 0) {
+    const actuallyDelegated = evidence.spawnedSubagentCallIds.length > 0 || evidence.spawnedSubagentThreadIds.length > 0;
+    if (value.delegation !== 'started' || !actuallyDelegated) {
       throw new Error('实施类决策必须真实派发后台 subagent');
     }
     if (value.action !== 'reply') throw new Error('派发后台 subagent 后必须立即回复接手状态');
     if (evidence.waitedForSubagent) throw new Error('主会话派发后不得等待后台 subagent 完成');
-  } else if (value.delegation !== 'not_required' || evidence.spawnedSubagentThreadIds.length > 0) {
+  } else if (value.delegation !== 'not_required'
+    || evidence.spawnedSubagentCallIds.length > 0
+    || evidence.spawnedSubagentThreadIds.length > 0) {
     throw new Error('讨论类决策不得伪造或启动实施委派');
   }
 }

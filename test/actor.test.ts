@@ -119,7 +119,7 @@ test('群 onboarding 在 shadow 只准备，切 reply 重启后用同一 UUID �
   } as Pick<ChannelAdapter, 'send'>;
   const historyLoads: number[] = [];
   const firstActor = new ConversationWorker(
-    config, shadow, firstSession, store, sender, () => undefined, () => undefined, () => undefined,
+    config, shadow, firstSession, store, sender, () => undefined, () => undefined,
     async () => {
       historyLoads.push(1);
       return { count: 2, prompt: '{"content":"近期讨论"}' };
@@ -137,7 +137,7 @@ test('群 onboarding 在 shadow 只准备，切 reply 重启后用同一 UUID �
   const reply = store.getConversation(shadow.id)!;
   const resumedSession = new OnboardingSession();
   const secondActor = new ConversationWorker(
-    config, reply, resumedSession, store, sender, () => undefined, () => undefined, () => undefined,
+    config, reply, resumedSession, store, sender, () => undefined, () => undefined,
     async () => { throw new Error('已准备 onboarding 不应重复读取历史'); },
   );
   await secondActor.start();
@@ -148,7 +148,7 @@ test('群 onboarding 在 shadow 只准备，切 reply 重启后用同一 UUID �
   await secondActor.stop();
 
   const thirdActor = new ConversationWorker(
-    config, reply, new OnboardingSession(), store, sender, () => undefined, () => undefined, () => undefined,
+    config, reply, new OnboardingSession(), store, sender, () => undefined, () => undefined,
     async () => { throw new Error('已完成 onboarding 不应读取历史'); },
   );
   await thirdActor.start();
@@ -185,6 +185,58 @@ test('群 onboarding 发送失败后以同一 UUID 重试', async () => {
   assert.deepEqual(uuids, ['stable-intro-uuid', 'stable-intro-uuid']);
   await second.stop();
   store.close();
+});
+
+test('单个 conversation 的无效决策 fail closed，但 Worker 与 Channel 生命周期不被终止', async () => {
+  const config = defaultConfig('decision-isolation', '.', 'Agent', 'role');
+  config.scheduling.quietWindowMilliseconds = 0;
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'decision-isolation', title: '隔离私聊', responsibility: '答疑', mode: 'shadow',
+  });
+  let calls = 0;
+  const session: AgentSession = {
+    currentSessionId: 'session-decision-isolation',
+    processId: null,
+    start: async () => undefined,
+    interruptActive: async () => false,
+    stop: async () => undefined,
+    runDecision: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('模拟结构化决策校验失败');
+      return {
+        turnId: 'recovered-turn', status: 'completed', subagentThreadId: null,
+        decision: {
+          action: 'silent', responsibilityMatch: true, category: 'discussion', replyText: '',
+          reasonCode: 'recovered', workType: 'discussion', delegation: 'not_required', contextUpdate: null,
+        },
+      };
+    },
+  };
+  const worker = new ConversationWorker(
+    config, conversation, session, store, { send: async () => undefined }, () => undefined,
+  );
+  const admitEvent = (eventId: string) => store.admitEvent(conversation, normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: eventId,
+    sender_open_dingtalk_id: conversation.externalId, content: eventId,
+  })!);
+  try {
+    await worker.start();
+    admitEvent('invalid-decision');
+    worker.signal();
+    await waitFor(() => store.status().failed_messages === 1);
+    admitEvent('next-message');
+    worker.signal();
+    await waitFor(() => store.status().processed === 1);
+    const status = store.status();
+    assert.equal(status.received, 2);
+    assert.equal(status.failed_messages, 1);
+    assert.equal(status.processed, 1);
+    assert.equal(calls, 2);
+  } finally {
+    await worker.stop();
+    store.close();
+  }
 });
 
 test('实施任务派发回执不占用 actor，可继续处理下一条群消息', async () => {

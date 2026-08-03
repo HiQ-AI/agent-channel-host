@@ -2,7 +2,7 @@
 
 ## 结果
 
-Round 7 后的 58 项用例全部 PASS。`agent-channel-host` 0.5.0 已具备：
+Round 8 后的 67 项用例全部 PASS。`agent-channel-host` 0.6.0 已具备：
 
 - conversation checkpoint 与成员/角色/职责资料分层；
 - Codex 新 session 与自动 compaction 后的关键状态恢复，普通 resume 不重复注入；
@@ -11,10 +11,10 @@ Round 7 后的 58 项用例全部 PASS。`agent-channel-host` 0.5.0 已具备：
 - 顶层只保留“总览 / 全局设置”；总览的 INSTANCES 表可下钻详情及各自独立设置，全局设置不混入 instance 配置；
 - 全局总览只保留 Instance 索引、跨实例消息汇总和全局告警；Channel、最近消息、Conversation、Runtime 和局部告警统一在 Instance 详情展示；
 - Instance 详情可选择并下钻 Channel；Channel 页第一项直接启停，DingTalk 禁用时不启动 adapter 或获取 owner；
-- Channel 页分别管理群聊/私聊的 `none/selected/all` 准入策略；`all` 在唯一事件流上自动创建 shadow Conversation，显式 disabled 仍拒绝，不增加 receiver；
-- Channel 页显示已绑定群组，可按关键词搜索合成/真实 adapter 候选并写入现有 conversation registry；默认继承 Agent 角色且使用 shadow，不增加第二套 listener；
-- Channel 页同时显示指定私聊；因稳定身份边界，新增私聊继续要求显式 `openDingTalkId`，不按姓名猜测；
-- Conversation 详情可修改 title/enabled/职责/mode/warm TTL/成员资料，并以二次确认执行全级联删除；
+- Channel 页分别管理群聊/私聊的 `none/selected/all` 准入策略和 `shadow/reply` 新会话默认模式；`all` 仍只使用唯一事件流，显式 disabled 仍拒绝；
+- Channel 页显示已绑定群组，可按关键词搜索 adapter 候选并写入现有 conversation registry；默认继承 Agent 角色并使用群聊默认模式，不增加第二套 listener；
+- Channel 页同时显示指定私聊；新增私聊继续使用稳定 `openDingTalkId` 登记，事件或成员资料有人员姓名时显示姓名，不按姓名猜测 ID；
+- Conversation 详情可修改 title/enabled/职责/mode/warm TTL/成员资料，并以二次确认执行全级联删除；mode、runtime effort 和 Channel 固定枚举使用选择式交互；
 - INSTANCES 和 Instance 详情支持二次确认删除 Instance；attached Host fail closed，View-owned Host 先停止，删除过程持有管理 lease 防止外部抢占；
 - 删除 action 执行期间暂停周期 repaint；成功后在同一输入周期立即更新顶部计数、实例/会话列表、消息汇总、告警、选中项和确认状态，不读取已关闭 Store；
 - 中文 Windows 的 CP936 计划任务“不存在”输出可正确识别，权限或未知查询错误继续 fail closed；
@@ -25,14 +25,15 @@ Round 7 后的 58 项用例全部 PASS。`agent-channel-host` 0.5.0 已具备：
 - 非编辑态 `Enter/→` 下钻、`Esc/←` 返回、Tab 只切顶层；编辑态支持左右、Home/End、Backspace/Delete；
 - 交互 View 使用 alternate screen 固定刷新并在退出/信号/渲染错误时恢复主屏，`view --once` 不进入该终端生命周期。
 - `q/Ctrl+C` 先进入退出确认，明确 View-owned Host 影响；再次确认才退出，取消后保留导航和编辑状态。
+- Codex 成功完成的 `spawn_agent` 调用即构成真实派发证据，child thread ID 仅为可选关联信息；单 Conversation 决策失败不会终止共享 Channel owner。
 
 ## 验证摘要
 
-- `npm run verify`：65/65 tests PASS，0.5.0 的 72-file pack dry-run PASS；
+- `npm run verify`：68/68 tests PASS，0.6.0 的 75-file pack dry-run PASS；
 - 真实 Codex：`new → resumed`，同一 provider session 前缀，结构化 `silent`；
 - 隔离 CLI：两个 instance 的 bare `view --once` 聚合输出和无 `--instance` help PASS；
-- 真实 Windows TTY：精简总览、Instance 对象详情、Channel toggle、群聊/私聊策略、合成群搜索与绑定、Conversation 删除确认/取消、隔离 Instance 物理删除与同周期即时刷新、字段光标编辑、TUI 新增、独立全局设置、退出确认/取消、alternate-screen 恢复和退出 PASS；
+- 真实 Windows TTY：精简总览、Instance 对象详情、Channel toggle、群聊/私聊订阅及默认模式、合成群搜索与绑定、Conversation 删除确认/取消、隔离 Instance 物理删除与同周期即时刷新、字段光标编辑、TUI 新增、独立全局设置、退出确认/取消、alternate-screen 恢复和退出 PASS；
 - 隔离 CLI：`view --once` 输出不含 ANSI PASS；
 - 外部影响：未连接 DWS、未发送消息、未安装服务、未部署。
 
-详细证据见 `round-1.md` 至 `round-7.md`，用例状态见 `matrix.csv`。
+详细证据见 `round-1.md` 至 `round-8.md`，用例状态见 `matrix.csv`。

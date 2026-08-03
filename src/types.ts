@@ -1,5 +1,6 @@
 export type ConversationKind = 'group' | 'direct';
-export type ConversationMode = 'shadow' | 'reply';
+export const CONVERSATION_MODES = ['shadow', 'reply'] as const;
+export type ConversationMode = typeof CONVERSATION_MODES[number];
 export const DEFAULT_WORKER_WARM_SECONDS = 30;
 export const MAX_WORKER_WARM_SECONDS = 2_147_483;
 

@@ -120,13 +120,16 @@ conversation.command('add')
   .requiredOption('--kind <kind>', 'group 或 direct')
   .requiredOption('--title <title>', '显示名称；group 时用于精确搜索')
   .option('--responsibility <text>', '该会话的职责边界；省略时使用 identity.role')
-  .option('--mode <mode>', 'shadow 或 reply', 'shadow')
+  .option('--mode <mode>', 'shadow 或 reply；省略时使用对应 Channel 默认模式')
   .option('--warm-seconds <seconds>', '处理完成后保留 Worker 的秒数，默认 30；0 表示立即释放', parseWarmSeconds)
   .option('--open-dingtalk-id <id>', 'direct 对端的 openDingTalkId')
   .action(async (options) => {
     if (!['group', 'direct'].includes(options.kind)) throw new Error('--kind 必须是 group 或 direct');
-    if (!['shadow', 'reply'].includes(options.mode)) throw new Error('--mode 必须是 shadow 或 reply');
     const config = await loadConfig(options.instance);
+    const mode = options.mode ?? (options.kind === 'group'
+      ? config.channel.defaultModes.groups
+      : config.channel.defaultModes.directs);
+    if (!['shadow', 'reply'].includes(mode)) throw new Error('--mode 必须是 shadow 或 reply');
     const externalId = options.kind === 'group'
       ? (await resolveExactGroup(config, options.title)).openConversationId
       : options.openDingtalkId;
@@ -138,7 +141,7 @@ conversation.command('add')
         externalId,
         title: options.title,
         responsibility: options.responsibility ?? config.identity.role,
-        mode: options.mode,
+        mode,
         channelId: config.channel.id,
         channelProfileId: config.channel.profileId,
         runtimeId: config.runtime.id,

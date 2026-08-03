@@ -150,8 +150,13 @@ export class CodexJsonlCollector {
       if (!this.evidence.mainWorkItems.includes(itemType)) this.evidence.mainWorkItems.push(itemType);
     }
     const tool = normalizeToken(item.tool ?? item.name ?? item.tool_name);
-    if (tool.includes('waitagent')) this.evidence.waitedForSubagent = true;
-    if (tool.includes('spawnagent') || (itemType === 'subagentactivity' && normalizeToken(item.kind) === 'started')) {
+    if (itemType === 'collabtoolcall' && tool === 'wait') this.evidence.waitedForSubagent = true;
+    if (type === 'item.completed'
+      && itemType === 'collabtoolcall'
+      && tool === 'spawnagent'
+      && normalizeToken(item.status) === 'completed') {
+      const callId = subagentCallId(item);
+      if (!this.evidence.spawnedSubagentCallIds.includes(callId)) this.evidence.spawnedSubagentCallIds.push(callId);
       for (const id of subagentIds(item)) {
         if (!this.evidence.spawnedSubagentThreadIds.includes(id)) this.evidence.spawnedSubagentThreadIds.push(id);
       }
@@ -364,6 +369,13 @@ function subagentIds(item: JsonObject): string[] {
     ...(Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []),
   ];
   return values.filter((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
+function subagentCallId(item: JsonObject): string {
+  if (typeof item.id !== 'string' || item.id.length === 0) {
+    throw new Error('Codex exec spawn_agent 完成事件缺少 item.id');
+  }
+  return item.id;
 }
 
 function eventMessage(event: JsonObject): string {

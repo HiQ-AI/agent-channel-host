@@ -51,6 +51,16 @@ test('JSONL collector 校验精确 resume 并提取结构化结果与执行证�
   assert.equal(collector.turnCompleted, true);
   assert.equal(collector.agentMessage, '{"action":"silent"}');
   assert.deepEqual(collector.evidence.mainWorkItems, ['commandexecution']);
+  const delegated = new CodexJsonlCollector('session-1');
+  delegated.accept('{"type":"item.completed","item":{"id":"spawn-call-1","type":"collab_tool_call","tool":"spawn_agent","status":"completed","receiver_thread_ids":[]}}');
+  assert.deepEqual(delegated.evidence.spawnedSubagentCallIds, ['spawn-call-1']);
+  assert.deepEqual(delegated.evidence.spawnedSubagentThreadIds, []);
+  const failedDelegation = new CodexJsonlCollector('session-1');
+  failedDelegation.accept('{"type":"item.completed","item":{"id":"spawn-call-failed","type":"collab_tool_call","tool":"spawn_agent","status":"failed","receiver_thread_ids":[]}}');
+  assert.deepEqual(failedDelegation.evidence.spawnedSubagentCallIds, []);
+  const waited = new CodexJsonlCollector('session-1');
+  waited.accept('{"type":"item.started","item":{"id":"wait-call","type":"collab_tool_call","tool":"wait","status":"in_progress","receiver_thread_ids":[]}}');
+  assert.equal(waited.evidence.waitedForSubagent, true);
   const wrong = new CodexJsonlCollector('session-1');
   assert.throws(() => wrong.accept('{"type":"thread.started","thread_id":"session-2"}'), /未精确恢复/);
   assert.throws(() => wrong.accept('not-json'), /非法 JSONL/);
@@ -68,14 +78,14 @@ test('实施类决策必须有真实后台派发证据且主会话不能等待�
     contextUpdate: null,
   };
   assert.doesNotThrow(() => validateDecision(decision, '- Agent代回', {
-    spawnedSubagentThreadIds: ['child-thread'], waitedForSubagent: false, mainWorkItems: [],
+    spawnedSubagentCallIds: ['spawn-call'], spawnedSubagentThreadIds: [], waitedForSubagent: false, mainWorkItems: [],
   }));
   assert.throws(() => validateDecision(decision, '- Agent代回'), /真实派发/);
   assert.throws(() => validateDecision(decision, '- Agent代回', {
-    spawnedSubagentThreadIds: ['child-thread'], waitedForSubagent: true, mainWorkItems: [],
+    spawnedSubagentCallIds: ['spawn-call'], spawnedSubagentThreadIds: [], waitedForSubagent: true, mainWorkItems: [],
   }), /不得等待/);
   assert.throws(() => validateDecision(decision, '- Agent代回', {
-    spawnedSubagentThreadIds: ['child-thread'], waitedForSubagent: false, mainWorkItems: ['filechange'],
+    spawnedSubagentCallIds: ['spawn-call'], spawnedSubagentThreadIds: [], waitedForSubagent: false, mainWorkItems: ['filechange'],
   }), /禁止直接实施/);
 });
 
