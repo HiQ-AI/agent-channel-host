@@ -15,7 +15,7 @@ await access(statePath).then(
 await mkdir(root, { recursive: true });
 
 const marker = 'cmd-runtime-context-7f3a';
-const config = defaultConfig('command-canary', resolve('..'), 'Canary', 'offline runtime canary');
+const config = defaultConfig('command-canary', resolve('..'), 'Canary');
 const store = new Store(statePath);
 const conversation = store.addConversation({
   kind: 'direct',

@@ -2,8 +2,6 @@ version: 2
 instance: triss
 identity:
   name: 翠丝
-  role: 公司数字化员工；按自身角色与各会话职责边界参与讨论
-  signature: '- 翠丝代回'
 channel:
   id: dingtalk
   enabled: true

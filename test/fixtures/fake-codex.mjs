@@ -14,14 +14,13 @@ if (prompt.includes('SLOW_SHORT')) {
   process.stderr.write('simulated failure\n');
   process.exitCode = 7;
 } else {
-  complete();
+  complete(prompt.includes('ECHO_PROMPT') ? prompt : null);
 }
 
-function complete() {
-  const text = JSON.stringify({
-    action: 'silent',
-    replyText: '',
-  });
+function complete(echo = null) {
+  const text = JSON.stringify(echo === null
+    ? { action: 'silent', replyText: '' }
+    : { action: 'reply', replyText: echo });
   process.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } })}\n`);
   process.stdout.write(`${JSON.stringify({ type: 'turn.completed' })}\n`);
 }

@@ -8,7 +8,7 @@ Channel 的 `subscriptions.groups/directs=all` 会把该 DWS 账号可见的未�
 
 Host 不覆盖 Codex session 的审批、sandbox、网络、额外 writable roots 或外部 MCP/skills；这些权限由 runtime 工作目录和用户级配置决定。`runtime.cwd` 应指向专用工作目录，不应指向用户主目录、磁盘根目录或混有其他敏感项目的上级目录。View 修改 cwd 会触发 Host 重启；若已有 provider session 的 cwd 不一致，Host 会提升 generation 后创建新 session。部署前必须独立审计 runtime 配置，不能把 Host 的消息门禁误当成工具权限隔离。
 
-Runtime 返回不是精确的 `{action, replyText}` 最小结构时，当前 batch 保持 fail-closed 且不产生 outbox，但错误隔离在对应 Conversation，不应终止共享 Channel owner。Host 不接收职责、实施、委派或权限字段，避免消息代理替 Agent 做行为判断。
+Runtime 返回不是精确的 `{action, replyText}` 最小结构时，当前 batch 保持 fail-closed 且不产生 outbox，但错误隔离在对应 Conversation，不应终止共享 Channel owner。Host 只接收可选的 Conversation 职责，并在首轮、职责变更后首轮及每 5 个已完成 turn 作为普通上下文提醒；它不接收实施、委派或权限字段，也不把职责提醒当成 developer/system 权限边界，避免消息代理替 Agent 做行为判断。
 
 Host 启动时会一次性恢复被中断的 claim，并重试未达 3 次上限的 failed inbox/outbox。outbox 沿用原 UUID，发送前再次检查 Conversation 是否仍允许回复以及对应入站 sequence 是否仍是最新；已完成、已提交和达到上限的记录不会自动重放。该机制降低进程中断造成的漏处理风险，但不把 DWS 易失 event bus 提升为端到端 exactly-once。
 

@@ -10,7 +10,6 @@ export interface InitializeInstanceInput {
   instance: string;
   cwd: string;
   name: string;
-  role: string;
   dwsCommand?: string;
   codexCommand?: string;
   model?: string;
@@ -43,7 +42,7 @@ export async function initializeInstance(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 
-  const config = defaultConfig(input.instance, input.cwd, input.name, input.role);
+  const config = defaultConfig(input.instance, input.cwd, input.name);
   config.channel.enabled = input.channelEnabled ?? true;
   if (input.dwsCommand !== undefined) config.channel.command = input.dwsCommand;
   if (input.codexCommand !== undefined) config.runtime.command = input.codexCommand;
@@ -67,7 +66,7 @@ export async function initializeInstance(
       label: 'Codex CLI',
       state: 'stopped',
       model: config.runtime.model,
-      contextRecovery: 'runtime-native',
+      contextRecovery: 'adapter-managed',
     });
   } finally {
     store.close();

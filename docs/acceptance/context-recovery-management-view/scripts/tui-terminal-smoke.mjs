@@ -21,10 +21,10 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('必须在真
 
 const env = { ...process.env, AGENT_CHANNEL_HOME: root };
 const firstInitialized = await initializeInstance({
-  instance: 'tui-smoke', cwd: root, name: '小小鹏', role: '编辑器需求、方案与 bug 排查答疑', channelEnabled: false,
+  instance: 'tui-smoke', cwd: root, name: '小小鹏', channelEnabled: false,
 }, env);
 const secondInitialized = await initializeInstance({
-  instance: 'second-agent', cwd: root, name: '翠丝', role: '跨 Channel 方案评审', channelEnabled: false,
+  instance: 'second-agent', cwd: root, name: '翠丝', channelEnabled: false,
 }, env);
 const store = new Store(firstInitialized.stateFile);
 const secondStore = new Store(secondInitialized.stateFile);
@@ -233,7 +233,7 @@ try {
   assert.deepEqual(groupSearches, [{ instance: 'tui-smoke', query: '编辑器' }]);
   const searchedConversation = store.listConversations().find((item) => item.title === '合成搜索结果群');
   assert.ok(searchedConversation);
-  assert.equal(searchedConversation.responsibility, config.identity.role);
+  assert.equal(searchedConversation.responsibility, '');
   assert.equal(searchedConversation.mode, 'reply');
   await writeFile(resultPath, JSON.stringify({
     ok: true,

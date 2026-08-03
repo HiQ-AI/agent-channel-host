@@ -1,0 +1,11 @@
+case_id,layer,assertion,round_1
+CRC-001,config,Instance配置只保留本地展示Agent名称且旧role和signature保存后移除,PASS
+CRC-002,cli,init和TUI新建不再接收默认角色且省略会话职责时保存为空,PASS
+CRC-003,conversation,自动建档和群搜索绑定使用空职责并在TUI明确显示沿用Agent自身职责,PASS
+CRC-004,prompt,普通消息信封仍只含发送者时间内容且空职责不增加提醒,PASS
+CRC-005,schedule,非空职责在首轮及每5个已完成turn提醒且中间turn不重复,PASS
+CRC-006,schedule,职责变更后下一turn立即提醒且失败或中断不推进周期,PASS
+CRC-007,runtime,Codex命令不覆盖用户developer_instructions且固定providerSession不因职责变更重建,PASS
+CRC-008,canary,真实Codex同session第二轮沿用职责且变更后下一轮立即生效,PASS
+CRC-009,docs,README和SECURITY说明周期提醒能力与非权限边界,PASS
+CRC-010,regression,全量测试pack和隔离CLI只读回查通过且未触碰DWS链路,PASS

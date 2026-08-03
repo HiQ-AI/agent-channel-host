@@ -75,7 +75,6 @@ export interface NewInstanceInput {
   instance: string;
   cwd: string;
   name: string;
-  role: string;
 }
 
 export interface ManagementViewActions {
@@ -94,7 +93,7 @@ interface DestructiveConfirmation {
   label: string;
 }
 
-type InstanceCreationStep = 'instance' | 'cwd' | 'name' | 'role';
+type InstanceCreationStep = 'instance' | 'cwd' | 'name';
 
 interface InstanceCreationDraft {
   step: InstanceCreationStep;
@@ -709,11 +708,11 @@ async function handleGroupSearchInput(
         kind: 'group',
         externalId: candidate.externalId,
         title: candidate.title,
-        responsibility: instance.config.identity.role,
+        responsibility: '',
         mode: instance.config.channel.defaultModes.groups,
         runtimeId: instance.config.runtime.id,
       });
-      state.notice = `已绑定群组“${candidate.title}”；默认职责继承 Agent 角色，模式为 ${instance.config.channel.defaultModes.groups}`;
+      state.notice = `已绑定群组“${candidate.title}”；会话职责未配置，模式为 ${instance.config.channel.defaultModes.groups}`;
     } catch (error) {
       conversation = findChannelGroup(instance, draft.target, candidate.externalId);
       if (!conversation) throw error;
@@ -766,14 +765,10 @@ async function handleInstanceCreationInput(
   }
   if (draft.step === 'name') {
     draft.values.name = value;
-    draft.step = 'role';
-    draft.value = '在授权会话内提供职责范围内的分析和答复';
-    draft.cursor = textLength(draft.value);
-    return;
   }
 
   if (!actions.createInstance) throw new Error('当前 View 入口未提供 instance 创建能力');
-  const input = { ...draft.values, role: value } as NewInstanceInput;
+  const input = draft.values as NewInstanceInput;
   const created = await withPendingOperation(state, `创建 Instance ${input.instance}`, async () => {
     const next = await actions.createInstance!(input);
     await actions.startInstance?.(next);
@@ -800,7 +795,7 @@ function startInstanceCreation(state: ManagementViewState, actions: ManagementVi
 }
 
 function creationStepLabel(step: InstanceCreationStep): string {
-  return ({ instance: 'Instance 名称', cwd: 'Runtime cwd', name: 'Agent 名称', role: '默认角色' })[step];
+  return ({ instance: 'Instance 名称', cwd: 'Runtime cwd', name: 'Agent 名称' })[step];
 }
 
 export function createSettingEntries(
@@ -810,17 +805,9 @@ export function createSettingEntries(
   configFile?: string,
 ): SettingEntry[] {
   const entries: SettingEntry[] = [
-    configSetting('identity.name', 'Agent 名称', config.identity.name, '下一 turn', config, store, configFile, (next, value) => {
+    configSetting('identity.name', 'Agent 名称', config.identity.name, '仅用于本地展示', config, store, configFile, (next, value) => {
       if (!value.trim()) throw new Error('Agent 名称不能为空');
       next.identity.name = value.trim();
-    }),
-    configSetting('identity.role', 'Agent 默认角色', config.identity.role, '下一 turn', config, store, configFile, (next, value) => {
-      if (!value.trim()) throw new Error('Agent 默认角色不能为空');
-      next.identity.role = value.trim();
-    }),
-    configSetting('identity.signature', '回复签名', config.identity.signature, '下一 turn', config, store, configFile, (next, value) => {
-      if (!value.trim()) throw new Error('回复签名不能为空');
-      next.identity.signature = value.trim();
     }),
     restartSetting(configSetting('runtime.cwd', 'Runtime cwd', config.runtime.cwd, 'Runtime 工作目录；已有 session cwd 不兼容时拒绝恢复', config, store, configFile, (next, value) => {
       if (!value.trim()) throw new Error('Runtime cwd 不能为空');
@@ -860,7 +847,7 @@ export function createSettingEntries(
       if (!store.setConversationTitle(conversationId, value)) throw new Error('conversation 不存在');
     }),
     enabledEntry,
-    storeSetting(`conversation:${conversationId}:responsibility`, `会话职责 · ${conversation.title}`, conversation.responsibility, '仅本地备注，不自动注入 runtime', async (value) => {
+    storeSetting(`conversation:${conversationId}:responsibility`, `会话职责 · ${conversation.title}`, conversation.responsibility, '首轮、变更后首轮及每 5 个已完成 turn 提醒；留空沿用 Agent 自身职责', async (value) => {
       if (!store.setConversationResponsibility(conversationId, value)) throw new Error('conversation 不存在');
     }),
     selectSetting(storeSetting(`conversation:${conversationId}:mode`, `会话模式 · ${conversation.title}`, conversation.mode, '从 shadow/reply 选择；发送前即时生效', async (value) => {
@@ -1312,11 +1299,11 @@ function renderChannelManagement(
       [
         ...groups.map((group) => [
           selected?.kind === 'conversation' && selected.conversation.id === group.id ? '>' : ' ', group.title,
-          group.enabled ? 'enabled' : 'disabled', group.mode, group.responsibility, group.runtimeId,
+          group.enabled ? 'enabled' : 'disabled', group.mode, displayResponsibility(group.responsibility), group.runtimeId,
         ]),
         [
           selected?.kind === 'search-group' ? '>' : ' ', '+ 搜索并绑定指定群聊', '-', channel.defaultModes.groups,
-          '默认继承 Agent 角色', instance.config.runtime.id,
+          '未配置（使用 Agent 自身职责）', instance.config.runtime.id,
         ],
       ],
       width,
@@ -1329,7 +1316,7 @@ function renderChannelManagement(
       ['', 'DIRECT', 'STATE', 'MODE', 'RESPONSIBILITY', 'RUNTIME'],
       directs.map((direct) => [
         selected?.kind === 'conversation' && selected.conversation.id === direct.id ? '>' : ' ', direct.title,
-        direct.enabled ? 'enabled' : 'disabled', direct.mode, direct.responsibility, direct.runtimeId,
+        direct.enabled ? 'enabled' : 'disabled', direct.mode, displayResponsibility(direct.responsibility), direct.runtimeId,
       ]),
       width,
       semanticTable(color, selected?.kind === 'conversation'
@@ -1382,7 +1369,7 @@ function renderConversationDetail(detail: Record<string, unknown> | null, width:
     heading(`会话详情 / ${text(conversation.title) ?? '-'}`, color),
     `Channel ${text(conversation.channelId)}/${text(conversation.channelProfileId)}  kind=${text(conversation.kind)}  enabled=${statusText(text(conversation.enabled) ?? 'false', color)}`,
     `mode=${statusText(text(conversation.mode) ?? 'unknown', color)}  runtime=${text(conversation.runtimeId)}  policy=v${text(conversation.policyVersion)}  warm=${text(conversation.workerWarmSeconds)}s`,
-    `职责：${text(conversation.responsibility) ?? '-'}`,
+    `职责：${displayResponsibility(conversation.responsibility)}`,
     `Session ${statusText(text(session.lifecycle) ?? 'unprovisioned', color)}  id=${text(session.providerSessionPrefix) ?? '-'}  generation=${text(session.generation) ?? '-'}`,
     `Worker ${statusText(text(worker.state) ?? 'stopped', color)}  pid=${text(worker.processId) ?? '-'}  error=${errorText(text(worker.error) ?? '-', color)}`,
     ansi(`Checkpoint v${text(context.version) ?? '0'} @ seq ${text(context.throughSequence) ?? '0'}  facts=${text(context.facts) ?? '0'} decisions=${text(context.decisions) ?? '0'} commitments=${text(context.commitments) ?? '0'} open=${text(context.openQuestions) ?? '0'}`, 'cyan', color),
@@ -1731,6 +1718,10 @@ function tagRows(instance: string, value: unknown): TaggedJson[] {
 
 function text(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
+}
+
+function displayResponsibility(value: unknown): string {
+  return text(value)?.trim() || '未配置（使用 Agent 自身职责）';
 }
 
 function number(value: unknown): number {

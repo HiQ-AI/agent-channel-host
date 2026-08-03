@@ -103,7 +103,7 @@ class FakeRuntime implements RuntimeAdapter {
 }
 
 test('会话级决策失败不升级为 Host fatal，后续消息仍由同一 Channel 处理', async () => {
-  const config = defaultConfig('scheduler-decision-isolation', '.', 'Agent', 'role');
+  const config = defaultConfig('scheduler-decision-isolation', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
@@ -141,7 +141,7 @@ test('会话级决策失败不升级为 Host fatal，后续消息仍由同一 Ch
 });
 
 test('ready signal 将 burst 聚合为一次 turn，warm TTL 后释放 Worker', async () => {
-  const config = defaultConfig('scheduler-burst', '.', 'Agent', 'role');
+  const config = defaultConfig('scheduler-burst', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 20;
   config.scheduling.maxBatchMessages = 20;
   const store = new Store(':memory:');
@@ -181,7 +181,7 @@ test('ready signal 将 burst 聚合为一次 turn，warm TTL 后释放 Worker', 
 });
 
 test('Host 在 Worker 启动中停止时只关闭一次且不再投递 signal', async () => {
-  const config = defaultConfig('scheduler-stop-starting', '.', 'Agent', 'role');
+  const config = defaultConfig('scheduler-stop-starting', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
@@ -215,7 +215,7 @@ test('Host 在 Worker 启动中停止时只关闭一次且不再投递 signal', 
 });
 
 test('active turn 内多条新消息只 cancel 一次，并把原 claim 与新消息重新合并', async () => {
-  const config = defaultConfig('scheduler-cancel', '.', 'Agent', 'role');
+  const config = defaultConfig('scheduler-cancel', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
@@ -255,7 +255,7 @@ test('active turn 内多条新消息只 cancel 一次，并把原 claim 与新�
 });
 
 test('启动 reconciliation 释放旧 claim 并只唤醒有 pending work 的 conversation', async () => {
-  const config = defaultConfig('scheduler-reconcile', '.', 'Agent', 'role');
+  const config = defaultConfig('scheduler-reconcile', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const pending = store.addConversation({
@@ -292,7 +292,7 @@ test('Host 重启后重新处理可恢复 failed message，并继续使用原 Co
   const path = resolve(root, 'state.sqlite3');
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
-  const config = defaultConfig('scheduler-failed-recovery', '.', 'Agent', 'role');
+  const config = defaultConfig('scheduler-failed-recovery', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   let store = new Store(path);
   const conversation = store.addConversation({
@@ -344,7 +344,7 @@ test('可嵌入 Host 由 AbortSignal 停止，第二个 owner 不覆盖运行状
   await mkdir(root, { recursive: true });
   const previous = process.env.AGENT_CHANNEL_HOME;
   process.env.AGENT_CHANNEL_HOME = root;
-  const config = defaultConfig('embedded-host', '.', 'Agent', 'role');
+  const config = defaultConfig('embedded-host', '.', 'Agent');
   const channel = new FakeChannel();
   const runtime = new FakeRuntime();
   const owner = new FakeOwnerLock('owner-1');
@@ -390,7 +390,7 @@ test('Channel disabled 时 Host 不启动 Channel 且不获取其 owner', async 
   await mkdir(root, { recursive: true });
   const previous = process.env.AGENT_CHANNEL_HOME;
   process.env.AGENT_CHANNEL_HOME = root;
-  const config = defaultConfig('disabled-channel', '.', 'Agent', 'role');
+  const config = defaultConfig('disabled-channel', '.', 'Agent');
   config.channel.enabled = false;
   const channel = new FakeChannel();
   const runtime = new FakeRuntime();
@@ -434,7 +434,7 @@ test('Channel 启动失败只标记 Channel，不把已验证 Runtime 伪报为�
   await mkdir(root, { recursive: true });
   const previous = process.env.AGENT_CHANNEL_HOME;
   process.env.AGENT_CHANNEL_HOME = root;
-  const config = defaultConfig('channel-start-failure', '.', 'Agent', 'role');
+  const config = defaultConfig('channel-start-failure', '.', 'Agent');
   try {
     await assert.rejects(runHost(config, {
       handleProcessSignals: false,
@@ -467,7 +467,7 @@ test('Channel 启动失败只标记 Channel，不把已验证 Runtime 伪报为�
 });
 
 test('Channel 订阅范围与新会话默认模式独立，名称优先取群名或人员姓名且已有 mode 不被覆盖', () => {
-  const config = defaultConfig('subscription-policy', '.', '翠丝', '负责编辑器答疑');
+  const config = defaultConfig('subscription-policy', '.', '翠丝');
   const store = new Store(':memory:');
   try {
     const groupEvent = normalizeDwsEvent({
@@ -482,7 +482,7 @@ test('Channel 订阅范围与新会话默认模式独立，名称优先取群名
     const auto = resolveEventConversation(config, store, groupEvent);
     assert.equal(auto.reason, 'auto-created');
     assert.equal(auto.conversation?.title, '编辑器讨论群');
-    assert.equal(auto.conversation?.responsibility, config.identity.role);
+    assert.equal(auto.conversation?.responsibility, '');
     assert.equal(auto.conversation?.mode, 'reply');
     assert.equal(store.listConversations().length, 1);
 

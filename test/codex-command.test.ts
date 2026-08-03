@@ -20,7 +20,7 @@ test('结构化决策 fail closed', () => {
 });
 
 test('新建与 resume 使用同一命令协议并显式携带 session ID', () => {
-  const config = defaultConfig('test', '.', 'Agent', 'role');
+  const config = defaultConfig('test', '.', 'Agent');
   const created = buildCodexExecArgs(config, 'schema.json', 'hello', null);
   assert.deepEqual(created.slice(0, 3), ['exec', '--json', '--output-schema']);
   assert.equal(created.some((arg) => arg.includes('approval_policy')), false);
@@ -32,6 +32,13 @@ test('新建与 resume 使用同一命令协议并显式携带 session ID', () =
   const resumed = buildCodexExecArgs(config, 'schema.json', 'again', 'session-1');
   assert.deepEqual(resumed.slice(0, 4), ['exec', 'resume', '--json', '--output-schema']);
   assert.deepEqual(resumed.slice(-2), ['session-1', 'again']);
+});
+
+test('命令参数不覆盖 runtime 的 developer instructions', () => {
+  const config = defaultConfig('responsibility-prefix', '.', '仅本地名称');
+  const args = buildCodexExecArgs(config, 'schema.json', '本轮消息正文', 'session-1');
+  assert.equal(args.some((arg) => arg.startsWith('developer_instructions=')), false);
+  assert.deepEqual(args.slice(-2), ['session-1', '本轮消息正文']);
 });
 
 test('JSONL collector 校验精确 resume；Agent 工具事件不影响最小返回', () => {
@@ -53,7 +60,7 @@ test('命令进程退出后以同一 provider session ID 精确 resume', async (
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   const store = new Store(resolve(root, 'state.sqlite3'));
-  const config = defaultConfig('command-test', process.cwd(), 'Agent', 'role');
+  const config = defaultConfig('command-test', process.cwd(), 'Agent');
   const identity = fakeIdentity();
   try {
     const stored = addFakeConversation(store, 'resume-user');
@@ -75,12 +82,51 @@ test('命令进程退出后以同一 provider session ID 精确 resume', async (
   }
 });
 
+test('会话职责在首轮、每 5 个已完成 turn 和变更后首轮提醒，失败不推进周期', async () => {
+  const root = resolve('.test-codex-responsibility-reminder-state');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const store = new Store(resolve(root, 'state.sqlite3'));
+  const config = defaultConfig('responsibility-reminder', process.cwd(), 'Agent');
+  const conversation = addFakeConversation(store, 'responsibility-user');
+  const session = new CodexCommandSession(config, conversation, fakeIdentity(), store);
+  const marker = '只负责方案与分析';
+  store.setConversationResponsibility(conversation.id, marker);
+  try {
+    await session.start();
+    const prompts: string[] = [];
+    for (let turn = 1; turn <= 6; turn += 1) {
+      const result = await session.runDecision(`ECHO_PROMPT turn-${turn}`);
+      prompts.push(result.decision?.replyText ?? '');
+    }
+    assert.match(prompts[0]!, new RegExp(marker));
+    for (const prompt of prompts.slice(1, 5)) assert.doesNotMatch(prompt, new RegExp(marker));
+    assert.match(prompts[5]!, new RegExp(marker));
+
+    store.setConversationResponsibility(conversation.id, '更新后的职责');
+    const changed = await session.runDecision('ECHO_PROMPT changed');
+    assert.match(changed.decision?.replyText ?? '', /更新后的职责/);
+
+    store.setConversationResponsibility(conversation.id, '失败后仍需提醒');
+    await assert.rejects(session.runDecision('FAIL'), /退出异常/);
+    const retried = await session.runDecision('ECHO_PROMPT retry');
+    assert.match(retried.decision?.replyText ?? '', /失败后仍需提醒/);
+
+    store.setConversationResponsibility(conversation.id, '');
+    const empty = await session.runDecision('ECHO_PROMPT empty');
+    assert.doesNotMatch(empty.decision?.replyText ?? '', /会话职责提醒/);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('协议不兼容时提升 generation 并新建 session，不向旧 transcript 重灌指令', async () => {
   const root = resolve('.test-codex-command-rotation-state');
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   const store = new Store(resolve(root, 'state.sqlite3'));
-  const config = defaultConfig('command-rotation', process.cwd(), 'Agent', 'role');
+  const config = defaultConfig('command-rotation', process.cwd(), 'Agent');
   const identity = fakeIdentity();
   try {
     const stored = addFakeConversation(store, 'rotation-user');
@@ -114,7 +160,7 @@ test('活动命令可取消，且非零退出 fail closed', async () => {
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   const store = new Store(resolve(root, 'state.sqlite3'));
-  const config = defaultConfig('command-failure', process.cwd(), 'Agent', 'role');
+  const config = defaultConfig('command-failure', process.cwd(), 'Agent');
   const identity = fakeIdentity();
   try {
     const interrupted = new CodexCommandSession(config, addFakeConversation(store, 'interrupt-user'), identity, store);

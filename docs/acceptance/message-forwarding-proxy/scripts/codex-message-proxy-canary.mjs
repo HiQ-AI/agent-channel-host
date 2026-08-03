@@ -15,7 +15,7 @@ await access(statePath).then(
 await mkdir(root, { recursive: true });
 
 const marker = `message-proxy-${Date.now().toString(36)}`;
-const config = defaultConfig('message-proxy-canary', resolve('..'), 'Canary', 'local metadata only');
+const config = defaultConfig('message-proxy-canary', resolve('..'), 'Canary');
 const store = new Store(statePath);
 const conversation = store.addConversation({
   kind: 'direct',

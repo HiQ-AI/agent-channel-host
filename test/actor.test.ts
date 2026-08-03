@@ -43,7 +43,7 @@ class FakeSession implements AgentSession {
 }
 
 test('新消息 durable admission 后中断 active turn，并在同一固定 session 开新 turn', async () => {
-  const config = defaultConfig('actor', '.', 'Agent', 'role');
+  const config = defaultConfig('actor', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
@@ -99,7 +99,7 @@ class OnboardingSession implements AgentSession {
 }
 
 test('首次群历史由 Agent 判断；reply 在 shadow 只准备，切 reply 后用同一 UUID 发送', async () => {
-  const config = defaultConfig('onboarding', '.', 'Agent', 'role');
+  const config = defaultConfig('onboarding', '.', 'Agent');
   const store = new Store(':memory:');
   const shadow = store.addConversation({
     kind: 'group', externalId: 'cid-onboarding', title: 'Onboarding 群', responsibility: '参与讨论', mode: 'shadow',
@@ -156,7 +156,7 @@ test('首次群历史由 Agent 判断；reply 在 shadow 只准备，切 reply �
 });
 
 test('首次群历史返回 silent 时标记完成且不发送、不重复读取', async () => {
-  const config = defaultConfig('onboarding-silent', '.', 'Agent', 'role');
+  const config = defaultConfig('onboarding-silent', '.', 'Agent');
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'group', externalId: 'cid-onboarding-silent', title: '静默群', responsibility: '本地备注', mode: 'reply',
@@ -214,7 +214,7 @@ test('首次群历史返回 silent 时标记完成且不发送、不重复读取
 });
 
 test('群 onboarding 发送失败后以同一 UUID 重试', async () => {
-  const config = defaultConfig('onboarding-retry', '.', 'Agent', 'role');
+  const config = defaultConfig('onboarding-retry', '.', 'Agent');
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'group', externalId: 'cid-onboarding-retry', title: '重试群', responsibility: '参与讨论', mode: 'reply',
@@ -244,7 +244,7 @@ test('群 onboarding 发送失败后以同一 UUID 重试', async () => {
 });
 
 test('Worker 启动时用原 UUID 提交 reconciliation 恢复的 outbox', async () => {
-  const config = defaultConfig('outbox-recovery', '.', 'Agent', 'role');
+  const config = defaultConfig('outbox-recovery', '.', 'Agent');
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'direct', externalId: 'outbox-recovery-user', title: '恢复私聊', responsibility: '回答问题', mode: 'reply',
@@ -277,7 +277,7 @@ test('Worker 启动时用原 UUID 提交 reconciliation 恢复的 outbox', async
 });
 
 test('单个 conversation 的无效决策 fail closed，但 Worker 与 Channel 生命周期不被终止', async () => {
-  const config = defaultConfig('decision-isolation', '.', 'Agent', 'role');
+  const config = defaultConfig('decision-isolation', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
@@ -326,7 +326,7 @@ test('单个 conversation 的无效决策 fail closed，但 Worker 与 Channel �
 });
 
 test('runtime 自己的后台工作不由 Host 编排，actor 仍可继续处理下一条群消息', async () => {
-  const config = defaultConfig('runtime-background-actor', '.', 'Agent', 'role');
+  const config = defaultConfig('runtime-background-actor', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({

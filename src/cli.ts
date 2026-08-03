@@ -31,7 +31,6 @@ program.command('init')
   .requiredOption('--instance <name>', 'instance 名称')
   .requiredOption('--cwd <path>', 'Codex 会话工作目录')
   .option('--name <name>', '数字化员工名称', 'DingTalk Agent')
-  .option('--role <role>', '默认角色定位', '在授权会话内提供职责范围内的分析和答复')
   .option('--dws-command <path>', 'DWS 命令或绝对路径', 'dws')
   .option('--codex-command <path>', 'Codex 命令或绝对路径', 'codex')
   .option('--model <model>', '默认 Codex 模型', 'gpt-5.6-sol')
@@ -42,7 +41,6 @@ program.command('init')
       instance: options.instance,
       cwd: options.cwd,
       name: options.name,
-      role: options.role,
       dwsCommand: options.dwsCommand,
       codexCommand: options.codexCommand,
       model: options.model,
@@ -119,7 +117,7 @@ conversation.command('add')
   .requiredOption('--instance <name>', 'instance 名称')
   .requiredOption('--kind <kind>', 'group 或 direct')
   .requiredOption('--title <title>', '显示名称；group 时用于精确搜索')
-  .option('--responsibility <text>', '该会话的职责边界；省略时使用 identity.role')
+  .option('--responsibility <text>', '该会话的职责边界；省略时沿用 Agent 自身职责')
   .option('--mode <mode>', 'shadow 或 reply；省略时使用对应 Channel 默认模式')
   .option('--warm-seconds <seconds>', '处理完成后保留 Worker 的秒数，默认 30；0 表示立即释放', parseWarmSeconds)
   .option('--open-dingtalk-id <id>', 'direct 对端的 openDingTalkId')
@@ -140,7 +138,7 @@ conversation.command('add')
         kind: options.kind,
         externalId,
         title: options.title,
-        responsibility: options.responsibility ?? config.identity.role,
+        responsibility: options.responsibility ?? '',
         mode,
         channelId: config.channel.id,
         channelProfileId: config.channel.profileId,

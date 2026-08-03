@@ -314,7 +314,7 @@ test('删除 Conversation 级联清理业务状态、Worker lease 与外置 reco
 });
 
 test('DWS consumer 参数固定读取 flatten NDJSON stdout', () => {
-  const config = defaultConfig('test', '.', 'Agent', 'role');
+  const config = defaultConfig('test', '.', 'Agent');
   config.channel.profile = 'corp:user';
   assert.deepEqual(consumerArgs('user_im_message_receive_group_all', config), [
     'event', 'consume', 'user_im_message_receive_group_all', '--ephemeral', '--flatten', '--format', 'ndjson',
@@ -323,7 +323,7 @@ test('DWS consumer 参数固定读取 flatten NDJSON stdout', () => {
 });
 
 test('DWS 只启动配置允许的共享 consumer，全部 none 时不启动事件流', () => {
-  const config = defaultConfig('subscription-processes', '.', 'Agent', 'role');
+  const config = defaultConfig('subscription-processes', '.', 'Agent');
   config.channel.subscriptions = { groups: 'selected', directs: 'none' };
   assert.deepEqual(subscribedEventKeys(config), [GROUP_EVENT]);
   config.channel.subscriptions = { groups: 'none', directs: 'all' };
@@ -355,7 +355,7 @@ test('DWS 子进程异常保留有界 stderr 根因并脱敏凭据', () => {
 });
 
 test('DWS 群搜索只投影有效候选并按 openConversationId 去重', async () => {
-  const config = defaultConfig('search', '.', 'Agent', 'role');
+  const config = defaultConfig('search', '.', 'Agent');
   let captured: string[] = [];
   const groups = await searchDwsGroups(config, ' 编辑器 ', async (_config, args) => {
     captured = args;
@@ -390,7 +390,7 @@ test('私聊 allowlist 使用对端 openDingTalkId，不与 conversationId 混�
 });
 
 test('首次群历史固定从当前本地时间向前拉 50 条，并按时间从早到晚投影', async () => {
-  const config = defaultConfig('history', '.', 'Agent', 'role');
+  const config = defaultConfig('history', '.', 'Agent');
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'group', externalId: 'cid-history', title: '历史群', responsibility: '了解讨论', mode: 'shadow',

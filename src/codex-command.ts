@@ -10,6 +10,7 @@ import { validateDecision } from './decision.js';
 import { withTimeout } from './process-utils.js';
 import type { Store } from './store.js';
 import type { Conversation, Decision, DecisionRun, SessionRecord } from './types.js';
+import { prependResponsibilityReminder } from './prompts.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -27,6 +28,7 @@ export interface SessionStartup {
 
 const DRIVER_PROTOCOL = 'exec-jsonl-v3-message-proxy';
 const DECISION_SCHEMA_PATH = fileURLToPath(new URL('../../schemas/decision-output.schema.json', import.meta.url));
+export const RESPONSIBILITY_REMINDER_INTERVAL_TURNS = 5;
 
 export async function verifyCodexCommand(config: HostConfig): Promise<CodexCommandIdentity> {
   const command = await resolveCommand(config.runtime.command);
@@ -133,6 +135,8 @@ export class CodexCommandSession implements AgentSession {
   private started = false;
   private interruptRequested = false;
   private stderrTail: string[] = [];
+  private completedTurnsSinceResponsibilityReminder = RESPONSIBILITY_REMINDER_INTERVAL_TURNS;
+  private lastCompletedResponsibility: string | null = null;
 
   constructor(
     private readonly config: HostConfig,
@@ -178,12 +182,20 @@ export class CodexCommandSession implements AgentSession {
     const expectedSessionId = this.providerSessionId;
     const conversation = this.store.getConversation(this.conversation.id);
     if (!conversation) throw new Error(`conversation 不存在：${this.conversation.id}`);
+    const responsibility = conversation.responsibility.trim();
+    const injectResponsibility = responsibility.length > 0 && (
+      responsibility !== this.lastCompletedResponsibility
+      || this.completedTurnsSinceResponsibilityReminder >= RESPONSIBILITY_REMINDER_INTERVAL_TURNS
+    );
+    const effectivePrompt = injectResponsibility
+      ? prependResponsibilityReminder(prompt, responsibility)
+      : prompt;
     const collector = new CodexJsonlCollector(expectedSessionId);
     const turnId = randomUUID();
     const args = buildCodexExecArgs(
       this.config,
       this.identity.decisionSchemaPath,
-      prompt,
+      effectivePrompt,
       expectedSessionId,
     );
     const child = spawn(this.identity.command.file, commandArgs(this.identity.command, args), {
@@ -249,6 +261,10 @@ export class CodexCommandSession implements AgentSession {
     }
     validateDecision(decision);
     this.persistReady(collector.providerSessionId, turnId);
+    this.lastCompletedResponsibility = responsibility;
+    this.completedTurnsSinceResponsibilityReminder = injectResponsibility
+      ? 1
+      : this.completedTurnsSinceResponsibilityReminder + 1;
     return {
       turnId,
       status: 'completed',

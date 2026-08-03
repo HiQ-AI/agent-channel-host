@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import YAML from 'yaml';
-import { defaultConfig, loadConfig } from '../src/config.js';
+import { defaultConfig, loadConfig, writeConfig } from '../src/config.js';
 
 test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
-  const current = defaultConfig('model-defaults', '.', 'Agent', 'role');
+  const current = defaultConfig('model-defaults', '.', 'Agent');
   assert.equal(current.version, 2);
+  assert.deepEqual(current.identity, { name: 'Agent' });
   assert.deepEqual(current.channel, {
     id: 'dingtalk', enabled: true, profileId: 'default', command: 'dws',
     subscriptions: { groups: 'selected', directs: 'selected' },
@@ -29,17 +30,25 @@ test('既有 v2 配置缺少 Channel 新字段时保持启用并默认 selected'
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   try {
-    const legacy = structuredClone(defaultConfig('legacy-v2', '.', 'Agent', 'role')) as unknown as {
+    const legacy = structuredClone(defaultConfig('legacy-v2', '.', 'Agent')) as unknown as {
       channel: Record<string, unknown>;
+      identity: Record<string, unknown>;
     };
+    legacy.identity.role = '旧默认角色';
+    legacy.identity.signature = '- 旧签名';
     delete legacy.channel.enabled;
     delete legacy.channel.subscriptions;
     delete legacy.channel.defaultModes;
     await writeFile(path, YAML.stringify(legacy), 'utf8');
     const loaded = await loadConfig('legacy-v2', path);
+    assert.deepEqual(loaded.identity, { name: 'Agent' });
     assert.equal(loaded.channel.enabled, true);
     assert.deepEqual(loaded.channel.subscriptions, { groups: 'selected', directs: 'selected' });
     assert.deepEqual(loaded.channel.defaultModes, { groups: 'shadow', directs: 'shadow' });
+    await writeConfig(loaded, path);
+    const normalized = await readFile(path, 'utf8');
+    assert.equal(normalized.includes('role:'), false);
+    assert.equal(normalized.includes('signature:'), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -51,7 +60,7 @@ test('v2 配置不暴露 turn 超时且忽略旧字段', async () => {
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   try {
-    const legacy = structuredClone(defaultConfig('legacy-turn-timeout', '.', 'Agent', 'role')) as unknown as {
+    const legacy = structuredClone(defaultConfig('legacy-turn-timeout', '.', 'Agent')) as unknown as {
       runtime: Record<string, unknown>;
     };
     legacy.runtime.turnTimeoutSeconds = 1;
