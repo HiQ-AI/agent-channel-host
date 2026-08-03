@@ -209,12 +209,45 @@ export function consumerArgs(eventKey: string, config: HostConfig): string[] {
   ];
 }
 
+export function subscribedEventKeys(config: HostConfig): string[] {
+  const eventKeys: string[] = [];
+  if (config.channel.subscriptions.groups !== 'none') eventKeys.push(GROUP_EVENT);
+  if (config.channel.subscriptions.directs !== 'none') eventKeys.push(DIRECT_EVENT);
+  return eventKeys;
+}
+
+export function inspectDwsBusStatus(value: unknown): { state: string | null; live: boolean } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { state: null, live: false };
+  const bus = (value as Record<string, unknown>).bus;
+  if (!bus || typeof bus !== 'object' || Array.isArray(bus)) return { state: null, live: false };
+  const entry = (bus as Record<string, unknown>).entry;
+  const live = (bus as Record<string, unknown>).live;
+  return {
+    state: entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? text((entry as Record<string, unknown>).state)
+      : null,
+    live: Boolean(live && typeof live === 'object' && !Array.isArray(live)),
+  };
+}
+
+export function dwsProcessExitError(
+  label: string,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  stderrLines: string[],
+): Error {
+  return new Error(`${label}：code=${code} signal=${signal}${dwsStderrSuffix(stderrLines)}`);
+}
+
 export class DwsEventOwner {
   private bus: ChildProcessWithoutNullStreams | null = null;
   private consumers: ChildProcessWithoutNullStreams[] = [];
   private interfaces: Interface[] = [];
   private stopping = false;
   private command: ResolvedCommand | null = null;
+  private busReady = false;
+  private busSpawnError: Error | null = null;
+  private busStderr: string[] = [];
 
   constructor(
     private readonly config: HostConfig,
@@ -223,40 +256,66 @@ export class DwsEventOwner {
   ) {}
 
   async start(): Promise<void> {
+    const eventKeys = subscribedEventKeys(this.config);
+    if (eventKeys.length === 0) return;
     this.command = await resolveCommand(this.config.channel.command);
     const busArgs = [
-      'event', 'consume', GROUP_EVENT, '--foreground', '--format', 'ndjson', ...profileArgs(this.config),
+      'event', 'consume', eventKeys[0]!, '--foreground', '--format', 'ndjson', ...profileArgs(this.config),
     ];
     this.bus = spawn(this.command.file, commandArgs(this.command, busArgs), {
       cwd: this.config.runtime.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
-    this.bus.once('error', this.onFatal);
+    this.bus.once('error', (error) => {
+      const wrapped = new Error(`DWS bus 启动失败：${error.message}`);
+      this.busSpawnError = wrapped;
+      if (this.busReady && !this.stopping) this.onFatal(wrapped);
+    });
     this.bus.once('exit', (code, signal) => {
-      if (!this.stopping) this.onFatal(new Error(`DWS bus 意外退出：code=${code} signal=${signal}`));
+      if (this.busReady && !this.stopping) {
+        this.onFatal(dwsProcessExitError('DWS bus 意外退出', code, signal, this.busStderr));
+      }
     });
     const busStdout = createInterface({ input: this.bus.stdout });
     const busStderr = createInterface({ input: this.bus.stderr });
     busStdout.on('line', () => undefined);
-    busStderr.on('line', () => undefined);
+    busStderr.on('line', (line) => appendDwsStderr(this.busStderr, line));
     this.interfaces.push(busStdout, busStderr);
-    await this.waitForBus();
-    await Promise.all([GROUP_EVENT, DIRECT_EVENT].map((eventKey) => this.startConsumer(eventKey)));
+    try {
+      await this.waitForBus();
+      await Promise.all(eventKeys.map((eventKey) => this.startConsumer(eventKey)));
+      this.busReady = true;
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
   }
 
   private async waitForBus(): Promise<void> {
     const deadline = Date.now() + this.config.runtime.startupTimeoutSeconds * 1_000;
+    let staleSince: number | null = null;
     while (Date.now() < deadline) {
-      if (this.bus?.exitCode !== null) throw new Error(`DWS bus ready 前退出：${this.bus?.exitCode}`);
+      if (this.busSpawnError) throw this.busSpawnError;
+      if (this.bus?.exitCode !== null || this.bus?.signalCode !== null) {
+        throw dwsProcessExitError('DWS bus ready 前退出', this.bus?.exitCode ?? null, this.bus?.signalCode ?? null, this.busStderr);
+      }
       const status = await runDwsJson(this.config, ['event', 'status'], 15_000);
-      const body = status as Record<string, unknown>;
-      const bus = body.bus as Record<string, unknown> | undefined;
-      const entry = bus?.entry as Record<string, unknown> | undefined;
-      if (entry?.state === 'running') return;
+      const probe = inspectDwsBusStatus(status);
+      if (probe.state === 'running' && probe.live) return;
+      if (probe.state === 'running') {
+        staleSince ??= Date.now();
+        if (Date.now() - staleSince >= 2_000) {
+          throw new Error(
+            `DWS bus 状态失真：bus.lock 显示 running，但 status RPC 连续不可用；疑似 stale bus 或 PID 复用${dwsStderrSuffix(this.busStderr)}`,
+          );
+        }
+      } else {
+        staleSince = null;
+      }
       await delay(500);
     }
-    throw new Error('DWS bus 未在启动期限内进入 running');
+    throw new Error(`DWS bus 未在启动期限内进入可连接状态${dwsStderrSuffix(this.busStderr)}`);
   }
 
   private async startConsumer(eventKey: string): Promise<void> {
@@ -270,6 +329,7 @@ export class DwsEventOwner {
     const stdout = createInterface({ input: child.stdout });
     const stderr = createInterface({ input: child.stderr });
     this.interfaces.push(stdout, stderr);
+    const stderrLines: string[] = [];
     stdout.on('line', (line) => {
       try {
         this.onEvent(JSON.parse(line));
@@ -280,23 +340,31 @@ export class DwsEventOwner {
     let becameReady = false;
     const ready = new Promise<void>((resolve, reject) => {
       stderr.on('line', (line) => {
+        appendDwsStderr(stderrLines, line);
         if (/\[event\]\s+ready\b/.test(line)) {
           becameReady = true;
           resolve();
         }
       });
       child.once('error', (error) => {
-        if (becameReady) this.onFatal(error);
-        else reject(error);
+        const wrapped = new Error(`DWS ${eventKey} consumer 启动失败：${error.message}`);
+        if (becameReady) this.onFatal(wrapped);
+        else reject(wrapped);
       });
       child.once('exit', (code, signal) => {
         if (this.stopping) return;
-        const error = new Error(`DWS ${eventKey} consumer 退出：code=${code} signal=${signal}`);
+        const error = dwsProcessExitError(`DWS ${eventKey} consumer 退出`, code, signal, stderrLines);
         if (becameReady) this.onFatal(error);
         else reject(error);
       });
     });
-    await withTimeout(ready, this.config.runtime.startupTimeoutSeconds * 1_000, `DWS ${eventKey} ready`);
+    try {
+      await withTimeout(ready, this.config.runtime.startupTimeoutSeconds * 1_000, `DWS ${eventKey} ready`);
+    } catch (error) {
+      const message = (error as Error).message;
+      if (message.includes('stderr=')) throw error;
+      throw new Error(`${message}${dwsStderrSuffix(stderrLines)}`);
+    }
   }
 
   async stop(): Promise<void> {
@@ -306,6 +374,9 @@ export class DwsEventOwner {
     this.interfaces.forEach((item) => item.close());
     this.consumers = [];
     this.bus = null;
+    this.busReady = false;
+    this.busSpawnError = null;
+    this.busStderr = [];
   }
 }
 
@@ -385,6 +456,21 @@ function safeJson(value: unknown): string {
   } catch {
     return '[unserializable]';
   }
+}
+
+function appendDwsStderr(lines: string[], line: string): void {
+  const compact = line.trim();
+  if (!compact) return;
+  lines.push(compact.slice(0, 1_000));
+  if (lines.length > 8) lines.splice(0, lines.length - 8);
+}
+
+function dwsStderrSuffix(lines: string[]): string {
+  if (lines.length === 0) return '';
+  const detail = lines.join(' | ')
+    .replace(/\b(access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization)\b\s*[:=]\s*\S+/gi, '$1=[REDACTED]')
+    .slice(-2_000);
+  return detail ? ` stderr=${detail}` : '';
 }
 
 function projectHistoryMessage(value: unknown): RecentMessage {

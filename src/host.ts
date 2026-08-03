@@ -280,6 +280,7 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
   let lockAcquired = false;
   let leaseAcquired = false;
   let channelOwned = false;
+  let channelFatal: Error | null = null;
   const channel = config.channel.enabled ? options.channel ?? new DwsChannelAdapter(config) : null;
   const channels = new Map<string, ChannelAdapter>();
   if (channel) channels.set(channelKey(channel.descriptor.channelId, channel.descriptor.profileId), channel);
@@ -354,38 +355,44 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
         connectedAt: null,
         lastEventAt: null,
       });
-      await channel.start({
-        onEvent: (normalized) => {
-          store.noteChannelEvent(normalized.channelId, normalized.channelProfileId, normalized.receivedAt);
-          const resolution = resolveEventConversation(config, store, normalized);
-          const conversation = resolution.conversation;
-          if (!conversation) {
-            log({
-              type: 'EVENT_REJECTED', reason: resolution.reason,
-              channelId: normalized.channelId, kind: normalized.kind,
-              fingerprintPrefix: normalized.fingerprint.slice(0, 12),
-            });
-            return;
-          }
-          if (resolution.created) {
-            log({
-              type: 'CONVERSATION_AUTO_CREATED', conversationId: conversation.id,
-              channelId: normalized.channelId, kind: normalized.kind, mode: conversation.mode,
-            });
-          }
-          const admitted = store.admitEvent(conversation, normalized);
-          if (!admitted.admitted || !admitted.event) {
-            log({ type: 'EVENT_DUPLICATE', conversationId: conversation.id, fingerprintPrefix: normalized.fingerprint.slice(0, 12) });
-            return;
-          }
-          log({ type: 'EVENT_ADMITTED', conversationId: conversation.id, sequence: admitted.event.sequence });
-          scheduler?.signal(conversation.id);
-        },
-        onFatal: (error) => {
-          store.setChannelConnection({ ...descriptor, state: 'error', ownerPid: process.pid, error: error.message });
-          requestStop(error);
-        },
-      });
+      try {
+        await channel.start({
+          onEvent: (normalized) => {
+            store.noteChannelEvent(normalized.channelId, normalized.channelProfileId, normalized.receivedAt);
+            const resolution = resolveEventConversation(config, store, normalized);
+            const conversation = resolution.conversation;
+            if (!conversation) {
+              log({
+                type: 'EVENT_REJECTED', reason: resolution.reason,
+                channelId: normalized.channelId, kind: normalized.kind,
+                fingerprintPrefix: normalized.fingerprint.slice(0, 12),
+              });
+              return;
+            }
+            if (resolution.created) {
+              log({
+                type: 'CONVERSATION_AUTO_CREATED', conversationId: conversation.id,
+                channelId: normalized.channelId, kind: normalized.kind, mode: conversation.mode,
+              });
+            }
+            const admitted = store.admitEvent(conversation, normalized);
+            if (!admitted.admitted || !admitted.event) {
+              log({ type: 'EVENT_DUPLICATE', conversationId: conversation.id, fingerprintPrefix: normalized.fingerprint.slice(0, 12) });
+              return;
+            }
+            log({ type: 'EVENT_ADMITTED', conversationId: conversation.id, sequence: admitted.event.sequence });
+            scheduler?.signal(conversation.id);
+          },
+          onFatal: (error) => {
+            channelFatal ??= error;
+            store.setChannelConnection({ ...descriptor, state: 'error', ownerPid: process.pid, error: error.message });
+            requestStop(error);
+          },
+        });
+      } catch (error) {
+        channelFatal = error instanceof Error ? error : new Error(String(error));
+        throw channelFatal;
+      }
       const connectedAt = new Date().toISOString();
       store.setChannelConnection({ ...descriptor, state: 'ready', ownerPid: process.pid, connectedAt });
     }
@@ -418,9 +425,10 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
       });
     }
     if (runtimeInitialized) {
+      const runtimeError = fatalError && fatalError !== channelFatal ? fatalError : null;
       store.setRuntimeAdapter({
-        runtimeId: config.runtime.id, label: 'Codex CLI', state: fatalError ? 'error' : 'stopped',
-        model: config.runtime.model, error: fatalError?.message ?? null,
+        runtimeId: config.runtime.id, label: 'Codex CLI', state: runtimeError ? 'error' : 'stopped',
+        model: config.runtime.model, error: runtimeError?.message ?? null,
       });
     }
     if (leaseAcquired) store.releaseLease('host', lock.ownerId);

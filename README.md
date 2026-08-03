@@ -202,7 +202,7 @@ channel:
     directs: shadow
 ```
 
-`none/selected/all` 是唯一共享事件流上的 Host 准入策略，`shadow/reply` 是新 Conversation 的默认发言权限，两者互不替代。无论如何配置，DingTalk 仍然只有一个 Channel owner、一个 bus，以及共享的群聊/私聊 consumer；不会为每个群或私聊创建接收服务。交互式 `view` 可在 Instance 的 Channel 页面逐项选择。View-owned Host 会按新配置重启；attached Host 只保存配置并提示外部重启。
+`none/selected/all` 是唯一共享事件流上的 Host 准入策略，`shadow/reply` 是新 Conversation 的默认发言权限，两者互不替代。DingTalk 始终只有一个 Channel owner 和一个 bus；群聊或私聊配置为 `none` 时不启动该类共享 consumer，两类都为 `none` 时 Channel 保持空闲且不启动 DWS 事件流。不会为每个群或私聊创建接收服务。交互式 `view` 可在 Instance 的 Channel 页面逐项选择。View-owned Host 会按新配置重启；attached Host 只保存配置并提示外部重启。
 
 ## 离线 runtime canary
 
@@ -311,7 +311,8 @@ agent-channel service remove --instance triss
 - SQLite WAL 保证 Host 收到事件后的本地 admission/outbox 原子性。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
 - Host 启动恢复只重试未达 3 次上限的 failed inbox 与未确认 outbox；outbox 沿用原 UUID，并在实际发送前再次校验 Conversation 权限和最新消息 sequence。达到上限、已完成或已提交的记录不会自动重放。
 - `submitted` 只表示 DWS 发送调用成功，不等于对端已读或业务已接受。
-- Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner 加群聊/私聊两个共享 bus consumer。
+- Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner、一个 bus，以及按群聊/私聊订阅范围启停的共享 consumer。
+- Host 仅在 `dws event status` 同时返回 `state=running` 和可用 live RPC 时认定 bus ready；只有存活 PID、没有 IPC 的状态会明确报告为 stale bus/PID 复用。DWS 子进程退出时保留经脱敏且有界的 stderr 根因，不再只显示 `code=5`。
 - Host 不覆盖 Codex 的 `approval_policy`、sandbox、network 或 writable roots；这些权限与 MCP/skills 一样由 runtime 自身配置加载。`runtime.cwd` 必须指向专用工作目录，部署者必须按该 runtime 的权限模型独立审计。
 - Host 不安装 compaction hook，也不审查 Agent 的命令、文件或内部任务行为。
 - Runtime 返回不符合 `{action, replyText}` 最小结构时，仅将对应 Conversation 的当前 batch 标为 failed 并禁止出站；不会停止唯一 Channel owner或阻断其他 Conversation。

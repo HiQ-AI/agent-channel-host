@@ -21,6 +21,13 @@ class FakeChannel implements ChannelAdapter {
   }
 }
 
+class FailingChannel extends FakeChannel {
+  override async start(_handlers: ChannelHandlers): Promise<void> {
+    this.started += 1;
+    throw new Error('模拟 Channel 启动失败');
+  }
+}
+
 class FakeOwnerLock {
   acquired = 0;
   released = 0;
@@ -414,6 +421,44 @@ test('Channel disabled 时 Host 不启动 Channel 且不获取其 owner', async 
     await running;
     assert.equal(channel.stopped, 0);
     assert.equal(owner.released, 0);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+    else process.env.AGENT_CHANNEL_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Channel 启动失败只标记 Channel，不把已验证 Runtime 伪报为同一异常', async () => {
+  const root = resolve('.test-channel-start-failure');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const previous = process.env.AGENT_CHANNEL_HOME;
+  process.env.AGENT_CHANNEL_HOME = root;
+  const config = defaultConfig('channel-start-failure', '.', 'Agent', 'role');
+  try {
+    await assert.rejects(runHost(config, {
+      handleProcessSignals: false,
+      channel: new FailingChannel(),
+      runtime: new FakeRuntime(),
+      ownerLock: new FakeOwnerLock('failing-owner'),
+      log: () => undefined,
+    }), /模拟 Channel 启动失败/);
+    const observer = new Store(resolve(root, 'instances', 'channel-start-failure', 'state.sqlite3'));
+    try {
+      const status = observer.status();
+      const channels = status.channels as Array<{ state: string; error: string | null }>;
+      const runtimes = status.runtimeAdapters as Array<{ state: string; error: string | null }>;
+      const alerts = status.alerts as Array<{ scope: string }>;
+      assert.deepEqual(channels.map((row) => ({ state: row.state, error: row.error })), [
+        { state: 'error', error: '模拟 Channel 启动失败' },
+      ]);
+      assert.deepEqual(runtimes.map((row) => ({ state: row.state, error: row.error })), [
+        { state: 'stopped', error: null },
+      ]);
+      assert.deepEqual(alerts.map((row) => row.scope), ['channel']);
+    } finally {
+      observer.close();
+    }
   } finally {
     if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
     else process.env.AGENT_CHANNEL_HOME = previous;
