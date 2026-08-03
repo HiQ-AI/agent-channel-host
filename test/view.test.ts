@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { defaultConfig } from '../src/config.js';
+import { defaultConfig, loadConfig } from '../src/config.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import {
@@ -65,7 +65,7 @@ test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完�
   }
 });
 
-test('management view 默认显示跨会话总览，可进入详情并切换设置 tab', () => {
+test('management view 明确分离总览内 INSTANCES 与全局设置', () => {
   const store = new Store(':memory:');
   const secondStore = new Store(':memory:');
   const config = defaultConfig('management-view', '.', 'Agent', '角色');
@@ -86,7 +86,7 @@ test('management view 默认显示跨会话总览，可进入详情并切换设�
     const detail = store.conversationDetail(first.id);
     const settings = createSettingEntries(config, store, first.id);
     const overview = renderManagementView(instances, state, detail, settings, 140);
-    assert.match(overview, /\[ 总览 \]\s+设置/);
+    assert.match(overview, /\[ 总览 \]\s+全局设置/);
     assert.match(overview, /management-view/);
     assert.match(overview, /second-agent/);
     assert.match(overview, /私聊 A/);
@@ -102,11 +102,22 @@ test('management view 默认显示跨会话总览，可进入详情并切换设�
 
     state.detailInstanceName = null;
     state.detailConversationId = null;
+    state.tab = 'overview';
+    state.detailInstanceName = 'management-view';
+    state.settingsInstanceName = 'management-view';
+    const instanceSettings = renderManagementView(instances, state, detail, settings, 140);
+    assert.match(instanceSettings, /\[ 总览 \]\s+全局设置/);
+    assert.match(instanceSettings, /Instance 设置 \/ management-view/);
+    assert.match(instanceSettings, /Agent 名称/);
+    assert.match(instanceSettings, /会话职责 · 私聊 A/);
+
     state.tab = 'settings';
-    const settingsView = renderManagementView(instances, state, detail, settings, 140);
-    assert.match(settingsView, /总览\s+\[ 设置 \]/);
-    assert.match(settingsView, /Agent 名称/);
-    assert.match(settingsView, /会话职责 · 私聊 A/);
+    state.settingsInstanceName = null;
+    const globalSettings = renderManagementView(instances, state, detail, [], 140);
+    assert.match(globalSettings, /总览\s+\[ 全局设置 \]/);
+    assert.match(globalSettings, /作用域：当前 agent-channel-host View/);
+    assert.match(globalSettings, /暂无可修改的全局配置/);
+    assert.doesNotMatch(globalSettings, /Agent 名称|会话职责/);
   } finally {
     store.close();
     secondStore.close();
@@ -141,12 +152,14 @@ test('management view 在交互终端使用语义颜色，纯文本输出不带 
   }
 });
 
-test('settings 使用清晰的列分隔符并保持左对齐', () => {
+test('instance 设置使用清晰的列分隔符并保持左对齐', () => {
   const store = new Store(':memory:');
   const config = defaultConfig('settings-layout', '.', 'Agent', '角色');
   try {
     const state = createManagementViewState();
-    state.tab = 'settings';
+    state.tab = 'overview';
+    state.detailInstanceName = 'settings-layout';
+    state.settingsInstanceName = 'settings-layout';
     const rendered = renderManagementView(
       [viewInstance('settings-layout', config, store)],
       state,
@@ -211,7 +224,7 @@ test('view 颜色遵循 TTY、NO_COLOR 与 dumb terminal', () => {
   assert.equal(shouldUseColor(true, { TERM: 'dumb' }), false);
 });
 
-test('management view 按键可从总览进入详情并切换设置编辑', async () => {
+test('management view 按键可从总览进入详情并切换到 instance 设置编辑', async () => {
   const store = new Store(':memory:');
   const config = defaultConfig('view-input', '.', 'Agent', '角色');
   const conversation = store.addConversation({
@@ -227,8 +240,9 @@ test('management view 按键可从总览进入详情并切换设置编辑', asyn
     assert.equal(state.detailConversationId, conversation.id);
     await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
     assert.equal(state.detailConversationId, null);
-    await handleManagementViewInput('\t', state, instances, () => { stopped = true; });
-    assert.equal(state.tab, 'settings');
+    await handleManagementViewInput('s', state, instances, () => { stopped = true; });
+    assert.equal(state.tab, 'overview');
+    assert.equal(state.settingsInstanceName, 'view-input');
     await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
     assert.equal(state.editing?.key, 'identity.name');
     await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
@@ -240,7 +254,7 @@ test('management view 按键可从总览进入详情并切换设置编辑', asyn
   }
 });
 
-test('settings 在上层 view 中显式切换 instance 后编辑对应配置', async () => {
+test('INSTANCES 在上层 view 中显式选择 instance 后编辑对应配置', async () => {
   const firstStore = new Store(':memory:');
   const secondStore = new Store(':memory:');
   const firstConfig = defaultConfig('first', '.', 'First Agent', '答疑');
@@ -250,18 +264,89 @@ test('settings 在上层 view 中显式切换 instance 后编辑对应配置', a
     viewInstance('second', secondConfig, secondStore),
   ];
   const state = createManagementViewState();
-  state.tab = 'settings';
+  state.tab = 'overview';
   try {
-    await handleManagementViewInput(']', state, instances, () => undefined);
+    await handleManagementViewInput('j', state, instances, () => undefined);
     assert.equal(state.selectedInstance, 1);
+    await handleManagementViewInput('\r', state, instances, () => undefined);
+    assert.equal(state.detailInstanceName, 'second');
+    await handleManagementViewInput('s', state, instances, () => undefined);
+    assert.equal(state.settingsInstanceName, 'second');
     await handleManagementViewInput('\r', state, instances, () => undefined);
     assert.equal(state.editing?.key, 'identity.name');
     assert.equal(state.editing?.value, 'Second Agent');
     const rendered = renderManagementView(instances, state, null, createSettingEntries(secondConfig, secondStore, null), 120);
-    assert.match(rendered, /instance=second/);
+    assert.match(rendered, /Instance 设置 \/ second/);
   } finally {
     firstStore.close();
     secondStore.close();
+  }
+});
+
+test('instance Channel toggle 原子持久化并通知 Host 生命周期管理器', async () => {
+  const root = resolve('.test-view-channel-toggle');
+  const configFile = resolve(root, 'config.yaml');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const store = new Store(':memory:');
+  const config = defaultConfig('toggle-channel', '.', 'Agent', 'role');
+  const instance = { ...viewInstance('toggle-channel', config, store), configFile };
+  const instances = [instance];
+  const state = createManagementViewState();
+  state.tab = 'overview';
+  state.detailInstanceName = instance.name;
+  state.settingsInstanceName = instance.name;
+  const entries = createSettingEntries(config, store, null, configFile);
+  state.selectedSetting = entries.findIndex((entry) => entry.key === 'channel:dingtalk:default:enabled');
+  let appliedKey = '';
+  try {
+    await handleManagementViewInput('\r', state, instances, () => undefined, {
+      afterSettingApplied: async (_target, entry) => { appliedKey = entry.key; return '目标 Host 已重启'; },
+    });
+    assert.equal(config.channel.enabled, false);
+    assert.equal((await loadConfig('toggle-channel', configFile)).channel.enabled, false);
+    assert.equal(appliedKey, 'channel:dingtalk:default:enabled');
+    assert.equal(state.notice, '目标 Host 已重启');
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('TUI 可在 INSTANCES 中通过受校验向导新增并启动 instance', async () => {
+  const instances: ViewInstance[] = [];
+  const state = createManagementViewState();
+  state.tab = 'overview';
+  const createdInputs: Array<{ instance: string; cwd: string; name: string; role: string }> = [];
+  let started = '';
+  const createdStores: Store[] = [];
+  const actions = {
+    createInstance: async (input: { instance: string; cwd: string; name: string; role: string }) => {
+      createdInputs.push(input);
+      const config = defaultConfig(input.instance, input.cwd, input.name, input.role);
+      config.channel.enabled = false;
+      const store = new Store(':memory:');
+      createdStores.push(store);
+      return viewInstance(input.instance, config, store);
+    },
+    startInstance: async (instance: ViewInstance) => { started = instance.name; },
+  };
+  try {
+    await handleManagementViewInput('a', state, instances, () => undefined, actions);
+    await handleManagementViewInput('new-agent', state, instances, () => undefined, actions);
+    await handleManagementViewInput('\r', state, instances, () => undefined, actions);
+    await handleManagementViewInput('\r', state, instances, () => undefined, actions);
+    await handleManagementViewInput('\r', state, instances, () => undefined, actions);
+    await handleManagementViewInput('\r', state, instances, () => undefined, actions);
+    assert.equal(instances.length, 1);
+    assert.equal(instances[0]?.name, 'new-agent');
+    assert.equal(instances[0]?.config.channel.enabled, false);
+    assert.equal(state.settingsInstanceName, 'new-agent');
+    assert.equal(started, 'new-agent');
+    assert.equal(createdInputs[0]?.name, 'DingTalk Agent');
+    assert.match(createdInputs[0]?.role ?? '', /职责范围/);
+  } finally {
+    for (const store of createdStores) store.close();
   }
 });
 

@@ -294,6 +294,33 @@ export class Store {
         COMMIT;
       `);
     }
+    const contextVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (contextVersion < 6) {
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE channel_connections_v6 (
+          channel_id TEXT NOT NULL,
+          profile_id TEXT NOT NULL,
+          label TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('starting','ready','stopped','disabled','error')),
+          owner_pid INTEGER,
+          connected_at TEXT,
+          last_event_at TEXT,
+          error TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(channel_id,profile_id)
+        );
+        INSERT INTO channel_connections_v6(
+          channel_id,profile_id,label,state,owner_pid,connected_at,last_event_at,error,updated_at
+        )
+          SELECT channel_id,profile_id,label,state,owner_pid,connected_at,last_event_at,error,updated_at
+          FROM channel_connections;
+        DROP TABLE channel_connections;
+        ALTER TABLE channel_connections_v6 RENAME TO channel_connections;
+        PRAGMA user_version=6;
+        COMMIT;
+      `);
+    }
   }
 
   addConversation(input: {
@@ -931,7 +958,7 @@ export class Store {
     channelId: string;
     profileId: string;
     label: string;
-    state: 'starting' | 'ready' | 'stopped' | 'error';
+    state: 'starting' | 'ready' | 'stopped' | 'disabled' | 'error';
     ownerPid: number | null;
     connectedAt?: string | null;
     lastEventAt?: string | null;

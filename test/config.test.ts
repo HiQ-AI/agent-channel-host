@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import YAML from 'yaml';
 import { defaultConfig, loadConfig } from '../src/config.js';
 
 test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   const current = defaultConfig('model-defaults', '.', 'Agent', 'role');
   assert.equal(current.version, 2);
   assert.deepEqual(current.channel, {
-    id: 'dingtalk', profileId: 'default', command: 'dws',
+    id: 'dingtalk', enabled: true, profileId: 'default', command: 'dws',
   });
   assert.equal(current.runtime.id, 'codex');
   assert.equal(current.runtime.command, 'codex');
@@ -17,6 +18,24 @@ test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   assert.equal(current.runtime.effort, 'low');
   assert.equal(current.scheduling.quietWindowMilliseconds, 300);
   assert.equal(current.scheduling.maxBatchMessages, 20);
+});
+
+test('既有 v2 配置缺少 channel.enabled 时保持启用', async () => {
+  const root = resolve('.test-config-v2-channel-default');
+  const path = resolve(root, 'config.yaml');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  try {
+    const legacy = structuredClone(defaultConfig('legacy-v2', '.', 'Agent', 'role')) as unknown as {
+      channel: Record<string, unknown>;
+    };
+    delete legacy.channel.enabled;
+    await writeFile(path, YAML.stringify(legacy), 'utf8');
+    const loaded = await loadConfig('legacy-v2', path);
+    assert.equal(loaded.channel.enabled, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('v1 App Server 配置 fail closed，不静默迁移', async () => {

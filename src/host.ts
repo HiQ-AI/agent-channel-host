@@ -218,8 +218,9 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
   let lockAcquired = false;
   let leaseAcquired = false;
   let channelOwned = false;
-  const channel = options.channel ?? new DwsChannelAdapter(config);
-  const channels = new Map([[channelKey(channel.descriptor.channelId, channel.descriptor.profileId), channel as ChannelAdapter]]);
+  const channel = config.channel.enabled ? options.channel ?? new DwsChannelAdapter(config) : null;
+  const channels = new Map<string, ChannelAdapter>();
+  if (channel) channels.set(channelKey(channel.descriptor.channelId, channel.descriptor.profileId), channel);
   const abortHandler = () => requestStop();
   if (options.signal?.aborted) requestStop();
   else options.signal?.addEventListener('abort', abortHandler, { once: true });
@@ -227,8 +228,18 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
 
   try {
     if (options.signal?.aborted) return;
-    await lock.acquire();
-    lockAcquired = true;
+    if (channel) {
+      await lock.acquire();
+      lockAcquired = true;
+    } else {
+      store.setChannelConnection({
+        channelId: config.channel.id,
+        profileId: config.channel.profileId,
+        label: 'DingTalk DWS',
+        state: 'disabled',
+        ownerPid: null,
+      });
+    }
     if (!store.acquireLease('host', lock.ownerId, Date.now(), 30_000)) {
       throw new Error('instance 数据库 lease 已被其他 Host 持有');
     }
@@ -271,47 +282,49 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     });
     scheduler = new EventDrivenScheduler(config, store, channels, runtimes, log, requestStop);
 
-    const descriptor = channel.descriptor;
-    channelOwned = true;
-    store.setChannelConnection({
-      ...descriptor,
-      state: 'starting',
-      ownerPid: process.pid,
-      connectedAt: null,
-      lastEventAt: null,
-    });
-    await channel.start({
-      onEvent: (normalized) => {
-        store.noteChannelEvent(normalized.channelId, normalized.channelProfileId, normalized.receivedAt);
-        const conversation = store.findEnabledConversation(
-          normalized.channelId,
-          normalized.channelProfileId,
-          normalized.kind,
-          normalized.conversationExternalId,
-        );
-        if (!conversation) {
-          log({
-            type: 'EVENT_REJECTED', reason: 'conversation-not-authorized',
-            channelId: normalized.channelId, kind: normalized.kind,
-            fingerprintPrefix: normalized.fingerprint.slice(0, 12),
-          });
-          return;
-        }
-        const admitted = store.admitEvent(conversation, normalized);
-        if (!admitted.admitted || !admitted.event) {
-          log({ type: 'EVENT_DUPLICATE', conversationId: conversation.id, fingerprintPrefix: normalized.fingerprint.slice(0, 12) });
-          return;
-        }
-        log({ type: 'EVENT_ADMITTED', conversationId: conversation.id, sequence: admitted.event.sequence });
-        scheduler?.signal(conversation.id);
-      },
-      onFatal: (error) => {
-        store.setChannelConnection({ ...descriptor, state: 'error', ownerPid: process.pid, error: error.message });
-        requestStop(error);
-      },
-    });
-    const connectedAt = new Date().toISOString();
-    store.setChannelConnection({ ...descriptor, state: 'ready', ownerPid: process.pid, connectedAt });
+    if (channel) {
+      const descriptor = channel.descriptor;
+      channelOwned = true;
+      store.setChannelConnection({
+        ...descriptor,
+        state: 'starting',
+        ownerPid: process.pid,
+        connectedAt: null,
+        lastEventAt: null,
+      });
+      await channel.start({
+        onEvent: (normalized) => {
+          store.noteChannelEvent(normalized.channelId, normalized.channelProfileId, normalized.receivedAt);
+          const conversation = store.findEnabledConversation(
+            normalized.channelId,
+            normalized.channelProfileId,
+            normalized.kind,
+            normalized.conversationExternalId,
+          );
+          if (!conversation) {
+            log({
+              type: 'EVENT_REJECTED', reason: 'conversation-not-authorized',
+              channelId: normalized.channelId, kind: normalized.kind,
+              fingerprintPrefix: normalized.fingerprint.slice(0, 12),
+            });
+            return;
+          }
+          const admitted = store.admitEvent(conversation, normalized);
+          if (!admitted.admitted || !admitted.event) {
+            log({ type: 'EVENT_DUPLICATE', conversationId: conversation.id, fingerprintPrefix: normalized.fingerprint.slice(0, 12) });
+            return;
+          }
+          log({ type: 'EVENT_ADMITTED', conversationId: conversation.id, sequence: admitted.event.sequence });
+          scheduler?.signal(conversation.id);
+        },
+        onFatal: (error) => {
+          store.setChannelConnection({ ...descriptor, state: 'error', ownerPid: process.pid, error: error.message });
+          requestStop(error);
+        },
+      });
+      const connectedAt = new Date().toISOString();
+      store.setChannelConnection({ ...descriptor, state: 'ready', ownerPid: process.pid, connectedAt });
+    }
     const recovered = scheduler.reconcile();
     if (recovered.length > 0) log({ type: 'PENDING_RECONCILED', conversations: recovered.length });
     log({
@@ -331,7 +344,7 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     const fatalError = fatal as Error | null;
     if (leaseTimer) clearInterval(leaseTimer);
     await scheduler?.stop();
-    if (channelOwned) {
+    if (channelOwned && channel) {
       await channel.stop().catch((error) => log({ type: 'CHANNEL_STOP_ERROR', error: (error as Error).message }));
       store.setChannelConnection({
         ...channel.descriptor,

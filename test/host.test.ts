@@ -11,9 +11,10 @@ import type { Conversation, DecisionRun, OutboxRecord } from '../src/types.js';
 
 class FakeChannel implements ChannelAdapter {
   readonly descriptor = { channelId: 'dingtalk', profileId: 'default', label: 'Fake Channel' };
+  started = 0;
   sent = 0;
   stopped = 0;
-  async start(_handlers: ChannelHandlers): Promise<void> {}
+  async start(_handlers: ChannelHandlers): Promise<void> { this.started += 1; }
   async stop(): Promise<void> { this.stopped += 1; }
   async send(_conversation: Conversation, _record: Pick<OutboxRecord, 'text' | 'uuid'>): Promise<void> {
     this.sent += 1;
@@ -21,9 +22,10 @@ class FakeChannel implements ChannelAdapter {
 }
 
 class FakeOwnerLock {
+  acquired = 0;
   released = 0;
   constructor(readonly ownerId: string) {}
-  async acquire(): Promise<void> {}
+  async acquire(): Promise<void> { this.acquired += 1; }
   async release(): Promise<void> { this.released += 1; }
 }
 
@@ -273,6 +275,50 @@ test('可嵌入 Host 由 AbortSignal 停止，第二个 owner 不覆盖运行状
     await running;
     assert.equal(channel.stopped, 1);
     assert.equal(owner.released, 1);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+    else process.env.AGENT_CHANNEL_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Channel disabled 时 Host 不启动 Channel 且不获取其 owner', async () => {
+  const root = resolve('.test-disabled-channel-host');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const previous = process.env.AGENT_CHANNEL_HOME;
+  process.env.AGENT_CHANNEL_HOME = root;
+  const config = defaultConfig('disabled-channel', '.', 'Agent', 'role');
+  config.channel.enabled = false;
+  const channel = new FakeChannel();
+  const runtime = new FakeRuntime();
+  const owner = new FakeOwnerLock('disabled-owner');
+  const abort = new AbortController();
+  try {
+    const running = runHost(config, {
+      signal: abort.signal,
+      handleProcessSignals: false,
+      channel,
+      runtime,
+      ownerLock: owner,
+      log: () => undefined,
+    });
+    await waitFor(() => {
+      const observer = new Store(resolve(root, 'instances', 'disabled-channel', 'state.sqlite3'));
+      try { return observer.status().hostState === 'running'; } finally { observer.close(); }
+    });
+    const observer = new Store(resolve(root, 'instances', 'disabled-channel', 'state.sqlite3'));
+    try {
+      assert.equal((observer.status().channels as Array<{ state: string }>)[0]?.state, 'disabled');
+    } finally {
+      observer.close();
+    }
+    assert.equal(channel.started, 0);
+    assert.equal(owner.acquired, 0);
+    abort.abort();
+    await running;
+    assert.equal(channel.stopped, 0);
+    assert.equal(owner.released, 0);
   } finally {
     if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
     else process.env.AGENT_CHANNEL_HOME = previous;
