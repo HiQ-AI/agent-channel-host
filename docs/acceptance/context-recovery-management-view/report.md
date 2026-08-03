@@ -2,7 +2,7 @@
 
 ## 结果
 
-Round 6 后的 54 项用例全部 PASS。`agent-channel-host` 0.5.0 已具备：
+Round 7 后的 58 项用例全部 PASS。`agent-channel-host` 0.5.0 已具备：
 
 - conversation checkpoint 与成员/角色/职责资料分层；
 - Codex 新 session 与自动 compaction 后的关键状态恢复，普通 resume 不重复注入；
@@ -16,6 +16,8 @@ Round 6 后的 54 项用例全部 PASS。`agent-channel-host` 0.5.0 已具备：
 - Channel 页同时显示指定私聊；因稳定身份边界，新增私聊继续要求显式 `openDingTalkId`，不按姓名猜测；
 - Conversation 详情可修改 title/enabled/职责/mode/warm TTL/成员资料，并以二次确认执行全级联删除；
 - INSTANCES 和 Instance 详情支持二次确认删除 Instance；attached Host fail closed，View-owned Host 先停止，删除过程持有管理 lease 防止外部抢占；
+- 删除 action 执行期间暂停周期 repaint；成功后在同一输入周期立即更新顶部计数、实例/会话列表、消息汇总、告警、选中项和确认状态，不读取已关闭 Store；
+- 中文 Windows 的 CP936 计划任务“不存在”输出可正确识别，权限或未知查询错误继续 fail closed；
 - 总览可直接新增 Instance，复用 CLI init 的共享初始化入口并以 Channel disabled 作为安全默认；
 - 零 instance 显示初始化引导；`view --once` 保持只读且不启动 Host；`run --instance` 保留为单 instance headless/service 入口。
 - 交互式 TTY 以语义颜色突出选中项和运行状态，`NO_COLOR`、非 TTY 与 `view --once` 保持纯文本；
@@ -26,11 +28,11 @@ Round 6 后的 54 项用例全部 PASS。`agent-channel-host` 0.5.0 已具备：
 
 ## 验证摘要
 
-- `npm run verify`：64/64 tests PASS，0.5.0 的 72-file pack dry-run PASS；
+- `npm run verify`：65/65 tests PASS，0.5.0 的 72-file pack dry-run PASS；
 - 真实 Codex：`new → resumed`，同一 provider session 前缀，结构化 `silent`；
 - 隔离 CLI：两个 instance 的 bare `view --once` 聚合输出和无 `--instance` help PASS；
-- 真实 Windows TTY：精简总览、Instance 对象详情、Channel toggle、群聊/私聊策略、合成群搜索与绑定、Conversation 删除确认/取消、字段光标编辑、TUI 新增、独立全局设置、退出确认/取消、alternate-screen 恢复和退出 PASS；
+- 真实 Windows TTY：精简总览、Instance 对象详情、Channel toggle、群聊/私聊策略、合成群搜索与绑定、Conversation 删除确认/取消、隔离 Instance 物理删除与同周期即时刷新、字段光标编辑、TUI 新增、独立全局设置、退出确认/取消、alternate-screen 恢复和退出 PASS；
 - 隔离 CLI：`view --once` 输出不含 ANSI PASS；
 - 外部影响：未连接 DWS、未发送消息、未安装服务、未部署。
 
-详细证据见 `round-1.md` 至 `round-6.md`，用例状态见 `matrix.csv`。
+详细证据见 `round-1.md` 至 `round-7.md`，用例状态见 `matrix.csv`。

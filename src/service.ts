@@ -54,15 +54,41 @@ export async function removeUserServiceIfInstalled(instance: string): Promise<bo
   if (process.platform !== 'win32') return false;
   const plan = windowsServicePlan(instance, process.argv[1]!);
   try {
-    await execFileAsync('schtasks.exe', ['/Query', '/TN', plan.taskName], { encoding: 'utf8', windowsHide: true });
+    await execFileAsync('schtasks.exe', ['/Query', '/TN', plan.taskName], { encoding: null, windowsHide: true });
   } catch (error) {
-    const failure = error as Error & { stdout?: string; stderr?: string };
-    const detail = `${failure.stdout ?? ''}\n${failure.stderr ?? ''}\n${failure.message}`;
-    if (/cannot find|does not exist|找不到/i.test(detail)) return false;
-    throw new Error(`无法查询 Windows 用户计划任务 ${plan.taskName}：${failure.message}`);
+    const failure = error as Error & { stdout?: Buffer | string; stderr?: Buffer | string };
+    const detail = windowsCommandFailureDetail(failure);
+    if (isWindowsTaskMissingFailure(failure)) return false;
+    throw new Error(`无法查询 Windows 用户计划任务 ${plan.taskName}：${detail}`);
   }
   await execFileAsync('schtasks.exe', ['/End', '/TN', plan.taskName], { encoding: 'utf8', windowsHide: true }).catch(() => undefined);
   await execFileAsync('schtasks.exe', ['/Delete', '/TN', plan.taskName, '/F'], { encoding: 'utf8', windowsHide: true });
   await rm(plan.launcherPath, { force: true });
   return true;
+}
+
+export function windowsCommandFailureDetail(
+  failure: Error & { stdout?: Buffer | string; stderr?: Buffer | string },
+): string {
+  const output = [decodeWindowsCommandOutput(failure.stdout), decodeWindowsCommandOutput(failure.stderr)]
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  return output || failure.message;
+}
+
+export function isWindowsTaskMissingFailure(
+  failure: Error & { stdout?: Buffer | string; stderr?: Buffer | string },
+): boolean {
+  return /cannot find|does not exist|找不到/i.test(windowsCommandFailureDetail(failure));
+}
+
+function decodeWindowsCommandOutput(value: Buffer | string | undefined): string {
+  if (value === undefined) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(value);
+  } catch {
+    return new TextDecoder('gb18030').decode(value);
+  }
 }

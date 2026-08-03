@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { initializeInstance } from '../../../../dist/src/instance.js';
+import { deleteInstanceData, deleteInstanceWithLifecycle, initializeInstance } from '../../../../dist/src/instance.js';
 import { Store } from '../../../../dist/src/store.js';
 import { runView } from '../../../../dist/src/view.js';
 
@@ -100,10 +100,12 @@ const keys = [
   [26_000, '\u001b[C'],
   [27_000, '\u001b[D'],
   [28_000, '\u001b[D'],
-  [29_000, 'q'],
-  [30_000, '\u001b'],
+  [29_000, 'd'],
+  [30_000, '\r'],
   [31_000, 'q'],
-  [32_000, '\r'],
+  [32_000, '\u001b'],
+  [33_000, 'q'],
+  [34_000, '\r'],
 ];
 for (const [delay, key] of keys) setTimeout(() => process.stdin.emit('data', Buffer.from(key)), delay);
 
@@ -113,6 +115,7 @@ const instances = [
 ];
 const createdStores = [];
 let createdStarted = false;
+let deletedInstance = '';
 const channelToggles = [];
 const subscriptionChanges = [];
 const groupSearches = [];
@@ -140,6 +143,15 @@ try {
     searchGroups: async (instance, query) => {
       groupSearches.push({ instance: instance.name, query });
       return [{ title: '合成搜索结果群', externalId: 'synthetic-search-result-id' }];
+    },
+    deleteInstance: async (instance) => {
+      await deleteInstanceWithLifecycle(
+        instance,
+        async () => undefined,
+        async () => false,
+        (name) => deleteInstanceData(name, env),
+      );
+      deletedInstance = instance.name;
     },
   });
   const plainTranscript = transcript.replace(/\u001b\[[0-9;]*m/g, '');
@@ -173,10 +185,18 @@ try {
   assert.match(plainTranscript, /提示：已取消退出/);
   assert.match(plainTranscript, /删除确认/);
   assert.match(plainTranscript, /提示：已取消删除/);
+  const deletedFrame = plainTranscript.split('\u001b[H\u001b[2J')
+    .find((frame) => frame.includes('提示：Instance created-agent 已删除'));
+  assert.ok(deletedFrame);
+  assert.match(deletedFrame, /instances=2/);
+  assert.doesNotMatch(deletedFrame, />\s+created-agent/);
+  assert.doesNotMatch(deletedFrame, /删除确认/);
   assert.match(transcript, /\u001b\[\?1049h\u001b\[\?25l/);
   assert.match(transcript, /\u001b\[\?25h\u001b\[\?1049l/);
   assert.match(transcript, /\u001b\[\?25h\u001b\[\?1049l$/);
   assert.equal(createdStarted, true);
+  assert.equal(deletedInstance, 'created-agent');
+  await assert.rejects(access(join(root, 'instances', 'created-agent', 'config.yaml')), { code: 'ENOENT' });
   assert.equal(config.identity.name, '小·小鹏');
   assert.deepEqual(channelToggles, ['tui-smoke', 'created-agent']);
   assert.deepEqual(subscriptionChanges, [
@@ -192,7 +212,7 @@ try {
   await writeFile(resultPath, JSON.stringify({
     ok: true,
     tty: { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY },
-    observed: ['lean-global-overview', 'instance-detail', 'channel-detail', 'channel-toggle', 'group-subscription', 'direct-subscription', 'group-search', 'group-bind', 'conversation-detail', 'delete-confirmation', 'delete-cancel', 'instance-settings', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit-confirmation', 'exit-cancel', 'exit'],
+    observed: ['lean-global-overview', 'instance-detail', 'channel-detail', 'channel-toggle', 'group-subscription', 'direct-subscription', 'group-search', 'group-bind', 'conversation-detail', 'delete-confirmation', 'delete-cancel', 'instance-delete', 'immediate-delete-refresh', 'instance-settings', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit-confirmation', 'exit-cancel', 'exit'],
     colorObserved: true,
     settingsColumnsDelimited: true,
     instanceCreated: true,
@@ -201,6 +221,8 @@ try {
     groupBound: Boolean(searchedConversation),
     subscriptionsObserved: config.channel.subscriptions.groups === 'all' && config.channel.subscriptions.directs === 'all',
     deleteConfirmationObserved: true,
+    instanceDeleteObserved: deletedInstance === 'created-agent',
+    immediateDeleteRefreshObserved: Boolean(deletedFrame),
     alternateScreenObserved: true,
     exitConfirmationObserved: true,
     exitCancellationObserved: true,
@@ -210,7 +232,15 @@ try {
   }, null, 2));
 } finally {
   process.stdout.write = originalWrite;
-  store.close();
-  secondStore.close();
-  for (const createdStore of createdStores) createdStore.close();
+  closeIfOpen(store);
+  closeIfOpen(secondStore);
+  for (const createdStore of createdStores) closeIfOpen(createdStore);
+}
+
+function closeIfOpen(target) {
+  try {
+    target.close();
+  } catch (error) {
+    if (!/database is not open/i.test(error instanceof Error ? error.message : String(error))) throw error;
+  }
 }

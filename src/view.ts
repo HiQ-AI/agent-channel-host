@@ -208,7 +208,7 @@ export async function runView(
   };
   const paint = () => process.stdout.write(`\u001b[H\u001b[2J${render()}\n`);
   const repaint = () => {
-    if (stopRequested) return;
+    if (stopRequested || inputBusy) return;
     try {
       paint();
     } catch (error) {
@@ -294,7 +294,7 @@ export async function handleManagementViewInput(
       state.detailChannel = null;
       state.detailConversationId = null;
       state.settingsInstanceName = null;
-      state.selectedInstance = clamp(index, 0, instances.length);
+      state.selectedInstance = instances.length === 0 ? 0 : Math.min(index, instances.length - 1);
       state.notice = `Instance ${confirmation.label} 已删除`;
     } else {
       if (!confirmation.conversationId) throw new Error('删除目标缺少 conversation ID');
