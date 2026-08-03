@@ -14,3 +14,5 @@
 ## 边界
 
 本轮没有连接真实 DWS、没有启动用户 instance、没有发送或补偿任何钉钉消息。隔离状态目录下真实 Codex canary 连续两轮得到 `new → resumed`，provider session prefix 均为 `019fc820-649`，两轮均为 `delivery=completed`；Host 未读取 Agent final text。
+
+提交 `72dd05e` 推送后，PR #15 的 CI run `30825408305` 在同一 head 上完成：Ubuntu 25 秒、Windows 52 秒，两个 `verify` job 均 PASS。
