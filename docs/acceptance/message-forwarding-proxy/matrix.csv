@@ -15,3 +15,4 @@ MFP-013,package,完整测试构建及npm打包通过,PASS
 MFP-014,runtime,Host无turn超时配置且活动claim不按时间过期,PASS
 MFP-015,replay,真实消息隔离副本定点重置后由真实Codex完成处理且不连接DWS,PASS
 MFP-016,runtime,Host不覆盖runtime审批sandbox网络和工具权限配置,PASS
+MFP-017,migration,v8迁移丢弃未提交旧自我介绍草稿且不重置已提交状态,PASS

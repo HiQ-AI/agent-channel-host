@@ -109,7 +109,7 @@ Windows 默认数据目录：
 
 0.3 配置版本为 `version: 2`，删除 `protocol` 块，并把原来混在 `runtime` 中的 DWS、调度与 Codex 字段拆开。项目尚未正式部署，因此不保留两套加载路径；读取 `version: 1` 会明确失败。
 
-旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v8，新增 conversation session generation 与重置审计；旧 checkpoint/成员资料列仅作为本地管理数据保留，不再自动注入 runtime。旧 App Server session 或旧消息协议与当前 command runtime 不兼容时，Host 会提升 generation、审计旧 provider session ID 并创建新 session，不会错误 resume 受污染 transcript。
+旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v8，新增 conversation session generation 与重置审计；旧 checkpoint/成员资料列仅作为本地管理数据保留，不再自动注入 runtime。迁移会丢弃尚未提交的旧 onboarding 自我介绍草稿，保留已提交状态，再由新 session 按最近消息重新判断。旧 App Server session 或旧消息协议与当前 command runtime 不兼容时，Host 会提升 generation、审计旧 provider session ID 并创建新 session，不会错误 resume 受污染 transcript。
 
 ## 添加授权会话
 

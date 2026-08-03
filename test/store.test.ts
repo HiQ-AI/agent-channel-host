@@ -482,12 +482,20 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
       'group-v3','group','cid-v3','v3群','参与讨论','shadow',1,
       '2026-01-01','2026-01-01','resident',5
     );
+    INSERT INTO conversations VALUES(
+      'group-v3-submitted','group','cid-v3-submitted','已完成群','参与讨论','shadow',1,
+      '2026-01-01','2026-01-01','resident',5
+    );
     INSERT INTO sessions VALUES(
       'group-v3','thread-complete-v3','ready','codex-cli 0.145.0','schema-v3','D:/agent',
       'bootstrap-v3','2026-01-01','2026-01-02'
     );
     INSERT INTO group_onboarding VALUES(
-      'group-v3','submitted',0,'2026-01-01','intro','hello','uuid',NULL,'2026-01-01','2026-01-01'
+      'group-v3','prepared',2,'2026-01-01','intro','旧自我介绍','uuid',NULL,'2026-01-01','2026-01-01'
+    );
+    INSERT INTO group_onboarding VALUES(
+      'group-v3-submitted','submitted',1,'2026-01-01','sent-turn','已发送','sent-uuid',NULL,
+      '2026-01-01','2026-01-01'
     );
     PRAGMA user_version=3;
   `);
@@ -500,6 +508,11 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
     assert.equal(session?.generation, 1);
     assert.equal(session?.protocolFingerprint, 'codex-cli 0.145.0:schema-v3');
     assert.equal(migrated.getConversation('group-v3')?.workerWarmSeconds, 30);
+    const onboarding = migrated.getGroupOnboarding('group-v3');
+    assert.equal(onboarding?.state, 'pending');
+    assert.equal(onboarding?.introText, null);
+    assert.equal(onboarding?.introUuid, null);
+    assert.equal(migrated.getGroupOnboarding('group-v3-submitted')?.state, 'submitted');
     assert.deepEqual(migrated.db.prepare('PRAGMA foreign_key_check').all(), []);
     assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
     migrated.close();

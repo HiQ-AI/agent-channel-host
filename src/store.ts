@@ -339,6 +339,15 @@ export class Store {
     }
     const sessionGenerationVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
     if (sessionGenerationVersion < 8) {
+      const resetPendingOnboarding = this.db.prepare(
+        "SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='group_onboarding'",
+      ).get() ? `
+        UPDATE group_onboarding SET
+          state='pending',history_count=NULL,history_loaded_at=NULL,intro_turn_id=NULL,
+          intro_text=NULL,intro_uuid=NULL,error=NULL,
+          updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE state<>'submitted';
+      ` : '';
       this.db.exec(`
         BEGIN IMMEDIATE;
         ALTER TABLE conversations ADD COLUMN session_generation INTEGER NOT NULL DEFAULT 1
@@ -347,6 +356,7 @@ export class Store {
           (SELECT generation FROM runtime_sessions s WHERE s.conversation_id=conversations.id),
           1
         );
+        ${resetPendingOnboarding}
         CREATE TABLE runtime_session_resets (
           id TEXT PRIMARY KEY,
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

@@ -29,6 +29,7 @@ npm run verify
 - 配置不再暴露 turn 超时；旧字段被忽略，超过旧测试阈值的活动 turn 正常完成。
 - 活动 claim 的 `claim_expires_at_ms` 为 `NULL`，不会因运行时长被其他 Worker 重新 claim；遗留 claim 由启动 reconciliation 恢复。
 - Codex argv 不再覆盖审批、sandbox、网络或 writable roots；Agent 权限由 runtime 自身配置决定。
+- SQLite v8 迁移会丢弃未提交的旧 onboarding 自我介绍草稿，避免新协议继续发送旧行为文案；已提交状态不重放。
 
 ### 隔离真实 Codex
 
