@@ -13,6 +13,6 @@
 3. fake Runtime/Channel 下的 Worker、配置即时读取与 Host lifecycle 测试。
 4. TUI reducer、renderer、设置校验与 CLI `--once` 测试。
 5. `npm run verify`、隔离 instance CLI smoke、真实 Codex `verify`。
-6. Channel 群搜索使用注入的合成候选验证，不连接真实 DWS；真实 Windows TTY 覆盖 `→/←` 层级导航、Channel toggle、群绑定、字段光标编辑和 alternate-screen 恢复。
+6. Channel 群搜索使用注入的合成候选验证，不连接真实 DWS；真实 Windows TTY 覆盖 `→/←` 层级导航、Channel toggle、群绑定、字段光标编辑、中文终端列宽、退出确认/取消和 alternate-screen 恢复。
 
 状态以 `matrix.csv` 为准，证据写入新增的 `round-N.md`；全绿后才生成 `report.md`。

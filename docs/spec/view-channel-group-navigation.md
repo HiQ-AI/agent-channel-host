@@ -8,6 +8,7 @@
 2. Channel 页展示已绑定群组，并支持关键词搜索、候选选择和绑定。
 3. 非编辑态导航统一为 `↑/↓` 选择、`Enter/→` 下钻或执行、`Esc/←` 返回；`Tab` 只切换顶层“总览 / 全局设置”。编辑态的 `←/→` 用于移动文本光标。
 4. 交互式 View 使用终端 alternate screen，刷新帧不进入主终端 scrollback，退出或异常时恢复原终端；`view --once` 保持普通纯文本输出。
+5. Instance 设置和其他表格按终端显示宽度布局中文、全角字符与组合字符；退出 View 前显示二次确认，取消后保留当前导航和编辑状态。
 
 本轮只实现现有 DingTalk adapter 的群搜索，不实现第二种 Channel 或 Runtime，不连接真实 DWS，不发送消息，也不新增接收服务。
 
@@ -17,6 +18,8 @@
 - `conversation add --kind group` 已能通过 DWS 精确群名解析并写入现有 conversation registry，但 TUI 没有搜索与选择流程。
 - 当前 reducer 把 `←/→` 与 `Tab` 一并处理成顶层 tab 切换，破坏层级导航直觉。
 - 当前 repaint 只输出 `CSI 2J` 和 home；它清除当前画面但不切换终端缓冲区，因此历史帧仍留在主终端 scrollback。
+- 表格的 natural width、truncate 和 pad 都使用 JavaScript `String.length`；中文在 Windows Terminal 通常占 2 列却只计 1，导致 Instance 设置的三列视觉边界错位。
+- `q/Ctrl+C` 直接调用 stop；退出会停止 View-owned Host，但用户没有确认或取消机会。
 
 ## 参考交互
 
@@ -80,6 +83,10 @@ View 通过 composition root 注入只读 `searchGroups(instance, query)` action
 
 字段设置、Instance 新增向导和群搜索输入共用一套单行编辑行为：`←/→` 移动光标，Home/End 跳到首尾，Backspace 删除光标前字符，Delete 删除光标后字符，Enter 提交，Esc 取消或返回。光标位置由 reducer 显式保存，刷新不得把它重置到行尾。
 
+表格布局使用终端 display width：ASCII/半角字符宽 1，中文、全角和常见 emoji 宽 2，组合标记和 variation selector 宽 0；截断后的省略号也计入目标宽度。列宽计算、truncate 与 pad 必须使用同一函数，避免只修其中一层后仍漂移。
+
+`q` 或 `Ctrl+C` 在非确认态只打开退出确认；确认层明确说明会停止 View-owned Host、attached Host 不受影响。再次按 `q`、`Ctrl+C` 或 Enter 才退出，`Esc/←` 取消并回到原页面；打开确认不得清空正在编辑的值或群搜索草稿。
+
 ## 终端生命周期
 
 交互式 `runView` 在启用 raw mode 后写入：
@@ -96,6 +103,7 @@ View 通过 composition root 注入只读 `searchGroups(instance, query)` action
 - Store：新群写入现有 registry，职责继承 Agent 角色、默认 shadow、Channel/runtime 映射正确。
 - Renderer：Channel 页、已绑定群、搜索页、底部动作栏和选中态可见，不显示外部群 ID。
 - TTY：真实 Windows pseudo console 观察 alternate-screen enter/exit、`→/←`、Channel toggle、合成搜索/绑定、退出恢复。
+- Layout/exit：中文 Instance 设置表各列 display width 对齐；真实 TTY 第一次退出键出现确认且 View 仍存活，第二次确认后才退出，取消确认保持原页面。
 - 回归：`view --once` 无 ANSI/alternate-screen；`npm run verify` 和 pack dry-run 全绿。
 
 ## 边界与回滚

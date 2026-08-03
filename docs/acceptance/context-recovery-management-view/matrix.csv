@@ -32,6 +32,8 @@ VIEW-023,navigation,right or Enter drills down left or Escape returns and Tab on
 VIEW-024,terminal,interactive view uses paired alternate screen enter exit while view once stays plain,,,,,PASS,PASS
 VIEW-025,editing,settings group search and instance wizard support cursor Home End Backspace and Delete editing,,,,,PASS,PASS
 VIEW-026,privacy,group search and view never render external conversation IDs,,,,,PASS,PASS
+VIEW-027,layout,instance settings tables align Chinese fullwidth emoji and combining characters by terminal display width,,,,,PASS,PASS
+VIEW-028,terminal,view exit requires confirmation and cancellation preserves navigation and editing state,,,,,PASS,PASS
 DOC-001,docs,README describes view as foreground startup and management entry while run remains headless,PASS,PASS,PASS,PASS,PASS,PASS
 DOC-002,docs,README and CLI help define bare view as the cross instance entry and reject view instance selection,,PASS,PASS,PASS,PASS,PASS
 DOC-003,docs,README documents semantic colors NO_COLOR and settings separators,,,PASS,PASS,PASS,PASS

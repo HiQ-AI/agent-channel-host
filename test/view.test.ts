@@ -7,7 +7,8 @@ import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import {
   createManagementViewState, createSettingEntries, handleManagementViewInput, renderManagementView, renderStatusView,
-  shouldStartHostForView, shouldUseColor, VIEW_ALTERNATE_SCREEN_ENTER, VIEW_ALTERNATE_SCREEN_EXIT, type ViewInstance,
+  shouldStartHostForView, shouldUseColor, terminalDisplayWidth, VIEW_ALTERNATE_SCREEN_ENTER, VIEW_ALTERNATE_SCREEN_EXIT,
+  type ViewInstance,
 } from '../src/view.js';
 
 test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完整 provider session ID', () => {
@@ -251,7 +252,81 @@ test('management view 使用右键下钻、左键返回并可进入 instance 设
     await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
     assert.equal(state.editing, null);
     await handleManagementViewInput('q', state, instances, () => { stopped = true; });
+    assert.equal(stopped, false);
+    assert.equal(state.exitConfirmation, true);
+    await handleManagementViewInput('q', state, instances, () => { stopped = true; });
     assert.equal(stopped, true);
+  } finally {
+    store.close();
+  }
+});
+
+test('退出确认说明 Host 影响，取消后保留编辑现场且 Ctrl+C/Enter 二次确认', async () => {
+  const firstStore = new Store(':memory:');
+  const secondStore = new Store(':memory:');
+  const first = viewInstance('exit-owned', defaultConfig('exit-owned', '.', '小小鹏', '编辑器答疑'), firstStore);
+  const second = viewInstance('exit-attached', defaultConfig('exit-attached', '.', '翠丝', '方案评审'), secondStore);
+  first.hostOwnership = 'view';
+  const instances = [first, second];
+  const state = createManagementViewState();
+  state.detailInstanceName = first.name;
+  state.settingsInstanceName = first.name;
+  let stopped = false;
+  try {
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    assert.equal(state.editing?.value, '小小鹏');
+    await handleManagementViewInput('\u0003', state, instances, () => { stopped = true; });
+    assert.equal(stopped, false);
+    assert.equal(state.exitConfirmation, true);
+    assert.equal(state.editing?.value, '小小鹏');
+    const confirmation = renderManagementView(
+      instances, state, null, createSettingEntries(first.config, first.store, null), 96,
+    );
+    assert.match(confirmation, /退出确认/);
+    assert.match(confirmation, /停止 1 个由当前 View 启动的 Host/);
+    assert.match(confirmation, /attached\/readonly Host 保持运行/);
+
+    await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
+    assert.equal(state.exitConfirmation, false);
+    assert.equal(state.editing?.value, '小小鹏');
+    await handleManagementViewInput('q', state, instances, () => { stopped = true; });
+    assert.equal(state.editing?.value, '小小鹏q');
+    assert.equal(state.exitConfirmation, false);
+    await handleManagementViewInput('\u0003', state, instances, () => { stopped = true; });
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    assert.equal(stopped, true);
+  } finally {
+    firstStore.close();
+    secondStore.close();
+  }
+});
+
+test('Instance 设置表按终端显示宽度对齐中文、全角、emoji 与组合字符', () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('display-width', '.', '小小鹏🙂', '回答编辑器需求、方案以及 bug 排查');
+  config.identity.signature = 'Ａgent e\u0301';
+  const instance = viewInstance('display-width', config, store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.settingsInstanceName = instance.name;
+  try {
+    assert.equal(terminalDisplayWidth('Agent 名称'), 10);
+    assert.equal(terminalDisplayWidth('Ａ'), 2);
+    assert.equal(terminalDisplayWidth('🙂'), 2);
+    assert.equal(terminalDisplayWidth('e\u0301'), 1);
+    const rendered = renderManagementView(
+      [instance], state, null, createSettingEntries(config, store, null), 96,
+    );
+    const lines = rendered.split('\n');
+    const headingIndex = lines.findIndex((line) => line === 'INSTANCE');
+    assert.notEqual(headingIndex, -1);
+    const rows = lines.slice(headingIndex + 1).filter((line) => line.includes('│'));
+    assert.ok(rows.length > 2);
+    const expected = rows[0]!.split('│').slice(0, -1).map(terminalDisplayWidth);
+    for (const row of rows.slice(1)) {
+      assert.deepEqual(row.split('│').slice(0, -1).map(terminalDisplayWidth), expected);
+      assert.ok(terminalDisplayWidth(row) <= 94);
+    }
   } finally {
     store.close();
   }

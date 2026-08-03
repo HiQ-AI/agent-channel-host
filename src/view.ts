@@ -40,6 +40,7 @@ export interface ManagementViewState {
   editing: { key: string; label: string; value: string; cursor: number } | null;
   creatingInstance: InstanceCreationDraft | null;
   groupSearch: GroupSearchDraft | null;
+  exitConfirmation: boolean;
   notice: string | null;
 }
 
@@ -116,6 +117,7 @@ export function createManagementViewState(): ManagementViewState {
     editing: null,
     creatingInstance: null,
     groupSearch: null,
+    exitConfirmation: false,
     notice: null,
   };
 }
@@ -246,12 +248,31 @@ export async function handleManagementViewInput(
   actions: ManagementViewActions = {},
 ): Promise<void> {
   normalizeSelection(state, instances);
+  if (state.exitConfirmation) {
+    if (key.toLowerCase() === 'q' || key === '\u0003' || key === '\r' || key === '\n') {
+      stop();
+      return;
+    }
+    if (key === '\u001b' || key === '\u001b[D') {
+      state.exitConfirmation = false;
+      state.notice = '已取消退出';
+    }
+    return;
+  }
+  if (key === '\u0003') {
+    state.exitConfirmation = true;
+    return;
+  }
   if (state.creatingInstance) {
-    await handleInstanceCreationInput(key, state, instances, stop, actions);
+    await handleInstanceCreationInput(key, state, instances, actions);
     return;
   }
   if (state.groupSearch) {
-    await handleGroupSearchInput(key, state, instances, stop, actions);
+    if (state.groupSearch.phase === 'results' && key.toLowerCase() === 'q') {
+      state.exitConfirmation = true;
+      return;
+    }
+    await handleGroupSearchInput(key, state, instances, actions);
     return;
   }
   const overviewInstance = instances[state.selectedInstance] ?? null;
@@ -264,10 +285,6 @@ export async function handleManagementViewInput(
   const back = key === '\u001b' || key === '\u001b[D';
   const forward = key === '\r' || key === '\n' || key === '\u001b[C';
   if (state.editing) {
-    if (key === '\u0003') {
-      stop();
-      return;
-    }
     if (key === '\u001b') {
       state.editing = null;
       state.notice = '已取消修改';
@@ -294,8 +311,8 @@ export async function handleManagementViewInput(
     return;
   }
 
-  if (key.toLowerCase() === 'q' || key === '\u0003') {
-    stop();
+  if (key.toLowerCase() === 'q') {
+    state.exitConfirmation = true;
     return;
   }
   if (key === '\t' && !state.detailInstanceName && !state.settingsInstanceName) {
@@ -443,16 +460,11 @@ async function handleGroupSearchInput(
   key: string,
   state: ManagementViewState,
   instances: ViewInstance[],
-  stop: () => void,
   actions: ManagementViewActions,
 ): Promise<void> {
   const draft = state.groupSearch!;
   const back = key === '\u001b' || (draft.phase === 'results' && key === '\u001b[D');
   const forward = key === '\r' || key === '\n' || key === '\u001b[C';
-  if (key === '\u0003') {
-    stop();
-    return;
-  }
   if (back) {
     if (draft.phase === 'results') {
       draft.phase = 'query';
@@ -532,14 +544,9 @@ async function handleInstanceCreationInput(
   key: string,
   state: ManagementViewState,
   instances: ViewInstance[],
-  stop: () => void,
   actions: ManagementViewActions,
 ): Promise<void> {
   const draft = state.creatingInstance!;
-  if (key === '\u0003') {
-    stop();
-    return;
-  }
   if (key === '\u001b') {
     state.creatingInstance = null;
     state.notice = '已取消新增 Instance';
@@ -790,7 +797,17 @@ export function renderManagementView(
   else lines.push(...renderGlobalOverview(snapshots, state, width, color));
   const notice = state.notice ?? (settingsInstance ?? selectedInstance)?.notices.at(-1) ?? null;
   if (notice) lines.push('', ansi(`提示：${notice}`, 'yellow-bold', color));
-  lines.push('', state.creatingInstance
+  if (state.exitConfirmation) {
+    const owned = instances.filter((instance) => instance.hostOwnership === 'view').length;
+    lines.push(
+      '',
+      heading('退出确认', color),
+      `退出 View 将停止 ${ansi(String(owned), owned > 0 ? 'yellow-bold' : 'dim', color)} 个由当前 View 启动的 Host；attached/readonly Host 保持运行。`,
+    );
+  }
+  lines.push('', state.exitConfirmation
+    ? ansi('Enter/q/Ctrl+C 确认退出  Esc/← 取消', 'yellow-bold', color)
+    : state.creatingInstance
     ? ansi(`新增 Instance · ${creationStepLabel(state.creatingInstance.step)}：${renderTextCursor(state.creatingInstance.value, state.creatingInstance.cursor)}  ←/→ 移动  Enter 下一步  Esc 取消`, 'cyan-bold', color)
     : state.groupSearch?.phase === 'query'
       ? ansi(`群组搜索：${renderTextCursor(state.groupSearch.query, state.groupSearch.cursor)}  ←/→ 移动  Enter 搜索  Esc 返回 Channel`, 'cyan-bold', color)
@@ -1251,8 +1268,11 @@ function table(headers: string[], rows: unknown[][], width: number, options: Tab
   if (rows.length === 0) return ['  (none)'];
   const separator = options.separator ?? '  ';
   const usable = Math.max(60, width - 2);
-  const natural = headers.map((header, index) => Math.max(header.length, ...rows.map((row) => cell(row[index]).length)));
-  const separatorWidth = (headers.length - 1) * separator.length;
+  const natural = headers.map((header, index) => Math.max(
+    terminalDisplayWidth(header),
+    ...rows.map((row) => terminalDisplayWidth(cell(row[index]))),
+  ));
+  const separatorWidth = (headers.length - 1) * terminalDisplayWidth(separator);
   let total = natural.reduce((sum, value) => sum + value, 0) + separatorWidth;
   const widths = [...natural];
   while (total > usable) {
@@ -1357,13 +1377,72 @@ function cell(value: unknown): string {
 }
 
 function truncate(value: string, width: number): string {
-  if (value.length <= width) return value;
-  if (width <= 1) return '…';
-  return `${value.slice(0, width - 1)}…`;
+  if (terminalDisplayWidth(value) <= width) return value;
+  if (width <= 0) return '';
+  if (width === 1) return '…';
+  const limit = width - 1;
+  let result = '';
+  let used = 0;
+  for (const segment of graphemeSegments(value)) {
+    const segmentWidth = graphemeDisplayWidth(segment);
+    if (used + segmentWidth > limit) break;
+    result += segment;
+    used += segmentWidth;
+  }
+  return `${result}…`;
 }
 
 function pad(value: string, width: number): string {
-  return value.padEnd(width, ' ');
+  return `${value}${' '.repeat(Math.max(0, width - terminalDisplayWidth(value)))}`;
+}
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const MARK = /\p{Mark}/u;
+const EXTENDED_PICTOGRAPHIC = /\p{Extended_Pictographic}/u;
+
+export function terminalDisplayWidth(value: string): number {
+  return graphemeSegments(value).reduce((total, segment) => total + graphemeDisplayWidth(segment), 0);
+}
+
+function graphemeSegments(value: string): string[] {
+  return [...graphemeSegmenter.segment(value)].map(({ segment }) => segment);
+}
+
+function graphemeDisplayWidth(segment: string): number {
+  if (EXTENDED_PICTOGRAPHIC.test(segment) || /[\uFE0F\u20E3]/u.test(segment)) return 2;
+  let width = 0;
+  for (const character of segment) {
+    const codePoint = character.codePointAt(0)!;
+    if (isZeroWidth(codePoint, character)) continue;
+    width += isWideCodePoint(codePoint) ? 2 : 1;
+  }
+  return width;
+}
+
+function isZeroWidth(codePoint: number, character: string): boolean {
+  return codePoint === 0x200d
+    || codePoint <= 0x1f
+    || (codePoint >= 0x7f && codePoint <= 0x9f)
+    || (codePoint >= 0xfe00 && codePoint <= 0xfe0f)
+    || (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
+    || MARK.test(character);
+}
+
+function isWideCodePoint(codePoint: number): boolean {
+  return codePoint >= 0x1100 && (
+    codePoint <= 0x115f
+    || codePoint === 0x2329
+    || codePoint === 0x232a
+    || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+    || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+    || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+    || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+    || (codePoint >= 0xff00 && codePoint <= 0xff60)
+    || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+    || (codePoint >= 0x1b000 && codePoint <= 0x1b2ff)
+    || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  );
 }
 
 function age(value: unknown): string {

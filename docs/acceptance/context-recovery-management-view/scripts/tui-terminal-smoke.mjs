@@ -87,6 +87,9 @@ const keys = [
   [27_000, '\u001b[D'],
   [28_000, '\u001b[D'],
   [29_000, 'q'],
+  [30_000, '\u001b'],
+  [31_000, 'q'],
+  [32_000, '\r'],
 ];
 for (const [delay, key] of keys) setTimeout(() => process.stdin.emit('data', Buffer.from(key)), delay);
 
@@ -144,6 +147,10 @@ try {
   assert.match(plainTranscript, /启用 \/ 停用\s+│\s+enabled/);
   assert.match(plainTranscript, /\[ 全局设置 \]/);
   assert.match(plainTranscript, /暂无可修改的全局配置/);
+  assert.match(plainTranscript, /退出确认/);
+  assert.match(plainTranscript, /停止 0 个由当前 View 启动的 Host/);
+  assert.match(plainTranscript, /Enter\/q\/Ctrl\+C 确认退出\s+Esc\/← 取消/);
+  assert.match(plainTranscript, /提示：已取消退出/);
   assert.match(transcript, /\u001b\[\?1049h\u001b\[\?25l/);
   assert.match(transcript, /\u001b\[\?25h\u001b\[\?1049l/);
   assert.match(transcript, /\u001b\[\?25h\u001b\[\?1049l$/);
@@ -158,7 +165,7 @@ try {
   await writeFile(resultPath, JSON.stringify({
     ok: true,
     tty: { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY },
-    observed: ['global-overview', 'instance-detail', 'channel-detail', 'channel-toggle', 'group-search', 'group-bind', 'conversation-detail', 'instance-settings', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit'],
+    observed: ['global-overview', 'instance-detail', 'channel-detail', 'channel-toggle', 'group-search', 'group-bind', 'conversation-detail', 'instance-settings', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit-confirmation', 'exit-cancel', 'exit'],
     colorObserved: true,
     settingsColumnsDelimited: true,
     instanceCreated: true,
@@ -166,6 +173,8 @@ try {
     groupSearchObserved: groupSearches.length === 1,
     groupBound: Boolean(searchedConversation),
     alternateScreenObserved: true,
+    exitConfirmationObserved: true,
+    exitCancellationObserved: true,
     cursorEditObserved: config.identity.name === '小·小鹏',
     globalSettingsSeparated: true,
     channelStarted: false,
