@@ -18,6 +18,7 @@ test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   assert.equal(current.runtime.version, 'codex-cli 0.145.0');
   assert.equal(current.runtime.model, 'gpt-5.6-sol');
   assert.equal(current.runtime.effort, 'low');
+  assert.equal('turnTimeoutSeconds' in current.runtime, false);
   assert.equal(current.scheduling.quietWindowMilliseconds, 300);
   assert.equal(current.scheduling.maxBatchMessages, 20);
 });
@@ -39,6 +40,24 @@ test('既有 v2 配置缺少 Channel 新字段时保持启用并默认 selected'
     assert.equal(loaded.channel.enabled, true);
     assert.deepEqual(loaded.channel.subscriptions, { groups: 'selected', directs: 'selected' });
     assert.deepEqual(loaded.channel.defaultModes, { groups: 'shadow', directs: 'shadow' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('v2 配置不暴露 turn 超时且忽略旧字段', async () => {
+  const root = resolve('.test-config-v2-no-turn-timeout');
+  const path = resolve(root, 'config.yaml');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  try {
+    const legacy = structuredClone(defaultConfig('legacy-turn-timeout', '.', 'Agent', 'role')) as unknown as {
+      runtime: Record<string, unknown>;
+    };
+    legacy.runtime.turnTimeoutSeconds = 1;
+    await writeFile(path, YAML.stringify(legacy), 'utf8');
+    const loaded = await loadConfig('legacy-turn-timeout', path);
+    assert.equal('turnTimeoutSeconds' in loaded.runtime, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

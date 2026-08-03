@@ -10,7 +10,7 @@
 
 ## 验证层次
 
-1. Store 单元测试验证 claim/release/complete、过期 claim 恢复、跨 channel 路由和 snapshot 脱敏。
+1. Store 单元测试验证 claim/release/complete、启动 reconciliation 恢复遗留 claim、跨 channel 路由和 snapshot 脱敏；当前消息代理方案不让活动 claim 按时间过期。
 2. Worker/scheduler 测试验证信号去重、无轮询、burst 单 turn、active turn 单次 cancel、warm 释放和重启 reconciliation。
 3. CLI 进程测试验证 `view --once`、非 TTY 门禁、参数校验和不输出完整 session/conversation ID。
 4. `npm run verify` 验证构建、全量测试和 npm pack；必要时用隔离状态目录实跑 `init → add direct → view --once`。

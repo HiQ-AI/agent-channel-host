@@ -45,7 +45,7 @@
 
 ## 验证
 
-- 单元测试覆盖命令参数、JSONL 解析、结构化决定、精确 resume、错误/超时/取消和 v2 配置。
+- 单元测试覆盖命令参数、JSONL 解析、结构化决定、精确 resume、错误/取消和 v2 配置。后续消息代理方案已取消 Host turn 超时，仅保留启动探测和停止进程的操作超时。
 - 现有 Store、Host、Worker、view、service 测试全部回归。
 - 本机 Codex 0.145.0 连续执行新建与 resume canary，证明同一 provider session ID、严格 silent structured output 和命令退出后恢复。
 - 不连接 DWS、不订阅、不发送消息、不安装服务。

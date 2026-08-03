@@ -1,0 +1,17 @@
+case_id,layer,assertion,round_1
+MFP-001,prompt,普通消息仅含发送者时间内容且不含会话职责成员checkpoint,PASS
+MFP-002,decision,仅接受silent或reply及replyText两个字段,PASS
+MFP-003,runtime,Agent使用工具不会被Host判为非法且固定session精确resume,PASS
+MFP-004,onboarding,首次群聊最近消息按最小信封交给Agent且silent不发送,PASS
+MFP-005,onboarding,首次群聊reply持久化并受shadow或reply模式门禁,PASS
+MFP-006,store,批次决定inbox完成与可选outbox原子提交,PASS
+MFP-007,recovery,重启释放claim并提升session generation避免污染resume,PASS
+MFP-008,scheduling,新消息中断旧turn并重新合批,PASS
+MFP-009,outbox,最新消息门禁稳定UUID与恢复重试有效,PASS
+MFP-010,reset,定点重置check零副作用且apply先备份只修改目标消息和session generation,PASS
+MFP-011,canary,真实Codex最小协议new后精确resume同一session且保留上下文,PASS
+MFP-012,real-state,真实实例存在唯一目标消息并可进入备份重放,FAIL
+MFP-013,package,完整测试构建及npm打包通过,PASS
+MFP-014,runtime,Host无turn超时配置且活动claim不按时间过期,PASS
+MFP-015,replay,真实消息隔离副本定点重置后由真实Codex完成处理且不连接DWS,PASS
+MFP-016,runtime,Host不覆盖runtime审批sandbox网络和工具权限配置,PASS

@@ -337,6 +337,31 @@ export class Store {
         COMMIT;
       `);
     }
+    const sessionGenerationVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (sessionGenerationVersion < 8) {
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE conversations ADD COLUMN session_generation INTEGER NOT NULL DEFAULT 1
+          CHECK(session_generation > 0);
+        UPDATE conversations SET session_generation=COALESCE(
+          (SELECT generation FROM runtime_sessions s WHERE s.conversation_id=conversations.id),
+          1
+        );
+        CREATE TABLE runtime_session_resets (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          previous_generation INTEGER NOT NULL,
+          next_generation INTEGER NOT NULL,
+          previous_provider_session_id TEXT,
+          reason TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_runtime_session_resets_conversation
+          ON runtime_session_resets(conversation_id,created_at);
+        PRAGMA user_version=8;
+        COMMIT;
+      `);
+    }
   }
 
   addConversation(input: {
@@ -488,20 +513,6 @@ export class Store {
     `).all(conversationId) as Row[]).map(mapConversationMember);
   }
 
-  findRelevantMembers(conversationId: string, events: AdmittedEvent[]): ConversationMember[] {
-    const senderIds = new Set(events.map((event) => event.senderId).filter((value): value is string => Boolean(value)));
-    const senderNames = new Set(events.map((event) => event.senderName).filter((value): value is string => Boolean(value)));
-    const body = events.map((event) => safeSearchText([
-      event.content, event.quotedMessage, event.forwardedMessages,
-    ])).join('\n').toLocaleLowerCase();
-    return this.listConversationMembers(conversationId).filter((member) => {
-      if (senderIds.has(member.externalUserId)) return true;
-      if (member.displayName && senderNames.has(member.displayName)) return true;
-      return Boolean(member.displayName && member.displayName.length >= 2
-        && body.includes(member.displayName.toLocaleLowerCase()));
-    }).slice(0, 20);
-  }
-
   updateConversationMember(
     conversationId: string,
     externalUserId: string,
@@ -544,6 +555,11 @@ export class Store {
   }
 
   saveSession(session: SessionRecord): void {
+    const conversation = this.getConversation(session.conversationId);
+    if (!conversation) throw new Error(`conversation 不存在：${session.conversationId}`);
+    if (session.generation !== conversation.sessionGeneration) {
+      throw new Error(`session generation=${session.generation} 与 conversation generation=${conversation.sessionGeneration} 不一致`);
+    }
     this.db.prepare(`
       INSERT INTO runtime_sessions(
         conversation_id,runtime_id,provider_session_id,generation,lifecycle,protocol_fingerprint,
@@ -559,6 +575,42 @@ export class Store {
       session.lifecycle, session.protocolFingerprint, session.runtimeCwd, session.bootstrapTurnId,
       session.createdAt, session.updatedAt,
     );
+  }
+
+  rotateConversationSession(conversationId: string, reason: string): number {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const nextGeneration = this.rotateConversationSessionInTransaction(conversationId, reason, new Date().toISOString());
+      this.db.exec('COMMIT');
+      return nextGeneration;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  private rotateConversationSessionInTransaction(conversationId: string, reason: string, now: string): number {
+    const conversation = this.db.prepare(
+      'SELECT session_generation FROM conversations WHERE id=?',
+    ).get(conversationId) as Row | undefined;
+    if (!conversation) throw new Error(`conversation 不存在：${conversationId}`);
+    const previousGeneration = Number(conversation.session_generation);
+    const nextGeneration = previousGeneration + 1;
+    const session = this.db.prepare(
+      'SELECT provider_session_id FROM runtime_sessions WHERE conversation_id=?',
+    ).get(conversationId) as Row | undefined;
+    this.db.prepare(`
+      INSERT INTO runtime_session_resets(
+        id,conversation_id,previous_generation,next_generation,previous_provider_session_id,reason,created_at
+      ) VALUES(?,?,?,?,?,?,?)
+    `).run(
+      randomUUID(), conversationId, previousGeneration, nextGeneration,
+      session?.provider_session_id ? String(session.provider_session_id) : null, reason, now,
+    );
+    this.db.prepare('DELETE FROM runtime_sessions WHERE conversation_id=?').run(conversationId);
+    this.db.prepare('UPDATE conversations SET session_generation=?,updated_at=? WHERE id=?')
+      .run(nextGeneration, now, conversationId);
+    return nextGeneration;
   }
 
   admitEvent(conversation: Conversation, event: NormalizedEvent): { admitted: boolean; event: AdmittedEvent | null } {
@@ -625,16 +677,9 @@ export class Store {
     conversation: Conversation,
     workerId: string,
     limit: number,
-    nowMs = Date.now(),
-    claimTtlMs = 300_000,
   ): AdmittedEvent[] {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.db.prepare(`
-        UPDATE inbound_events SET processing_state='admitted',claim_owner=NULL,
-          claim_expires_at_ms=NULL,claimed_at=NULL
-        WHERE conversation_id=? AND processing_state='claimed' AND claim_expires_at_ms<=?
-      `).run(conversation.id, nowMs);
       const rows = this.db.prepare(`
         SELECT * FROM inbound_events
         WHERE conversation_id=? AND processing_state='admitted'
@@ -644,12 +689,12 @@ export class Store {
         this.db.exec('COMMIT');
         return [];
       }
-      const claimedAt = new Date(nowMs).toISOString();
+      const claimedAt = new Date().toISOString();
       const claim = this.db.prepare(`
-        UPDATE inbound_events SET processing_state='claimed',claim_owner=?,claim_expires_at_ms=?,claimed_at=?
+        UPDATE inbound_events SET processing_state='claimed',claim_owner=?,claim_expires_at_ms=NULL,claimed_at=?
         WHERE id=? AND processing_state='admitted'
       `);
-      for (const row of rows) claim.run(workerId, nowMs + claimTtlMs, claimedAt, String(row.id));
+      for (const row of rows) claim.run(workerId, claimedAt, String(row.id));
       this.db.exec('COMMIT');
       return rows.map((row) => mapAdmittedEvent(row, conversation));
     } catch (error) {
@@ -681,10 +726,11 @@ export class Store {
     turnId: string | null,
     turnStatus: 'completed' | 'failed',
     decision: Decision | null,
-    subagentThreadId: string | null = null,
+    outbound: { text: string; uuid: string } | null = null,
     error: string | null = null,
-  ): void {
-    if (events.length === 0) return;
+  ): OutboxRecord | null {
+    if (events.length === 0) return null;
+    let outboxId: string | null = null;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const statement = this.db.prepare(`
@@ -711,46 +757,37 @@ export class Store {
         const itemDecision = isTail ? decision : null;
         statement.run(
           event.id, turnId, turnStatus, itemDecision?.action ?? null,
-          itemDecision ? (itemDecision.responsibilityMatch ? 1 : 0) : null,
-          itemDecision?.category ?? (turnStatus === 'completed' ? 'batch_context' : null),
+          null,
+          null,
           itemDecision?.replyText ?? null,
-          itemDecision?.reasonCode ?? (turnStatus === 'completed' ? 'included_in_batch' : null),
-          itemDecision?.workType ?? null,
-          itemDecision?.delegation ?? null,
-          isTail ? subagentThreadId : null,
+          null,
+          null,
+          null,
+          null,
           now,
         );
         complete.run(turnStatus, turnStatus === 'failed' ? 1 : 0, turnStatus === 'failed' ? error : null, event.id, workerId);
       }
-      if (turnStatus === 'completed' && decision?.contextUpdate) {
-        const current = this.db.prepare(`
-          SELECT version FROM conversation_context WHERE conversation_id=?
-        `).get(events[0]!.conversationId) as Row | undefined;
-        const version = current ? Number(current.version) + 1 : 1;
-        const update = decision.contextUpdate;
-        this.db.prepare(`
-          INSERT INTO conversation_context(
-            conversation_id,version,through_sequence,current_topic,facts_json,decisions_json,
-            commitments_json,open_questions_json,updated_at
-          ) VALUES(?,?,?,?,?,?,?,?,?)
-          ON CONFLICT(conversation_id) DO UPDATE SET
-            version=excluded.version,through_sequence=excluded.through_sequence,
-            current_topic=excluded.current_topic,facts_json=excluded.facts_json,
-            decisions_json=excluded.decisions_json,commitments_json=excluded.commitments_json,
-            open_questions_json=excluded.open_questions_json,updated_at=excluded.updated_at
-        `).run(
-          events[0]!.conversationId,
-          version,
-          events.at(-1)!.sequence,
-          update.currentTopic,
-          JSON.stringify(update.facts),
-          JSON.stringify(update.decisions),
-          JSON.stringify(update.commitments),
-          JSON.stringify(update.openQuestions),
-          now,
-        );
+      if (turnStatus === 'completed' && decision?.action === 'reply' && outbound) {
+        const tail = events.at(-1)!;
+        const conversation = this.db.prepare(
+          'SELECT enabled,mode FROM conversations WHERE id=?',
+        ).get(tail.conversationId) as Row | undefined;
+        if (conversation && Boolean(conversation.enabled) && conversation.mode === 'reply'
+          && this.latestSequence(tail.conversationId) === tail.sequence) {
+          outboxId = randomUUID();
+          this.db.prepare(`
+            INSERT INTO outbox(
+              id,conversation_id,inbound_event_id,input_sequence,uuid,text,state,error,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,'pending',NULL,?,?)
+          `).run(
+            outboxId, tail.conversationId, tail.id, tail.sequence,
+            outbound.uuid, outbound.text, now, now,
+          );
+        }
       }
       this.db.exec('COMMIT');
+      return outboxId ? this.getOutbox(outboxId) : null;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
@@ -761,6 +798,33 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const now = new Date().toISOString();
+      const rotations = new Map<string, string>();
+      const interrupted = this.db.prepare(`
+        SELECT DISTINCT conversation_id FROM inbound_events WHERE processing_state='claimed'
+      `).all() as Row[];
+      for (const row of interrupted) {
+        rotations.set(String(row.conversation_id), 'host-restart-claimed-turn');
+      }
+      const retryingFailed = this.db.prepare(`
+        SELECT DISTINCT conversation_id FROM inbound_events
+        WHERE processing_state='failed' AND failure_count<?
+      `).all(MAX_RECOVERY_ATTEMPTS) as Row[];
+      for (const row of retryingFailed) {
+        const conversationId = String(row.conversation_id);
+        if (!rotations.has(conversationId)) rotations.set(conversationId, 'host-restart-retry-failed-turn');
+      }
+      const pendingGroupHistory = this.db.prepare(`
+        SELECT g.conversation_id FROM group_onboarding g
+        JOIN runtime_sessions s ON s.conversation_id=g.conversation_id
+        WHERE g.state<>'submitted' AND g.intro_text IS NULL
+      `).all() as Row[];
+      for (const row of pendingGroupHistory) {
+        const conversationId = String(row.conversation_id);
+        if (!rotations.has(conversationId)) rotations.set(conversationId, 'host-restart-pending-group-history');
+      }
+      for (const [conversationId, reason] of rotations) {
+        this.rotateConversationSessionInTransaction(conversationId, reason, now);
+      }
       this.db.prepare(`
         UPDATE inbound_events SET processing_state='admitted',claim_owner=NULL,
           claim_expires_at_ms=NULL,claimed_at=NULL
@@ -819,7 +883,6 @@ export class Store {
     turnId: string | null,
     turnStatus: string,
     decision: Decision | null,
-    subagentThreadId: string | null = null,
   ): void {
     this.db.prepare(`
       INSERT INTO decisions(
@@ -833,9 +896,9 @@ export class Store {
         delegation=excluded.delegation,subagent_thread_id=excluded.subagent_thread_id,created_at=excluded.created_at
     `).run(
       eventId, turnId, turnStatus, decision?.action ?? null,
-      decision ? (decision.responsibilityMatch ? 1 : 0) : null,
-      decision?.category ?? null, decision?.replyText ?? null, decision?.reasonCode ?? null,
-      decision?.workType ?? null, decision?.delegation ?? null, subagentThreadId,
+      null,
+      null, decision?.replyText ?? null, null,
+      null, null, null,
       new Date().toISOString(),
     );
     this.db.prepare(`
@@ -944,6 +1007,23 @@ export class Store {
         error=NULL,updated_at=?
       WHERE conversation_id=? AND state<>'submitted'
     `).run(historyCount, now, introTurnId, introText, introUuid, now, conversationId);
+    const record = this.getGroupOnboarding(conversationId);
+    if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
+    return record;
+  }
+
+  completeGroupOnboardingSilently(
+    conversationId: string,
+    historyCount: number,
+    turnId: string | null,
+  ): GroupOnboardingRecord {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE group_onboarding SET
+        state='submitted',history_count=?,history_loaded_at=?,intro_turn_id=?,
+        intro_text=NULL,intro_uuid=NULL,error=NULL,updated_at=?
+      WHERE conversation_id=? AND state<>'submitted'
+    `).run(historyCount, now, turnId, now, conversationId);
     const record = this.getGroupOnboarding(conversationId);
     if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
     return record;
@@ -1379,6 +1459,7 @@ function mapConversation(row: Row | undefined): Conversation | null {
     title: String(row.title), responsibility: String(row.responsibility), mode: row.mode as ConversationMode,
     runtimeId: String(row.runtime_id), workerWarmSeconds: Number(row.worker_warm_seconds),
     policyVersion: Number(row.policy_version ?? 1),
+    sessionGeneration: Number(row.session_generation ?? 1),
     enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }
@@ -1524,13 +1605,6 @@ function stringArray(value: unknown): string[] {
     throw new Error('conversation context JSON 无效');
   }
   return parsed;
-}
-
-function safeSearchText(values: unknown[]): string {
-  return values.map((value) => {
-    if (value === null || value === undefined) return '';
-    return typeof value === 'string' ? value : JSON.stringify(value);
-  }).join('\n').slice(0, 120_000);
 }
 
 function cleanText(value: string, max: number, field: string): string {

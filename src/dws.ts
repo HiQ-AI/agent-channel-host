@@ -16,7 +16,13 @@ export interface DwsCommandResult {
 
 export interface RecentGroupHistory {
   count: number;
-  prompt: string;
+  messages: RecentMessage[];
+}
+
+export interface RecentMessage {
+  sender: string;
+  time: string;
+  content: string;
 }
 
 export interface DwsGroupSearchResult {
@@ -118,17 +124,17 @@ export function parseRecentGroupHistory(value: unknown): RecentGroupHistory {
   if (!messages) throw new Error('DWS 群历史返回缺少消息数组');
 
   const newestFirst = messages.slice(0, 50).map(projectHistoryMessage);
-  const selected: string[] = [];
+  const selected: RecentMessage[] = [];
   let size = 0;
   for (const message of newestFirst) {
-    const serialized = safeJson(message);
+    const serialized = JSON.stringify(message);
     if (size + serialized.length > 60_000) break;
-    selected.push(serialized);
+    selected.push(message);
     size += serialized.length;
   }
   return {
     count: selected.length,
-    prompt: selected.reverse().join('\n'),
+    messages: selected.reverse(),
   };
 }
 
@@ -372,7 +378,7 @@ function text(value: unknown): string | null {
 }
 
 function safeJson(value: unknown): string {
-  if (value === undefined) return '';
+  if (value === undefined || value === null) return '';
   if (typeof value === 'string') return value.slice(0, 4_000);
   try {
     return JSON.stringify(value).slice(0, 4_000);
@@ -381,23 +387,31 @@ function safeJson(value: unknown): string {
   }
 }
 
-function projectHistoryMessage(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return { content: value };
+function projectHistoryMessage(value: unknown): RecentMessage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { sender: '未知', time: '未知', content: safeJson(value) || '[空消息]' };
+  }
   const source = value as Record<string, unknown>;
   const quoted = firstValue(source, ['quotedMessage', 'quoted_message']);
   const forwarded = firstValue(source, ['forwardMessages', 'forward_messages']);
+  const content = safeJson(firstValue(source, ['content', 'msgContent', 'text', 'message'])) || '[空消息]';
+  const parts = [content];
+  const quotedText = historyNestedContent(quoted);
+  const forwardedText = historyNestedContent(forwarded);
+  if (quotedText) parts.push(`引用内容：${quotedText}`);
+  if (forwardedText) parts.push(`合并转发内容：${forwardedText}`);
   return {
-    sender: text(firstValue(source, ['senderName', 'sender_name', 'sender', 'nickName', 'nickname'])),
-    occurredAt: text(firstValue(source, ['createTime', 'create_time', 'sendTime', 'timestamp'])),
-    messageType: text(firstValue(source, ['msgType', 'messageType', 'type'])),
-    content: firstValue(source, ['content', 'msgContent', 'text', 'message']),
-    quotedMessage: quoted && typeof quoted === 'object' ? projectHistoryMessage(quoted) : quoted,
-    forwardedMessages: Array.isArray(forwarded)
-      ? forwarded.slice(0, 50).map(projectHistoryMessage)
-      : forwarded && typeof forwarded === 'object'
-        ? projectHistoryMessage(forwarded)
-        : forwarded,
+    sender: text(firstValue(source, ['senderName', 'sender_name', 'sender', 'nickName', 'nickname'])) ?? '未知',
+    time: text(firstValue(source, ['createTime', 'create_time', 'sendTime', 'timestamp'])) ?? '未知',
+    content: parts.join('\n'),
   };
+}
+
+function historyNestedContent(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return JSON.stringify(value.slice(0, 50).map(projectHistoryMessage));
+  if (typeof value === 'object') return JSON.stringify(projectHistoryMessage(value));
+  return safeJson(value);
 }
 
 function firstValue(source: Record<string, unknown>, names: string[]): unknown {

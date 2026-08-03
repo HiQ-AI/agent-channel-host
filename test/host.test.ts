@@ -66,7 +66,7 @@ class FakeSession implements AgentSession {
     this.interrupts += 1;
     const resolve = this.resolveActive;
     this.resolveActive = null;
-    resolve({ turnId: 'turn-interrupted', status: 'interrupted', decision: null, subagentThreadId: null });
+    resolve({ turnId: 'turn-interrupted', status: 'interrupted', decision: null });
     return true;
   }
 
@@ -490,12 +490,7 @@ function silentRun(turnId: string): DecisionRun {
   return {
     turnId,
     status: 'completed',
-    decision: {
-      action: 'silent', responsibilityMatch: false, category: 'test', replyText: '',
-      reasonCode: 'test', workType: 'discussion', delegation: 'not_required',
-      contextUpdate: null,
-    },
-    subagentThreadId: null,
+    decision: { action: 'silent', replyText: '' },
   };
 }
 

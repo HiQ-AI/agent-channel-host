@@ -5,7 +5,6 @@ import type { Store } from './store.js';
 import type { Conversation, ConversationMode } from './types.js';
 import { CLI_NAME } from './product.js';
 import { CONVERSATION_MODES, MAX_WORKER_WARM_SECONDS } from './types.js';
-import { publishRecoveryContext } from './recovery-context.js';
 import { safeName } from './paths.js';
 import { displayConversationTitle } from './conversation-title.js';
 
@@ -853,24 +852,20 @@ export function createSettingEntries(
     conversation.enabled ? 'enabled' : 'disabled', '即时准入策略', async (value) => {
       if (value !== 'enabled' && value !== 'disabled') throw new Error('会话状态必须是 enabled 或 disabled');
       if (!store.setConversationEnabled(conversationId, value === 'enabled')) throw new Error('conversation 不存在');
-      await publishCurrentRecovery(config, store, conversationId);
     },
   );
   enabledEntry.input = 'toggle';
   entries.push(
     storeSetting(`conversation:${conversationId}:title`, `会话名称 · ${conversation.title}`, conversation.title, '仅修改本地显示名称', async (value) => {
       if (!store.setConversationTitle(conversationId, value)) throw new Error('conversation 不存在');
-      await publishCurrentRecovery(config, store, conversationId);
     }),
     enabledEntry,
-    storeSetting(`conversation:${conversationId}:responsibility`, `会话职责 · ${conversation.title}`, conversation.responsibility, '下一 turn', async (value) => {
+    storeSetting(`conversation:${conversationId}:responsibility`, `会话职责 · ${conversation.title}`, conversation.responsibility, '仅本地备注，不自动注入 runtime', async (value) => {
       if (!store.setConversationResponsibility(conversationId, value)) throw new Error('conversation 不存在');
-      await publishCurrentRecovery(config, store, conversationId);
     }),
     selectSetting(storeSetting(`conversation:${conversationId}:mode`, `会话模式 · ${conversation.title}`, conversation.mode, '从 shadow/reply 选择；发送前即时生效', async (value) => {
       if (value !== 'shadow' && value !== 'reply') throw new Error('会话模式必须是 shadow 或 reply');
       if (!store.setConversationMode(conversationId, value)) throw new Error('conversation 不存在');
-      await publishCurrentRecovery(config, store, conversationId);
     }), CONVERSATION_MODES),
     storeSetting(
       `conversation:${conversationId}:warm`, `Worker 保温秒数 · ${conversation.title}`, String(conversation.workerWarmSeconds),
@@ -884,13 +879,13 @@ export function createSettingEntries(
   for (const member of store.listConversationMembers(conversationId)) {
     const label = redact(member.displayName ?? member.externalUserId);
     entries.push(
-      storeSetting(`member:${member.externalUserId}:organizationRole`, `成员 ${label} · 组织角色`, member.organizationRole, '按需注入', async (value) => {
+      storeSetting(`member:${member.externalUserId}:organizationRole`, `成员 ${label} · 组织角色`, member.organizationRole, '仅本地资料，不自动注入 runtime', async (value) => {
         store.updateConversationMember(conversationId, member.externalUserId, { organizationRole: value });
       }, 'members'),
-      storeSetting(`member:${member.externalUserId}:conversationRole`, `成员 ${label} · 会话角色`, member.conversationRole, '按需注入', async (value) => {
+      storeSetting(`member:${member.externalUserId}:conversationRole`, `成员 ${label} · 会话角色`, member.conversationRole, '仅本地资料，不自动注入 runtime', async (value) => {
         store.updateConversationMember(conversationId, member.externalUserId, { conversationRole: value });
       }, 'members'),
-      storeSetting(`member:${member.externalUserId}:boundary`, `成员 ${label} · 职责边界`, member.responsibilityBoundary, '按需注入', async (value) => {
+      storeSetting(`member:${member.externalUserId}:boundary`, `成员 ${label} · 职责边界`, member.responsibilityBoundary, '仅本地资料，不自动注入 runtime', async (value) => {
         store.updateConversationMember(conversationId, member.externalUserId, { responsibilityBoundary: value });
       }, 'members'),
     );
@@ -1004,9 +999,6 @@ function configSetting(
     const validated = validateConfig(next);
     await writeConfig(validated, configFile);
     replaceConfig(config, validated);
-    if (store.path !== ':memory:') {
-      await Promise.all(store.listConversations().map((conversation) => publishRecoveryContext(config, conversation, store)));
-    }
   }, 'instance');
 }
 
@@ -1060,12 +1052,6 @@ function nextOption(entry: SettingEntry): string {
   if (!entry.options || entry.options.length === 0) throw new Error(`${entry.label} 缺少候选值`);
   const current = entry.options.indexOf(entry.value);
   return entry.options[(current + 1) % entry.options.length]!;
-}
-
-async function publishCurrentRecovery(config: HostConfig, store: Store, conversationId: string): Promise<void> {
-  if (store.path === ':memory:') return;
-  const current = store.getConversation(conversationId);
-  if (current) await publishRecoveryContext(config, current, store);
 }
 
 function replaceConfig(target: HostConfig, source: HostConfig): void {
