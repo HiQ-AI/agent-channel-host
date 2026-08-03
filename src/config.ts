@@ -43,7 +43,6 @@ const configSchema = z.object({
     effort: z.enum(CODEX_REASONING_EFFORTS).default(DEFAULT_CODEX_EFFORT),
     cwd: z.string().min(1),
     startupTimeoutSeconds: z.number().int().positive().default(120),
-    turnTimeoutSeconds: z.number().int().positive().default(180),
   }),
   scheduling: z.object({
     quietWindowMilliseconds: z.number().int().min(0).max(60_000).default(300),
@@ -88,7 +87,6 @@ export function defaultConfig(instance: string, cwd: string, name: string, role:
       effort: DEFAULT_CODEX_EFFORT,
       cwd: resolve(cwd),
       startupTimeoutSeconds: 120,
-      turnTimeoutSeconds: 180,
     },
     scheduling: {
       quietWindowMilliseconds: 300,

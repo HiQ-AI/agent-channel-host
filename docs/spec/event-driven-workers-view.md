@@ -45,7 +45,7 @@ SQLite 升级到 v4：
 
 - `conversations` 增加 `channel_id/channel_profile_id/runtime_id/worker_warm_seconds`，路由键升级为 `(channel, profile, kind, external_id)`；旧记录迁移为 `dingtalk/default/codex`。
 - 用中立的 `runtime_sessions` 取代旧 `sessions` 读写：`runtime_id/provider_session_id/generation/protocol_fingerprint/lifecycle/runtime_cwd`。Codex adapter 自己解释 provider session 和 fingerprint。
-- `inbound_events` 增加 `claim_owner/claim_expires_at_ms/claimed_at`。正常状态为 `admitted → claimed → completed|failed`；中断或过期 claim 回到 `admitted`。
+- `inbound_events` 增加 `claim_owner/claim_expires_at_ms/claimed_at`。正常状态为 `admitted → claimed → completed|failed`；当前消息代理方案不设置 turn 超时，`claim_expires_at_ms` 保留为历史列但新 claim 写 `NULL`，只在显式中断或启动 reconciliation 时回到 `admitted`。
 - `runtime_workers` 保存 starting/running/warm/stopped/error、PID、claim 范围、最近 signal/error 和时间戳，供另一个 CLI 进程读取。
 - `channel_connections` 保存 channel/profile、starting/ready/stopped/error、Host PID、连接时间、最后事件和错误。
 
@@ -69,7 +69,7 @@ worker
        └─ inbox empty → warm timer → stop process → release lease
 ```
 
-ReadyQueue 对同一 conversation 去重；多个 signal 只表示“状态可能更新”，真实待处理范围始终由 SQLite claim 决定。事务提交后、ready signal 前崩溃时，启动 reconciliation 会重新 signal 所有 admitted/过期 claimed conversation。可选 safety sweep 不是本轮正常路径。
+ReadyQueue 对同一 conversation 去重；多个 signal 只表示“状态可能更新”，真实待处理范围始终由 SQLite claim 决定。事务提交后、ready signal 前崩溃时，启动 reconciliation 会释放所有遗留 claimed 并重新 signal 所有 admitted conversation。可选 safety sweep 不是本轮正常路径。
 
 ## burst 与出站
 

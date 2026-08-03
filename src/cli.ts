@@ -362,15 +362,13 @@ program.command('verify')
         state: 'stopped',
         model: config.runtime.model,
         protocolFingerprint: runtime.fingerprint,
-        contextRecovery: 'session-start-hook',
+        contextRecovery: 'runtime-native',
       });
       session = new CodexCommandSession(config, target, runtime, store);
       const startup = await session.start();
       const canary = await session.runDecision(`
 [宿主离线验证事件；不是钉钉消息]
-当前没有待处理消息，禁止发言。返回 action="silent"、responsibilityMatch=false、category="verify"、replyText=""、reasonCode="offline_canary"。
-同时返回 workType="discussion"、delegation="not_required"。
-返回 contextUpdate=null。
+当前没有待处理消息。只返回 {"action":"silent","replyText":""}。
 `.trim());
       if (canary.status !== 'completed' || canary.decision?.action !== 'silent' || canary.decision.replyText !== '') {
         throw new Error('离线 canary 未返回严格 silent 决策');

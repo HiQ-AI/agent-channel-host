@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { HostConfig } from './config.js';
 import type { AgentSession, ChannelAdapter } from './contracts.js';
-import type { AdmittedEvent, Conversation, Decision, DecisionRun, OutboxRecord } from './types.js';
+import type { AdmittedEvent, Conversation, DecisionRun, OutboxRecord } from './types.js';
 import type { Store } from './store.js';
 import { delay } from './process-utils.js';
 import { fetchRecentGroupHistory, type RecentGroupHistory } from './dws.js';
 import { PRODUCT_ID } from './product.js';
-import { batchPrompt, groupOnboardingPrompt } from './prompts.js';
+import { batchPrompt, recentMessagesPrompt } from './prompts.js';
 
 export class ConversationWorker {
   readonly workerId = randomUUID();
@@ -50,7 +50,9 @@ export class ConversationWorker {
       if (this.conversation.kind === 'group') {
         const onboarding = this.store.getGroupOnboarding(this.conversation.id);
         if (!onboarding) throw new Error(`群 onboarding 状态不存在：${this.conversation.id}`);
-        if (!onboarding.introText) history = await this.loadGroupHistory(this.conversation);
+        if (onboarding.state !== 'submitted' && !onboarding.introText) {
+          history = await this.loadGroupHistory(this.conversation);
+        }
       }
       await this.session.start();
       if (this.conversation.kind === 'group') await this.onboardGroup(history);
@@ -88,18 +90,25 @@ export class ConversationWorker {
   private async onboardGroup(history: RecentGroupHistory | null): Promise<void> {
     let onboarding = this.store.getGroupOnboarding(this.conversation.id);
     if (!onboarding) throw new Error(`群 onboarding 状态不存在：${this.conversation.id}`);
+    if (onboarding.state === 'submitted') return;
     if (!onboarding.introText) {
       if (!history) throw new Error('群 onboarding 缺少最近消息上下文');
-      const current = this.store.getConversation(this.conversation.id);
-      if (!current) throw new Error(`conversation 不存在：${this.conversation.id}`);
-      const result = await this.session.runDecision(groupOnboardingPrompt(this.config, current, history));
-      if (
-        result.status !== 'completed'
-        || result.decision?.action !== 'reply'
-        || result.decision.workType !== 'discussion'
-        || result.decision.delegation !== 'not_required'
-      ) {
-        throw new Error('群 onboarding 未生成纯讨论型自我介绍');
+      if (history.count === 0) {
+        this.store.completeGroupOnboardingSilently(this.conversation.id, 0, null);
+        this.log({ type: 'GROUP_HISTORY_COMPLETED', conversationId: this.conversation.id, historyCount: 0, action: 'silent' });
+        return;
+      }
+      const result = await this.session.runDecision(recentMessagesPrompt(history.messages));
+      if (result.status !== 'completed' || !result.decision) {
+        throw new Error('群最近消息处理未返回有效决定');
+      }
+      if (result.decision.action === 'silent') {
+        this.store.completeGroupOnboardingSilently(this.conversation.id, history.count, result.turnId);
+        this.log({
+          type: 'GROUP_HISTORY_COMPLETED', conversationId: this.conversation.id,
+          historyCount: history.count, action: 'silent', turnIdPrefix: result.turnId.slice(0, 12),
+        });
+        return;
       }
       onboarding = this.store.prepareGroupOnboarding(
         this.conversation.id,
@@ -109,8 +118,8 @@ export class ConversationWorker {
         deterministicOnboardingUuid(this.conversation),
       );
       this.log({
-        type: 'GROUP_ONBOARDING_PREPARED', conversationId: this.conversation.id,
-        historyCount: history.count, introTurnIdPrefix: result.turnId.slice(0, 12),
+        type: 'GROUP_HISTORY_REPLY_PREPARED', conversationId: this.conversation.id,
+        historyCount: history.count, turnIdPrefix: result.turnId.slice(0, 12),
       });
     }
     if (onboarding.state === 'submitted') return;
@@ -177,8 +186,6 @@ export class ConversationWorker {
         this.conversation,
         this.workerId,
         this.config.scheduling.maxBatchMessages,
-        Date.now(),
-        Math.max(300_000, this.config.runtime.turnTimeoutSeconds * 2_000),
       );
       if (events.length === 0) break;
       const first = events[0]!.sequence;
@@ -198,7 +205,7 @@ export class ConversationWorker {
         let result: DecisionRun;
         try {
           result = await this.session.runDecision(
-            batchPrompt(events, this.store.findRelevantMembers(this.conversation.id, events)),
+            batchPrompt(events),
             () => this.signalGeneration > claimedGeneration,
           );
         } finally {
@@ -212,20 +219,23 @@ export class ConversationWorker {
           });
           continue;
         }
-        this.store.recordBatchDecision(
+        const tail = events.at(-1)!;
+        const outbox = this.store.recordBatchDecision(
           events,
           this.workerId,
           result.turnId,
           'completed',
           result.decision,
-          result.subagentThreadId,
+          result.decision?.action === 'reply'
+            ? { text: result.decision.replyText, uuid: deterministicUuid(tail) }
+            : null,
         );
         this.log({
           type: 'BATCH_COMPLETED', conversationId: this.conversation.id,
           fromSequence: first, toSequence: last, count: events.length,
           action: result.decision?.action ?? null,
         });
-        if (result.decision) await this.handleDecision(events.at(-1)!, result.decision);
+        if (outbox) await this.submitOutbox(outbox, tail.sequence);
       } catch (error) {
         this.store.recordBatchDecision(events, this.workerId, null, 'failed', null, null, (error as Error).message);
         this.onError(error as Error, events);
@@ -253,17 +263,6 @@ export class ConversationWorker {
       if (remaining > 0) await delay(remaining);
       if (generation === this.signalGeneration) return;
     }
-  }
-
-  private async handleDecision(event: AdmittedEvent, decision: Decision): Promise<void> {
-    const current = this.store.getConversation(this.conversation.id);
-    if (!current?.enabled || current.mode !== 'reply' || decision.action !== 'reply') return;
-    const record = this.store.enqueueOutbox(event, decision.replyText, deterministicUuid(event));
-    if (!record) {
-      this.log({ type: 'OUTBOX_SUPPRESSED', conversationId: this.conversation.id, sequence: event.sequence, reason: 'newer-message-admitted' });
-      return;
-    }
-    await this.submitOutbox(record, event.sequence);
   }
 
   private async retryPendingOutbox(): Promise<void> {

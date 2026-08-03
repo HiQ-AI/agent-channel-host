@@ -10,83 +10,42 @@ import { validateDecision } from '../src/decision.js';
 import { Store } from '../src/store.js';
 import type { Conversation } from '../src/types.js';
 
-const conversation: Conversation = {
-  id: 'conversation', channelId: 'dingtalk', channelProfileId: 'default', kind: 'group',
-  externalId: 'group', title: '测试群', responsibility: '回答测试问题', mode: 'shadow',
-  runtimeId: 'codex', workerWarmSeconds: 30, policyVersion: 1, enabled: true,
-  createdAt: '2026-01-01', updatedAt: '2026-01-01',
-};
-
 test('结构化决策 fail closed', () => {
-  assert.doesNotThrow(() => validateDecision({
-    action: 'silent', responsibilityMatch: false, category: 'out_of_scope', replyText: '', reasonCode: 'outside',
-    workType: 'discussion', delegation: 'not_required',
-    contextUpdate: null,
-  }, '- Agent代回'));
+  assert.doesNotThrow(() => validateDecision({ action: 'silent', replyText: '' }));
+  assert.doesNotThrow(() => validateDecision({ action: 'reply', replyText: '无需 Host 签名约束' }));
+  assert.throws(() => validateDecision({ action: 'silent', replyText: '不应有正文' }), /必须为空/);
   assert.throws(() => validateDecision({
-    action: 'reply', responsibilityMatch: true, category: 'question', replyText: '没有签名', reasonCode: 'inside',
-    workType: 'discussion', delegation: 'not_required',
-    contextUpdate: null,
-  }, '- Agent代回'), /必须有正文/);
+    action: 'reply', replyText: '正文', category: 'Host 不应要求的字段',
+  } as never), /只能包含/);
 });
 
 test('新建与 resume 使用同一命令协议并显式携带 session ID', () => {
   const config = defaultConfig('test', '.', 'Agent', 'role');
-  const created = buildCodexExecArgs(config, conversation, 'schema.json', 'hello', null);
-  assert.deepEqual(created.slice(0, 4), ['exec', '--dangerously-bypass-hook-trust', '--json', '--output-schema']);
-  assert.ok(created.includes('--sandbox'));
-  assert.ok(created.some((arg) => arg.startsWith('developer_instructions=')));
-  const resumed = buildCodexExecArgs(config, conversation, 'schema.json', 'again', 'session-1');
-  assert.deepEqual(resumed.slice(0, 5), ['exec', 'resume', '--dangerously-bypass-hook-trust', '--json', '--output-schema']);
+  const created = buildCodexExecArgs(config, 'schema.json', 'hello', null);
+  assert.deepEqual(created.slice(0, 3), ['exec', '--json', '--output-schema']);
+  assert.equal(created.some((arg) => arg.includes('approval_policy')), false);
+  assert.equal(created.some((arg) => arg.includes('sandbox_mode')), false);
+  assert.equal(created.some((arg) => arg.includes('network_access')), false);
+  assert.equal(created.includes('--sandbox'), false);
+  assert.equal(created.some((arg) => arg.includes('developer_instructions')), false);
+  assert.equal(created.some((arg) => arg.includes('hooks.SessionStart')), false);
+  const resumed = buildCodexExecArgs(config, 'schema.json', 'again', 'session-1');
+  assert.deepEqual(resumed.slice(0, 4), ['exec', 'resume', '--json', '--output-schema']);
   assert.deepEqual(resumed.slice(-2), ['session-1', 'again']);
 });
 
-test('JSONL collector 校验精确 resume 并提取结构化结果与执行证据', () => {
+test('JSONL collector 校验精确 resume；Agent 工具事件不影响最小返回', () => {
   const collector = new CodexJsonlCollector('session-1');
   collector.accept('{"type":"thread.started","thread_id":"session-1"}');
   collector.accept('{"type":"item.completed","item":{"type":"command_execution","command":"git status"}}');
-  collector.accept('{"type":"item.completed","item":{"type":"agent_message","text":"{\\"action\\":\\"silent\\"}"}}');
+  collector.accept('{"type":"item.completed","item":{"type":"agent_message","text":"{\\"action\\":\\"silent\\",\\"replyText\\":\\"\\"}"}}');
   collector.accept('{"type":"turn.completed"}');
   assert.equal(collector.providerSessionId, 'session-1');
   assert.equal(collector.turnCompleted, true);
-  assert.equal(collector.agentMessage, '{"action":"silent"}');
-  assert.deepEqual(collector.evidence.mainWorkItems, ['commandexecution']);
-  const delegated = new CodexJsonlCollector('session-1');
-  delegated.accept('{"type":"item.completed","item":{"id":"spawn-call-1","type":"collab_tool_call","tool":"spawn_agent","status":"completed","receiver_thread_ids":[]}}');
-  assert.deepEqual(delegated.evidence.spawnedSubagentCallIds, ['spawn-call-1']);
-  assert.deepEqual(delegated.evidence.spawnedSubagentThreadIds, []);
-  const failedDelegation = new CodexJsonlCollector('session-1');
-  failedDelegation.accept('{"type":"item.completed","item":{"id":"spawn-call-failed","type":"collab_tool_call","tool":"spawn_agent","status":"failed","receiver_thread_ids":[]}}');
-  assert.deepEqual(failedDelegation.evidence.spawnedSubagentCallIds, []);
-  const waited = new CodexJsonlCollector('session-1');
-  waited.accept('{"type":"item.started","item":{"id":"wait-call","type":"collab_tool_call","tool":"wait","status":"in_progress","receiver_thread_ids":[]}}');
-  assert.equal(waited.evidence.waitedForSubagent, true);
+  assert.equal(collector.agentMessage, '{"action":"silent","replyText":""}');
   const wrong = new CodexJsonlCollector('session-1');
   assert.throws(() => wrong.accept('{"type":"thread.started","thread_id":"session-2"}'), /未精确恢复/);
   assert.throws(() => wrong.accept('not-json'), /非法 JSONL/);
-});
-
-test('实施类决策必须有真实后台派发证据且主会话不能等待或直接实施', () => {
-  const decision = {
-    action: 'reply' as const,
-    responsibilityMatch: true,
-    category: 'implementation',
-    replyText: '已经交给后台 worker 处理，我继续看群。\n\n- Agent代回',
-    reasonCode: 'delegated',
-    workType: 'implementation' as const,
-    delegation: 'started' as const,
-    contextUpdate: null,
-  };
-  assert.doesNotThrow(() => validateDecision(decision, '- Agent代回', {
-    spawnedSubagentCallIds: ['spawn-call'], spawnedSubagentThreadIds: [], waitedForSubagent: false, mainWorkItems: [],
-  }));
-  assert.throws(() => validateDecision(decision, '- Agent代回'), /真实派发/);
-  assert.throws(() => validateDecision(decision, '- Agent代回', {
-    spawnedSubagentCallIds: ['spawn-call'], spawnedSubagentThreadIds: [], waitedForSubagent: true, mainWorkItems: [],
-  }), /不得等待/);
-  assert.throws(() => validateDecision(decision, '- Agent代回', {
-    spawnedSubagentCallIds: ['spawn-call'], spawnedSubagentThreadIds: [], waitedForSubagent: false, mainWorkItems: ['filechange'],
-  }), /禁止直接实施/);
 });
 
 test('命令进程退出后以同一 provider session ID 精确 resume', async () => {
@@ -108,7 +67,7 @@ test('命令进程退出后以同一 provider session ID 精确 resume', async (
     const second = new CodexCommandSession(config, stored, identity, store);
     assert.deepEqual(await second.start(), { mode: 'resumed', providerSessionId: 'fake-session-fixed' });
     const resumed = await second.runDecision('second');
-    assert.equal(resumed.decision?.category, 'resume');
+    assert.deepEqual(resumed.decision, { action: 'silent', replyText: '' });
     assert.equal(second.currentSessionId, 'fake-session-fixed');
   } finally {
     store.close();
@@ -116,7 +75,41 @@ test('命令进程退出后以同一 provider session ID 精确 resume', async (
   }
 });
 
-test('活动命令可取消，超时与非零退出 fail closed', async () => {
+test('协议不兼容时提升 generation 并新建 session，不向旧 transcript 重灌指令', async () => {
+  const root = resolve('.test-codex-command-rotation-state');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const store = new Store(resolve(root, 'state.sqlite3'));
+  const config = defaultConfig('command-rotation', process.cwd(), 'Agent', 'role');
+  const identity = fakeIdentity();
+  try {
+    const stored = addFakeConversation(store, 'rotation-user');
+    store.saveSession({
+      conversationId: stored.id,
+      runtimeId: 'codex',
+      providerSessionId: 'old-provider-session',
+      generation: 1,
+      lifecycle: 'ready',
+      protocolFingerprint: 'old-protocol',
+      runtimeCwd: config.runtime.cwd,
+      bootstrapTurnId: 'old-turn',
+      createdAt: '2026-08-03T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+    });
+    const session = new CodexCommandSession(config, stored, identity, store);
+    assert.deepEqual(await session.start(), { mode: 'new', providerSessionId: null });
+    assert.equal(store.getSession(stored.id), null);
+    assert.equal(store.getConversation(stored.id)?.sessionGeneration, 2);
+    await session.runDecision('new-generation');
+    assert.equal(store.getSession(stored.id)?.providerSessionId, 'fake-session-fixed');
+    assert.equal(store.getSession(stored.id)?.generation, 2);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('活动命令可取消，且非零退出 fail closed', async () => {
   const root = resolve('.test-codex-command-failure-state');
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
@@ -137,11 +130,11 @@ test('活动命令可取消，超时与非零退出 fail closed', async () => {
     await failed.start();
     await assert.rejects(failed.runDecision('FAIL'), /退出异常：code=7.*simulated failure/);
 
-    config.runtime.turnTimeoutSeconds = 1;
-    const timedOut = new CodexCommandSession(config, addFakeConversation(store, 'timeout-user'), identity, store);
-    await timedOut.start();
-    await assert.rejects(timedOut.runDecision('SLOW'), /超时/);
-    assert.equal(timedOut.processId, null);
+    (config.runtime as unknown as Record<string, unknown>).turnTimeoutSeconds = 1;
+    const noTurnTimeout = new CodexCommandSession(config, addFakeConversation(store, 'no-timeout-user'), identity, store);
+    await noTurnTimeout.start();
+    assert.equal((await noTurnTimeout.runDecision('SLOW_SHORT')).status, 'completed');
+
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });

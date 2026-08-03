@@ -17,6 +17,7 @@ export interface Conversation {
   runtimeId: string;
   workerWarmSeconds: number;
   policyVersion: number;
+  sessionGeneration: number;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -75,14 +76,8 @@ export interface AdmittedEvent extends NormalizedEvent {
 }
 
 export interface Decision {
-  action: 'silent' | 'reply' | 'escalate';
-  responsibilityMatch: boolean;
-  category: string;
+  action: 'silent' | 'reply';
   replyText: string;
-  reasonCode: string;
-  workType: 'discussion' | 'implementation';
-  delegation: 'not_required' | 'started';
-  contextUpdate: ConversationContextUpdate | null;
 }
 
 export interface SessionRecord {
@@ -102,7 +97,6 @@ export interface DecisionRun {
   turnId: string;
   status: 'completed' | 'interrupted';
   decision: Decision | null;
-  subagentThreadId: string | null;
 }
 
 export type WorkerState = 'starting' | 'running' | 'warm' | 'stopped' | 'error';

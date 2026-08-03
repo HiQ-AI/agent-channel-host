@@ -78,11 +78,17 @@ test('pending message 可事务 claim、释放并在 Host 重启时 reconciliati
   const claimed = store.claimPendingEvents(conversation, 'worker-a', 20);
   assert.deepEqual(claimed.map((event) => event.sequence), [1, 2]);
   assert.deepEqual(store.claimPendingEvents(conversation, 'worker-b', 20), []);
+  const claimState = store.db.prepare(
+    'SELECT claim_owner,claim_expires_at_ms FROM inbound_events WHERE id=?',
+  ).get(claimed[0]!.id) as { claim_owner: string; claim_expires_at_ms: number | null };
+  assert.equal(claimState.claim_owner, 'worker-a');
+  assert.equal(claimState.claim_expires_at_ms, null);
   store.releaseClaimedEvents(claimed, 'worker-a');
   assert.equal(store.claimPendingEvents(conversation, 'worker-b', 1).length, 1);
   assert.deepEqual(store.recoverPendingWork(), [conversation.id]);
   assert.equal(store.status().pending_messages, 2);
   assert.equal(store.status().claimed_messages, 0);
+  assert.equal(store.getConversation(conversation.id)?.sessionGeneration, 2);
   store.close();
 });
 
@@ -165,6 +171,87 @@ test('outbox 在有更新消息时拒绝旧决定，发送前再次检查 freshn
   assert.equal(store.claimOutboxIfFresh(pending!.id), null);
   assert.equal(store.getOutbox(pending!.id)?.state, 'suppressed');
   assert.equal(store.enqueueOutbox(first, '过时回复', '00000000-0000-4000-8000-000000000002'), null);
+  store.close();
+});
+
+test('批次决定、inbox 完成与可选 outbox 在同一事务提交', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'atomic-user', title: '原子私聊', responsibility: '本地备注', mode: 'reply',
+  });
+  const normalized = normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all',
+    event_id: 'atomic-event',
+    sender_open_dingtalk_id: conversation.externalId,
+    content: '需要回复',
+  })!;
+  store.admitEvent(conversation, normalized);
+  const claimed = store.claimPendingEvents(conversation, 'atomic-worker', 20);
+  const outbox = store.recordBatchDecision(
+    claimed,
+    'atomic-worker',
+    'atomic-turn',
+    'completed',
+    { action: 'reply', replyText: '处理结果' },
+    { text: '处理结果', uuid: '00000000-0000-4000-8000-000000000088' },
+  );
+  assert.equal(store.status().processed, 1);
+  assert.equal(outbox?.state, 'pending');
+  assert.equal(outbox?.text, '处理结果');
+  const decision = store.db.prepare(`
+    SELECT action,reply_text,responsibility_match,category,reason_code,work_type,delegation
+    FROM decisions WHERE inbound_event_id=?
+  `).get(claimed[0]!.id) as Record<string, unknown>;
+  assert.deepEqual({ ...decision }, {
+    action: 'reply',
+    reply_text: '处理结果',
+    responsibility_match: null,
+    category: null,
+    reason_code: null,
+    work_type: null,
+    delegation: null,
+  });
+  store.close();
+});
+
+test('重启发现活动 claim 时删除旧 provider session、提升 generation 并留审计', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'rotate-user', title: '重置私聊', responsibility: '本地备注', mode: 'shadow',
+  });
+  store.saveSession({
+    conversationId: conversation.id,
+    runtimeId: 'codex',
+    providerSessionId: 'polluted-session',
+    generation: 1,
+    lifecycle: 'ready',
+    protocolFingerprint: 'old-protocol',
+    runtimeCwd: '.',
+    bootstrapTurnId: 'old-turn',
+    createdAt: '2026-08-03T00:00:00.000Z',
+    updatedAt: '2026-08-03T00:00:00.000Z',
+  });
+  store.admitEvent(conversation, normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all',
+    event_id: 'rotate-event',
+    sender_open_dingtalk_id: conversation.externalId,
+    content: '处理中断',
+  })!);
+  store.claimPendingEvents(conversation, 'dead-worker', 20);
+
+  assert.deepEqual(store.recoverPendingWork(), [conversation.id]);
+  assert.equal(store.getSession(conversation.id), null);
+  assert.equal(store.getConversation(conversation.id)?.sessionGeneration, 2);
+  const audit = store.db.prepare(`
+    SELECT previous_generation,next_generation,previous_provider_session_id,reason
+    FROM runtime_session_resets WHERE conversation_id=?
+  `).get(conversation.id) as Record<string, unknown>;
+  assert.deepEqual({ ...audit }, {
+    previous_generation: 1,
+    next_generation: 2,
+    previous_provider_session_id: 'polluted-session',
+    reason: 'host-restart-claimed-turn',
+  });
   store.close();
 });
 
@@ -293,10 +380,11 @@ test('首次群历史固定从当前本地时间向前拉 50 条，并按时间�
     '--direction', 'older', '--limit', '50',
   ]);
   assert.equal(history.count, 2);
-  assert.ok(history.prompt.indexOf('旧消息') < history.prompt.indexOf('新消息'));
-  assert.match(history.prompt, /引用内容/);
-  assert.match(history.prompt, /转发内容/);
-  assert.doesNotMatch(history.prompt, /secret-(old|new|quoted|forwarded)/);
+  assert.deepEqual(history.messages.map((message) => message.sender), ['同事甲', '同事乙']);
+  assert.ok(history.messages[0]!.content.includes('旧消息'));
+  assert.match(history.messages[0]!.content, /转发内容/);
+  assert.match(history.messages[1]!.content, /引用内容/);
+  assert.doesNotMatch(JSON.stringify(history.messages), /secret-(old|new|quoted|forwarded)/);
   store.close();
 });
 
@@ -327,7 +415,7 @@ test('v1 会话迁移后补 onboarding 和每类生命周期默认值', () => {
     assert.equal(migrated.getConversation('group-v1')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v1')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 7);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
     assert.equal(migrated.getConversation('group-v1')?.policyVersion, 1);
     migrated.close();
   } finally {
@@ -361,7 +449,7 @@ test('v2 会话迁移到当前 schema 时得到固定逻辑 session 和按需 Wo
     assert.equal(migrated.getConversation('group-v2')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v2')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 7);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -394,12 +482,20 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
       'group-v3','group','cid-v3','v3群','参与讨论','shadow',1,
       '2026-01-01','2026-01-01','resident',5
     );
+    INSERT INTO conversations VALUES(
+      'group-v3-submitted','group','cid-v3-submitted','已完成群','参与讨论','shadow',1,
+      '2026-01-01','2026-01-01','resident',5
+    );
     INSERT INTO sessions VALUES(
       'group-v3','thread-complete-v3','ready','codex-cli 0.145.0','schema-v3','D:/agent',
       'bootstrap-v3','2026-01-01','2026-01-02'
     );
     INSERT INTO group_onboarding VALUES(
-      'group-v3','submitted',0,'2026-01-01','intro','hello','uuid',NULL,'2026-01-01','2026-01-01'
+      'group-v3','prepared',2,'2026-01-01','intro','旧自我介绍','uuid',NULL,'2026-01-01','2026-01-01'
+    );
+    INSERT INTO group_onboarding VALUES(
+      'group-v3-submitted','submitted',1,'2026-01-01','sent-turn','已发送','sent-uuid',NULL,
+      '2026-01-01','2026-01-01'
     );
     PRAGMA user_version=3;
   `);
@@ -412,8 +508,13 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
     assert.equal(session?.generation, 1);
     assert.equal(session?.protocolFingerprint, 'codex-cli 0.145.0:schema-v3');
     assert.equal(migrated.getConversation('group-v3')?.workerWarmSeconds, 30);
+    const onboarding = migrated.getGroupOnboarding('group-v3');
+    assert.equal(onboarding?.state, 'pending');
+    assert.equal(onboarding?.introText, null);
+    assert.equal(onboarding?.introUuid, null);
+    assert.equal(migrated.getGroupOnboarding('group-v3-submitted')?.state, 'submitted');
     assert.deepEqual(migrated.db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 7);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -435,6 +536,11 @@ test('v5 Channel 状态表迁移后保留旧记录并允许 disabled', () => {
     INSERT INTO channel_connections VALUES(
       'dingtalk','default','DingTalk DWS','stopped',NULL,NULL,NULL,NULL,'2026-01-01'
     );
+    CREATE TABLE runtime_sessions (
+      conversation_id TEXT PRIMARY KEY,runtime_id TEXT NOT NULL,provider_session_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,lifecycle TEXT NOT NULL,protocol_fingerprint TEXT NOT NULL,
+      runtime_cwd TEXT NOT NULL,bootstrap_turn_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+    );
     PRAGMA user_version=5;
   `);
   old.close();
@@ -450,7 +556,7 @@ test('v5 Channel 状态表迁移后保留旧记录并允许 disabled', () => {
       `).get() as { state: string; label: string };
       assert.equal(row.state, 'disabled');
       assert.equal(row.label, 'DingTalk DWS');
-      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 7);
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
     } finally {
       migrated.close();
     }

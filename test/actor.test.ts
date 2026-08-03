@@ -25,12 +25,8 @@ class FakeSession implements AgentSession {
       turnId: `turn-${this.calls}`,
       status: 'completed',
       decision: {
-        action: 'reply', responsibilityMatch: true, category: 'question',
-        replyText: '第二条消息的答复\n\n- Agent代回', reasonCode: 'within_responsibility',
-        workType: 'discussion', delegation: 'not_required',
-        contextUpdate: null,
+        action: 'reply', replyText: '第二条消息的答复',
       },
-      subagentThreadId: null,
     });
   }
 
@@ -39,7 +35,7 @@ class FakeSession implements AgentSession {
     this.interrupts += 1;
     const resolve = this.resolveActive;
     this.resolveActive = null;
-    resolve({ turnId: 'turn-1', status: 'interrupted', decision: null, subagentThreadId: null });
+    resolve({ turnId: 'turn-1', status: 'interrupted', decision: null });
     return true;
   }
 
@@ -93,12 +89,8 @@ class OnboardingSession implements AgentSession {
       turnId: 'intro-turn-123456789',
       status: 'completed',
       decision: {
-        action: 'reply', responsibilityMatch: true, category: 'group_onboarding',
-        replyText: '大家好，我会持续关注本群讨论。\n\n- Agent代回', reasonCode: 'first_join',
-        workType: 'discussion', delegation: 'not_required',
-        contextUpdate: null,
+        action: 'reply', replyText: '近期讨论里这个问题需要补充说明。',
       },
-      subagentThreadId: null,
     };
   }
 
@@ -106,7 +98,7 @@ class OnboardingSession implements AgentSession {
   async stop(): Promise<void> {}
 }
 
-test('群 onboarding 在 shadow 只准备，切 reply 重启后用同一 UUID 发送且不重复生成', async () => {
+test('首次群历史由 Agent 判断；reply 在 shadow 只准备，切 reply 后用同一 UUID 发送', async () => {
   const config = defaultConfig('onboarding', '.', 'Agent', 'role');
   const store = new Store(':memory:');
   const shadow = store.addConversation({
@@ -122,7 +114,13 @@ test('群 onboarding 在 shadow 只准备，切 reply 重启后用同一 UUID �
     config, shadow, firstSession, store, sender, () => undefined, () => undefined,
     async () => {
       historyLoads.push(1);
-      return { count: 2, prompt: '{"content":"近期讨论"}' };
+      return {
+        count: 2,
+        messages: [
+          { sender: '同事甲', time: '2026-08-03 10:00:00', content: '近期讨论一' },
+          { sender: '同事乙', time: '2026-08-03 10:01:00', content: '近期讨论二' },
+        ],
+      };
     },
   );
   await firstActor.start();
@@ -154,6 +152,64 @@ test('群 onboarding 在 shadow 只准备，切 reply 重启后用同一 UUID �
   await thirdActor.start();
   assert.equal(sent.length, 1);
   await thirdActor.stop();
+  store.close();
+});
+
+test('首次群历史返回 silent 时标记完成且不发送、不重复读取', async () => {
+  const config = defaultConfig('onboarding-silent', '.', 'Agent', 'role');
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'cid-onboarding-silent', title: '静默群', responsibility: '本地备注', mode: 'reply',
+  });
+  const prompts: string[] = [];
+  const session: AgentSession = {
+    currentSessionId: 'thread-onboarding-silent',
+    processId: null,
+    start: async () => undefined,
+    runDecision: async (prompt) => {
+      prompts.push(prompt);
+      return { turnId: 'history-silent-turn', status: 'completed', decision: { action: 'silent', replyText: '' } };
+    },
+    interruptActive: async () => false,
+    stop: async () => undefined,
+  };
+  let sends = 0;
+  const worker = new ConversationWorker(
+    config,
+    conversation,
+    session,
+    store,
+    { send: async () => { sends += 1; } },
+    () => undefined,
+    () => undefined,
+    async () => ({
+      count: 1,
+      messages: [{ sender: '同事甲', time: '2026-08-03 10:00:00', content: '仅供了解的历史消息' }],
+    }),
+  );
+  await worker.start();
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0]!, /发送者：同事甲/);
+  assert.equal(prompts[0]!.includes('静默群'), false);
+  assert.equal(sends, 0);
+  assert.equal(store.getGroupOnboarding(conversation.id)?.state, 'submitted');
+  assert.equal(store.getGroupOnboarding(conversation.id)?.introText, null);
+  await worker.stop();
+
+  const restarted = new ConversationWorker(
+    config,
+    conversation,
+    { ...session, start: async () => undefined, stop: async () => undefined },
+    store,
+    { send: async () => { sends += 1; } },
+    () => undefined,
+    () => undefined,
+    async () => { throw new Error('已静默完成时不应重复读取历史'); },
+  );
+  await restarted.start();
+  assert.equal(prompts.length, 1);
+  assert.equal(sends, 0);
+  await restarted.stop();
   store.close();
 });
 
@@ -238,11 +294,8 @@ test('单个 conversation 的无效决策 fail closed，但 Worker 与 Channel �
       calls += 1;
       if (calls === 1) throw new Error('模拟结构化决策校验失败');
       return {
-        turnId: 'recovered-turn', status: 'completed', subagentThreadId: null,
-        decision: {
-          action: 'silent', responsibilityMatch: true, category: 'discussion', replyText: '',
-          reasonCode: 'recovered', workType: 'discussion', delegation: 'not_required', contextUpdate: null,
-        },
+        turnId: 'recovered-turn', status: 'completed',
+        decision: { action: 'silent', replyText: '' },
       };
     },
   };
@@ -272,19 +325,19 @@ test('单个 conversation 的无效决策 fail closed，但 Worker 与 Channel �
   }
 });
 
-test('实施任务派发回执不占用 actor，可继续处理下一条群消息', async () => {
-  const config = defaultConfig('delegation-actor', '.', 'Agent', 'role');
+test('runtime 自己的后台工作不由 Host 编排，actor 仍可继续处理下一条群消息', async () => {
+  const config = defaultConfig('runtime-background-actor', '.', 'Agent', 'role');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
   const conversation = store.addConversation({
-    kind: 'group', externalId: 'cid-delegation', title: '委派群', responsibility: '参与讨论', mode: 'shadow',
+    kind: 'group', externalId: 'cid-runtime-background', title: 'Runtime 后台工作群', responsibility: '参与讨论', mode: 'shadow',
   });
   store.prepareGroupOnboarding(conversation.id, 0, 'intro-turn', '已介绍\n\n- Agent代回', 'intro-uuid');
   store.finishGroupOnboardingIntro(conversation.id, 'submitted', null);
   let calls = 0;
   let workerFinished = false;
   const session: AgentSession = {
-    currentSessionId: 'thread-delegation-123456789',
+    currentSessionId: 'thread-runtime-background-123456789',
     processId: 9012,
     start: async () => undefined,
     interruptActive: async () => false,
@@ -293,19 +346,11 @@ test('实施任务派发回执不占用 actor，可继续处理下一条群消�
     runDecision: async () => {
       calls += 1;
       return calls === 1 ? {
-        turnId: 'implementation-turn', status: 'completed', subagentThreadId: 'child-thread',
-        decision: {
-          action: 'reply', responsibilityMatch: true, category: 'implementation', replyText: '已派后台处理\n\n- Agent代回',
-          reasonCode: 'worker_started', workType: 'implementation', delegation: 'started',
-          contextUpdate: null,
-        },
+        turnId: 'implementation-turn', status: 'completed',
+        decision: { action: 'reply', replyText: '我已接手处理。' },
       } : {
-        turnId: 'discussion-turn', status: 'completed', subagentThreadId: null,
-        decision: {
-          action: 'silent', responsibilityMatch: true, category: 'discussion', replyText: '',
-          reasonCode: 'observed', workType: 'discussion', delegation: 'not_required',
-          contextUpdate: null,
-        },
+        turnId: 'discussion-turn', status: 'completed',
+        decision: { action: 'silent', replyText: '' },
       };
     },
   };
@@ -313,7 +358,7 @@ test('实施任务派发回执不占用 actor，可继续处理下一条群消�
     config, conversation, session, store, { send: async () => undefined }, () => undefined,
   );
   const admitted = (id: string) => store.admitEvent(conversation, normalizeDwsEvent({
-    type: 'user_im_message_receive_group_all', event_id: id, conversation_id: 'cid-delegation', content: id,
+    type: 'user_im_message_receive_group_all', event_id: id, conversation_id: 'cid-runtime-background', content: id,
   })!).event!;
   await worker.start();
   admitted('implementation-event');

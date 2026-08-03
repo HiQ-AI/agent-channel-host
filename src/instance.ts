@@ -67,7 +67,7 @@ export async function initializeInstance(
       label: 'Codex CLI',
       state: 'stopped',
       model: config.runtime.model,
-      contextRecovery: 'session-start-hook',
+      contextRecovery: 'runtime-native',
     });
   } finally {
     store.close();

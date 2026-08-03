@@ -6,7 +6,9 @@ const sessionId = isResume ? args.at(-2) : 'fake-session-fixed';
 process.stdout.write(`${JSON.stringify({ type: 'thread.started', thread_id: sessionId })}\n`);
 process.stdout.write(`${JSON.stringify({ type: 'turn.started' })}\n`);
 
-if (prompt.includes('SLOW')) {
+if (prompt.includes('SLOW_SHORT')) {
+  setTimeout(complete, 1_200);
+} else if (prompt.includes('SLOW')) {
   setTimeout(complete, 5_000);
 } else if (prompt.includes('FAIL')) {
   process.stderr.write('simulated failure\n');
@@ -18,13 +20,7 @@ if (prompt.includes('SLOW')) {
 function complete() {
   const text = JSON.stringify({
     action: 'silent',
-    responsibilityMatch: false,
-    category: isResume ? 'resume' : 'new',
     replyText: '',
-    reasonCode: 'fake',
-    workType: 'discussion',
-    delegation: 'not_required',
-    contextUpdate: null,
   });
   process.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } })}\n`);
   process.stdout.write(`${JSON.stringify({ type: 'turn.completed' })}\n`);

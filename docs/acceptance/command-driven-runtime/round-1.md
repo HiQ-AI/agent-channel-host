@@ -32,7 +32,7 @@ npm run verify
 - 新命令完成后进程退出，第二个 session 对象以同一 provider ID resume；
 - active command 被终止后返回 `interrupted`；
 - 非零退出携带 stderr tail 并 fail closed；
-- turn timeout 终止子进程；
+- 当轮曾验证 turn timeout 终止子进程；该行为已被后续消息代理方案取消，当前 Host 不配置 turn 超时；
 - 非法 JSONL、resume ID 不一致、主 session 命令/文件证据和不合规决定均 fail closed。
 
 ## 真实 Codex adapter canary

@@ -23,7 +23,6 @@ runtime:
   effort: low
   cwd: D:\agent-workspaces\triss
   startupTimeoutSeconds: 120
-  turnTimeoutSeconds: 180
 scheduling:
   quietWindowMilliseconds: 300
   maxBatchMessages: 20
