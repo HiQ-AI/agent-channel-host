@@ -6,12 +6,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.js';
 import {
   DIRECT_EVENT,
+  DwsSender,
   GROUP_EVENT,
   consumerArgs,
   dwsProcessExitError,
   fetchRecentGroupHistory,
   inspectDwsBusStatus,
   normalizeDwsEvent,
+  parseDwsCommandFailure,
   searchDwsGroups,
   subscribedEventKeys,
 } from '../src/dws.js';
@@ -352,6 +354,48 @@ test('DWS 子进程异常保留有界 stderr 根因并脱敏凭据', () => {
   assert.match(error.message, /code=5/);
   assert.match(error.message, /not supported by windows/);
   assert.doesNotMatch(error.message, /secret-value/);
+});
+
+test('DWS 发送重复 UUID 按幂等 submitted 收口，结构化错误不泄露消息正文', async () => {
+  const payload = {
+    error: {
+      category: 'api', reason: 'business_error', server_error_code: '1001', operation: 'tools/call',
+      message: "sendPersonalMessageByServerPush error: Request is repeated with uuid 'stable-uuid'.",
+    },
+  };
+  const childError = Object.assign(new Error('Command failed: dws chat message send --text 机密正文'), {
+    code: 1,
+    stdout: '',
+    stderr: JSON.stringify(payload),
+  });
+  const structured = parseDwsCommandFailure(childError, ['chat', 'message', 'send', '--text', '机密正文']);
+  assert.match(structured.message, /duplicate_uuid/);
+  assert.doesNotMatch(structured.message, /机密正文|stable-uuid/);
+
+  const sender = new DwsSender(defaultConfig('dws-duplicate', '.', 'Agent'), async () => { throw structured; });
+  await assert.doesNotReject(sender.send(
+    { kind: 'group', externalId: 'cid-duplicate' },
+    { text: '机密正文', uuid: 'stable-uuid' },
+  ));
+});
+
+test('DWS 其他业务错误继续 fail closed', async () => {
+  const payload = {
+    error: {
+      category: 'api', reason: 'business_error', server_error_code: '1001', operation: 'tools/call',
+      message: 'Permission denied for input 机密正文',
+    },
+  };
+  const structured = parseDwsCommandFailure(Object.assign(new Error('raw'), {
+    code: 1,
+    stderr: JSON.stringify(payload),
+  }), ['chat', 'message', 'send']);
+  assert.doesNotMatch(structured.message, /机密正文/);
+  const sender = new DwsSender(defaultConfig('dws-failure', '.', 'Agent'), async () => { throw structured; });
+  await assert.rejects(sender.send(
+    { kind: 'group', externalId: 'cid-failure' },
+    { text: '机密正文', uuid: 'new-uuid' },
+  ), /reason=business_error/);
 });
 
 test('DWS 群搜索只投影有效候选并按 openConversationId 去重', async () => {

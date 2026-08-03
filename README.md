@@ -30,7 +30,7 @@ flowchart LR
 - 新 Codex 会话执行 `codex exec --json --output-schema`；已有会话执行 `codex exec resume <原 ID>`。每次 resume 都校验 `thread.started.thread_id` 必须等于原 ID，否则 fail closed，不创建第二条 session。
 - 普通 turn 只转发本批消息的“发送者、时间、内容”。引用和合并转发折叠进内容；Host 不附带群名、私聊标识、成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息前增加一份短提醒。
 - Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不覆盖 provider 的 developer/system 指令；Agent 的长期规则由 runtime 工作目录自行维护。
-- 每条消息先写 SQLite WAL，提交后才发进程内 ready signal。Worker 不轮询 DWS 或 SQLite；Host 启动时一次性 reconciliation：释放中断的 claim、重新处理未完成及未达 3 次上限的失败消息，并用原 UUID 重试未确认的 outbox。已完成消息和已提交 outbox 不重放，达到上限的失败项保留终止状态。
+- 每条消息先写 SQLite WAL，提交后才发进程内 ready signal。Worker 不轮询 DWS 或 SQLite；Host 启动时一次性 reconciliation：释放中断的 claim、重新处理未完成及未达 3 次上限的失败消息，并用原 UUID 重试未确认的 outbox。DWS 明确返回同 UUID 重复时按幂等 `submitted` 收口，不换 UUID、不再次发送；已完成消息和已提交 outbox 不重放，达到上限的失败项保留终止状态。
 - quiet window 默认 300 ms，一次最多合并 20 条消息。active turn 期间的新消息会终止旧 CLI 进程，释放旧 claim，再与新消息合并处理。
 - Host 不配置 turn 超时，也不会因运行时长终止活动 turn。claim 由该 Conversation 的唯一 Worker 和 Host lease 持有，不按时间过期；只有新消息抢占、Host 停止或 runtime 自身退出会结束 turn，进程中断后的 claim 在下次 Host 启动时统一恢复。
 - 群首次接入是持久工作：只读拉取最近 50 条消息，以同一最小信封交给该群固定 session。Agent 自主返回 `silent` 或 `reply`，不会被要求自我介绍；`shadow` 只保存 reply，切换 `reply` 并重启后用同一 UUID 发送。
@@ -308,8 +308,8 @@ agent-channel service remove --instance triss
 ## 可靠性与安全边界
 
 - SQLite WAL 保证 Host 收到事件后的本地 admission/outbox 原子性。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
-- Host 启动恢复只重试未达 3 次上限的 failed inbox 与未确认 outbox；outbox 沿用原 UUID，并在实际发送前再次校验 Conversation 权限和最新消息 sequence。达到上限、已完成或已提交的记录不会自动重放。
-- `submitted` 只表示 DWS 发送调用成功，不等于对端已读或业务已接受。
+- Host 启动恢复只重试未达 3 次上限的 failed inbox 与未确认 outbox；outbox 沿用原 UUID，并在实际发送前再次校验 Conversation 权限和最新消息 sequence。DWS 返回 `Request is repeated with uuid` 时说明该幂等键已被服务端登记，Host 将其收口为 `submitted`；不会换 UUID 后重发。达到上限、已完成或已提交的记录不会自动重放。
+- `submitted` 只表示 DWS 接受了本次发送调用，或确认同一 UUID 已被登记，不等于消息已送达、对端已读或业务已接受。
 - Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner、一个 bus，以及按群聊/私聊订阅范围启停的共享 consumer。
 - Host 仅在 `dws event status` 同时返回 `state=running` 和可用 live RPC 时认定 bus ready；只有存活 PID、没有 IPC 的状态会明确报告为 stale bus/PID 复用。DWS 子进程退出时保留经脱敏且有界的 stderr 根因，不再只显示 `code=5`。
 - Host 不覆盖 Codex 的 `approval_policy`、sandbox、network 或 writable roots；这些权限与 MCP/skills 一样由 runtime 自身配置加载。`runtime.cwd` 必须指向专用工作目录，部署者必须按该 runtime 的权限模型独立审计。

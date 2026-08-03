@@ -1172,7 +1172,13 @@ function renderGlobalOverview(
   lines.push('', messageSummary(totals, color));
   const alerts = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.alerts));
   if (alerts.length > 0) {
-    lines.push('', heading('ALERTS', color), ...alerts.map((row) => ansi(`- ${row.instance}/${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`, 'red-bold', color)));
+    lines.push('', heading('ALERTS', color), ...alerts.map((row) => renderAlert(
+      `${row.instance}/${text(row.scope)}/${text(row.target)}`,
+      row.error,
+      row.at,
+      width,
+      color,
+    )));
   }
   return lines;
 }
@@ -1247,9 +1253,25 @@ function renderInstanceOverview(
     semanticTable(color),
   ));
   if (alerts.length > 0) {
-    lines.push('', heading('ALERTS', color), ...alerts.map((row) => ansi(`- ${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`, 'red-bold', color)));
+    lines.push('', heading('ALERTS', color), ...alerts.map((row) => renderAlert(
+      `${text(row.scope)}/${text(row.target)}`,
+      row.error,
+      row.at,
+      width,
+      color,
+    )));
   }
   return lines;
+}
+
+function renderAlert(target: string, error: unknown, at: unknown, width: number, color: boolean): string {
+  const raw = text(error) ?? 'unknown';
+  const summary = /Request is repeated with uuid\b/i.test(raw)
+    ? 'duplicate_uuid'
+    : /^Command failed:/i.test(raw)
+      ? 'command_failed'
+      : raw.replace(/\s+/g, ' ').trim();
+  return ansi(truncate(`- ${target}: ${summary} (${age(at)})`, Math.max(20, width)), 'red-bold', color);
 }
 
 function renderChannelManagement(

@@ -14,6 +14,18 @@ export interface DwsCommandResult {
   stderr: string;
 }
 
+export class DwsCommandError extends Error {
+  constructor(
+    readonly operation: string,
+    readonly response: Record<string, unknown> | null,
+    readonly exitCode: string | number | null,
+    cause: unknown,
+  ) {
+    super(`DWS ${operation} 执行失败：${dwsFailureSummary(response, exitCode)}`, { cause });
+    this.name = 'DwsCommandError';
+  }
+}
+
 export interface RecentGroupHistory {
   count: number;
   messages: RecentMessage[];
@@ -33,13 +45,18 @@ export interface DwsGroupSearchResult {
 export async function runDwsJson(config: HostConfig, args: string[], timeoutMs = 30_000): Promise<unknown> {
   const fullArgs = [...args, '--format', 'json', ...profileArgs(config)];
   const command = await resolveCommand(config.channel.command);
-  const result = await execResolved(command, fullArgs, {
-    cwd: config.runtime.cwd,
-    encoding: 'utf8',
-    timeout: timeoutMs,
-    windowsHide: true,
-    maxBuffer: 4 * 1024 * 1024,
-  });
+  let result: DwsCommandResult;
+  try {
+    result = await execResolved(command, fullArgs, {
+      cwd: config.runtime.cwd,
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      windowsHide: true,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch (error) {
+    throw parseDwsCommandFailure(error, args);
+  }
   try {
     return JSON.parse(result.stdout);
   } catch (error) {
@@ -381,7 +398,10 @@ export class DwsEventOwner {
 }
 
 export class DwsSender {
-  constructor(private readonly config: HostConfig) {}
+  constructor(
+    private readonly config: HostConfig,
+    private readonly runner: typeof runDwsJson = runDwsJson,
+  ) {}
 
   async send(
     conversation: { kind: ConversationKind; externalId: string },
@@ -390,12 +410,19 @@ export class DwsSender {
     const target = conversation.kind === 'group'
       ? ['--group', conversation.externalId]
       : ['--open-dingtalk-id', conversation.externalId];
-    const result = await runDwsJson(this.config, [
-      'chat', 'message', 'send', ...target,
-      '--text', record.text, '--uuid', record.uuid, '--ai-tag=true', '--yes',
-    ], 45_000) as Record<string, unknown>;
+    let result: Record<string, unknown>;
+    try {
+      result = await this.runner(this.config, [
+        'chat', 'message', 'send', ...target,
+        '--text', record.text, '--uuid', record.uuid, '--ai-tag=true', '--yes',
+      ], 45_000) as Record<string, unknown>;
+    } catch (error) {
+      if (isDwsRepeatedUuidError(error)) return;
+      throw error;
+    }
+    if (isDwsRepeatedUuidResponse(result)) return;
     if (result.success !== true) {
-      throw new Error(`DWS 发送失败：${text(result.errorMsg) ?? text(result.errorCode) ?? 'unknown'}`);
+      throw new Error(`DWS 发送失败：${dwsFailureSummary(result, null)}`);
     }
   }
 }
@@ -440,6 +467,59 @@ export class DwsChannelAdapter implements ChannelAdapter {
 
 function profileArgs(config: HostConfig): string[] {
   return config.channel.profile ? ['--profile', config.channel.profile] : [];
+}
+
+export function parseDwsCommandFailure(error: unknown, args: string[]): DwsCommandError {
+  const failure = error && typeof error === 'object' ? error as Record<string, unknown> : null;
+  const response = parseDwsErrorJson(failure?.stdout) ?? parseDwsErrorJson(failure?.stderr);
+  const operation = args.slice(0, 3).filter((part) => !part.startsWith('--')).join(' ') || 'command';
+  const exitCode = typeof failure?.code === 'string' || typeof failure?.code === 'number' ? failure.code : null;
+  return new DwsCommandError(operation, response, exitCode, error);
+}
+
+export function isDwsRepeatedUuidError(error: unknown): boolean {
+  return error instanceof DwsCommandError && isDwsRepeatedUuidResponse(error.response);
+}
+
+function isDwsRepeatedUuidResponse(value: unknown): boolean {
+  const error = dwsErrorBody(value);
+  const message = text(error?.message);
+  return error?.reason === 'business_error'
+    && String(error.server_error_code ?? '') === '1001'
+    && Boolean(message && /Request is repeated with uuid\b/i.test(message));
+}
+
+function parseDwsErrorJson(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function dwsErrorBody(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const nested = (value as Record<string, unknown>).error;
+  return nested && typeof nested === 'object' && !Array.isArray(nested)
+    ? nested as Record<string, unknown>
+    : value as Record<string, unknown>;
+}
+
+function dwsFailureSummary(response: Record<string, unknown> | null, exitCode: string | number | null): string {
+  if (isDwsRepeatedUuidResponse(response)) return 'duplicate_uuid';
+  const error = dwsErrorBody(response);
+  const fields = [
+    ['category', error?.category],
+    ['reason', error?.reason],
+    ['server_error_code', error?.server_error_code],
+    ['operation', error?.operation],
+  ].flatMap(([key, value]) => text(value) ? [`${key}=${text(value)}`] : []);
+  if (fields.length > 0) return fields.join(' ');
+  return exitCode === null ? 'unknown' : `exit_code=${exitCode}`;
 }
 
 function text(value: unknown): string | null {
