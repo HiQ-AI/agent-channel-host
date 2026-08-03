@@ -55,32 +55,37 @@ process.stdout.write = (chunk, ...args) => {
 };
 
 const keys = [
-  [5_000, '\r'],
-  [6_000, '\r'],
-  [8_000, '\u001b'],
-  [10_000, 's'],
-  [11_000, '\u001b'],
-  [12_000, '\u001b'],
-  [13_000, 'j'],
-  [14_000, '\r'],
-  [15_000, 's'],
-  [16_000, '\u001b'],
-  [17_000, '\u001b'],
-  [18_000, 'a'],
-  [19_000, 'created-agent'],
-  [20_000, '\r'],
-  [21_000, '\r'],
+  [3_000, '\u001b[C'],
+  [4_000, '\u001b[C'],
+  [5_000, '\u001b[C'],
+  [6_000, '\u001b[B'],
+  [6_300, '\u001b[B'],
+  [7_000, '\u001b[C'],
+  [8_000, '编辑器'],
+  [9_000, '\r'],
+  [10_000, '\u001b[C'],
+  [11_000, '\u001b[D'],
+  [12_000, '\u001b[D'],
+  [13_000, 's'],
+  [14_000, '\u001b[C'],
+  [14_200, '\u001b[H'],
+  [14_400, '\u001b[C'],
+  [14_600, '·'],
+  [14_800, '\u001b[F'],
+  [15_000, '\r'],
+  [16_000, '\u001b[D'],
+  [17_000, '\u001b[D'],
+  [18_000, '\t'],
+  [19_000, '\u001b[D'],
+  [20_000, 'a'],
+  [21_000, 'created-agent'],
   [22_000, '\r'],
   [23_000, '\r'],
-  [24_000, 'j'],
-  [24_200, 'j'],
-  [24_400, 'j'],
-  [24_600, 'j'],
-  [24_800, 'j'],
-  [25_000, 'j'],
-  [25_200, 'j'],
-  [26_000, '\r'],
-  [27_000, '\t'],
+  [24_000, '\r'],
+  [25_000, '\r'],
+  [26_000, '\u001b[C'],
+  [27_000, '\u001b[D'],
+  [28_000, '\u001b[D'],
   [29_000, 'q'],
 ];
 for (const [delay, key] of keys) setTimeout(() => process.stdin.emit('data', Buffer.from(key)), delay);
@@ -91,7 +96,8 @@ const instances = [
 ];
 const createdStores = [];
 let createdStarted = false;
-let channelToggled = false;
+const channelToggles = [];
+const groupSearches = [];
 try {
   await runView(instances, { intervalSeconds: 10, once: false, showContent: false }, {
     createInstance: async (input) => {
@@ -108,9 +114,13 @@ try {
       };
     },
     startInstance: async (instance) => { createdStarted = instance.name === 'created-agent'; },
-    afterSettingApplied: async (_instance, entry) => {
-      channelToggled = entry.key === 'channel:dingtalk:default:enabled';
+    afterSettingApplied: async (instance, entry) => {
+      if (entry.key === 'channel:dingtalk:default:enabled') channelToggles.push(instance.name);
       return '合成 Host 生命周期回执';
+    },
+    searchGroups: async (instance, query) => {
+      groupSearches.push({ instance: instance.name, query });
+      return [{ title: '合成搜索结果群', externalId: 'synthetic-search-result-id' }];
     },
   });
   const plainTranscript = transcript.replace(/\u001b\[[0-9;]*m/g, '');
@@ -121,24 +131,42 @@ try {
   assert.match(plainTranscript, /编辑器验证群/);
   assert.match(plainTranscript, /跨 Channel 私聊/);
   assert.match(plainTranscript, /INSTANCES/);
-  assert.match(plainTranscript, /Instance 设置 \/ second-agent/);
+  assert.match(plainTranscript, /Channel 设置 \/ tui-smoke \/ dingtalk\/default/);
+  assert.match(plainTranscript, /群组搜索 \/ tui-smoke \/ dingtalk\/default/);
+  assert.match(plainTranscript, /合成搜索结果群/);
+  assert.doesNotMatch(plainTranscript, /synthetic-search-result-id/);
+  assert.match(plainTranscript, /Instance 设置 \/ tui-smoke/);
+  assert.match(plainTranscript, /小·小鹏/);
   assert.match(plainTranscript, /SETTING\s+│\s+VALUE\s+│\s+EFFECT/);
   assert.match(plainTranscript, /─+┼─+┼─+/);
   assert.match(plainTranscript, /新增 Instance · Instance 名称/);
-  assert.match(plainTranscript, /Instance 设置 \/ created-agent/);
-  assert.match(plainTranscript, /dingtalk\/default\s+│\s+enabled/);
+  assert.match(plainTranscript, /Channel 设置 \/ created-agent \/ dingtalk\/default/);
+  assert.match(plainTranscript, /启用 \/ 停用\s+│\s+enabled/);
   assert.match(plainTranscript, /\[ 全局设置 \]/);
   assert.match(plainTranscript, /暂无可修改的全局配置/);
+  assert.match(transcript, /\u001b\[\?1049h\u001b\[\?25l/);
+  assert.match(transcript, /\u001b\[\?25h\u001b\[\?1049l/);
+  assert.match(transcript, /\u001b\[\?25h\u001b\[\?1049l$/);
   assert.equal(createdStarted, true);
-  assert.equal(channelToggled, true);
+  assert.equal(config.identity.name, '小·小鹏');
+  assert.deepEqual(channelToggles, ['tui-smoke', 'created-agent']);
+  assert.deepEqual(groupSearches, [{ instance: 'tui-smoke', query: '编辑器' }]);
+  const searchedConversation = store.listConversations().find((item) => item.title === '合成搜索结果群');
+  assert.ok(searchedConversation);
+  assert.equal(searchedConversation.responsibility, config.identity.role);
+  assert.equal(searchedConversation.mode, 'shadow');
   await writeFile(resultPath, JSON.stringify({
     ok: true,
     tty: { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY },
-    observed: ['global-overview', 'instance-detail', 'conversation-detail', 'instances-index', 'instance-settings', 'instance-create', 'channel-toggle', 'global-settings', 'exit'],
+    observed: ['global-overview', 'instance-detail', 'channel-detail', 'channel-toggle', 'group-search', 'group-bind', 'conversation-detail', 'instance-settings', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit'],
     colorObserved: true,
     settingsColumnsDelimited: true,
     instanceCreated: true,
-    channelToggleObserved: true,
+    channelToggleObserved: channelToggles.length === 2,
+    groupSearchObserved: groupSearches.length === 1,
+    groupBound: Boolean(searchedConversation),
+    alternateScreenObserved: true,
+    cursorEditObserved: config.identity.name === '小·小鹏',
     globalSettingsSeparated: true,
     channelStarted: false,
   }, null, 2));

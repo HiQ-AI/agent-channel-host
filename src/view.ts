@@ -1,6 +1,7 @@
 import type { HostConfig } from './config.js';
 import { configuredChannels, validateConfig, writeConfig } from './config.js';
 import type { Store } from './store.js';
+import type { Conversation } from './types.js';
 import { CLI_NAME } from './product.js';
 import { MAX_WORKER_WARM_SECONDS } from './types.js';
 import { publishRecoveryContext } from './recovery-context.js';
@@ -27,14 +28,30 @@ export interface ViewInstance {
 export interface ManagementViewState {
   tab: 'overview' | 'settings';
   selectedInstance: number;
+  instanceFocus: 'channels' | 'conversations';
+  selectedChannel: number;
   selectedConversation: number;
+  selectedChannelItem: number;
   selectedSetting: number;
   detailInstanceName: string | null;
+  detailChannel: ChannelTarget | null;
   detailConversationId: string | null;
   settingsInstanceName: string | null;
-  editing: { key: string; label: string; value: string } | null;
+  editing: { key: string; label: string; value: string; cursor: number } | null;
   creatingInstance: InstanceCreationDraft | null;
+  groupSearch: GroupSearchDraft | null;
   notice: string | null;
+}
+
+export interface ChannelTarget {
+  instanceName: string;
+  channelId: string;
+  profileId: string;
+}
+
+export interface ChannelGroupCandidate {
+  title: string;
+  externalId: string;
 }
 
 export interface SettingEntry {
@@ -59,6 +76,7 @@ export interface ManagementViewActions {
   createInstance?(input: NewInstanceInput): Promise<ViewInstance>;
   startInstance?(instance: ViewInstance): Promise<void>;
   afterSettingApplied?(instance: ViewInstance, entry: SettingEntry): Promise<string | void>;
+  searchGroups?(instance: ViewInstance, query: string): Promise<ChannelGroupCandidate[]>;
 }
 
 type InstanceCreationStep = 'instance' | 'cwd' | 'name' | 'role';
@@ -67,19 +85,37 @@ interface InstanceCreationDraft {
   step: InstanceCreationStep;
   values: Partial<NewInstanceInput>;
   value: string;
+  cursor: number;
 }
+
+interface GroupSearchDraft {
+  target: ChannelTarget;
+  phase: 'query' | 'results';
+  query: string;
+  cursor: number;
+  results: ChannelGroupCandidate[];
+  selected: number;
+}
+
+export const VIEW_ALTERNATE_SCREEN_ENTER = '\u001b[?1049h\u001b[?25l';
+export const VIEW_ALTERNATE_SCREEN_EXIT = '\u001b[?25h\u001b[?1049l';
 
 export function createManagementViewState(): ManagementViewState {
   return {
     tab: 'overview',
     selectedInstance: 0,
+    instanceFocus: 'channels',
+    selectedChannel: 0,
     selectedConversation: 0,
+    selectedChannelItem: 0,
     selectedSetting: 0,
     detailInstanceName: null,
+    detailChannel: null,
     detailConversationId: null,
     settingsInstanceName: null,
     editing: null,
     creatingInstance: null,
+    groupSearch: null,
     notice: null,
   };
 }
@@ -111,10 +147,18 @@ export async function runView(
 
   const state = createManagementViewState();
   let rawMode = false;
+  let alternateScreen = false;
   let timer: NodeJS.Timeout | null = null;
   let inputBusy = false;
+  let stopRequested = false;
+  let renderFailure: Error | null = null;
   let resolveStop!: () => void;
   const stopped = new Promise<void>((resolve) => { resolveStop = resolve; });
+  const requestStop = () => {
+    if (stopRequested) return;
+    stopRequested = true;
+    resolveStop();
+  };
   const color = shouldUseColor(Boolean(process.stdout.isTTY));
   const render = () => {
     normalizeSelection(state, instances);
@@ -149,18 +193,27 @@ export async function runView(
       color,
     );
   };
-  const paint = () => process.stdout.write(`\u001b[2J\u001b[H${render()}\n`);
+  const paint = () => process.stdout.write(`\u001b[H\u001b[2J${render()}\n`);
+  const repaint = () => {
+    if (stopRequested) return;
+    try {
+      paint();
+    } catch (error) {
+      renderFailure = error as Error;
+      requestStop();
+    }
+  };
   const onData = (chunk: Buffer) => {
     if (inputBusy) return;
     inputBusy = true;
-    void handleManagementViewInput(chunk.toString('utf8'), state, instances, resolveStop, actions)
+    void handleManagementViewInput(chunk.toString('utf8'), state, instances, requestStop, actions)
       .catch((error) => { state.notice = (error as Error).message; })
       .finally(() => {
         inputBusy = false;
-        paint();
+        repaint();
       });
   };
-  const onSignal = () => resolveStop();
+  const onSignal = () => requestStop();
   try {
     process.stdin.setRawMode?.(true);
     rawMode = true;
@@ -168,9 +221,12 @@ export async function runView(
     process.stdin.on('data', onData);
     process.once('SIGINT', onSignal);
     process.once('SIGTERM', onSignal);
+    process.stdout.write(VIEW_ALTERNATE_SCREEN_ENTER);
+    alternateScreen = true;
     paint();
-    timer = setInterval(paint, options.intervalSeconds * 1_000);
+    timer = setInterval(repaint, options.intervalSeconds * 1_000);
     await stopped;
+    if (renderFailure) throw renderFailure;
   } finally {
     if (timer) clearInterval(timer);
     process.stdin.removeListener('data', onData);
@@ -178,6 +234,7 @@ export async function runView(
     process.removeListener('SIGTERM', onSignal);
     if (rawMode) process.stdin.setRawMode?.(false);
     process.stdin.pause();
+    if (alternateScreen) process.stdout.write(VIEW_ALTERNATE_SCREEN_EXIT);
   }
 }
 
@@ -193,11 +250,24 @@ export async function handleManagementViewInput(
     await handleInstanceCreationInput(key, state, instances, stop, actions);
     return;
   }
+  if (state.groupSearch) {
+    await handleGroupSearchInput(key, state, instances, stop, actions);
+    return;
+  }
   const overviewInstance = instances[state.selectedInstance] ?? null;
+  const detailInstance = state.detailInstanceName
+    ? instances.find((instance) => instance.name === state.detailInstanceName) ?? null
+    : null;
   const settingsInstance = state.settingsInstanceName
     ? instances.find((instance) => instance.name === state.settingsInstanceName) ?? null
     : null;
+  const back = key === '\u001b' || key === '\u001b[D';
+  const forward = key === '\r' || key === '\n' || key === '\u001b[C';
   if (state.editing) {
+    if (key === '\u0003') {
+      stop();
+      return;
+    }
     if (key === '\u001b') {
       state.editing = null;
       state.notice = '已取消修改';
@@ -220,11 +290,7 @@ export async function handleManagementViewInput(
       state.editing = null;
       return;
     }
-    if (key === '\u007f' || key === '\b') {
-      state.editing.value = state.editing.value.slice(0, -1);
-      return;
-    }
-    if (!key.startsWith('\u001b') && key !== '\u0003') state.editing.value += key.replace(/[\u0000-\u001f]/g, '');
+    editSingleLine(state.editing, key);
     return;
   }
 
@@ -232,20 +298,25 @@ export async function handleManagementViewInput(
     stop();
     return;
   }
-  if (key === '\t' || key === '\u001b[C' || key === '\u001b[D') {
+  if (key === '\t' && !state.detailInstanceName && !state.settingsInstanceName) {
     state.tab = state.tab === 'overview' ? 'settings' : 'overview';
-    state.settingsInstanceName = null;
     state.notice = null;
     return;
   }
-  if (key === '\u001b') {
+  if (back) {
     if (state.tab === 'settings') {
       state.tab = 'overview';
     } else if (state.settingsInstanceName) {
       state.settingsInstanceName = null;
       state.selectedSetting = 0;
     } else if (state.detailConversationId) state.detailConversationId = null;
-    else state.detailInstanceName = null;
+    else if (state.detailChannel) {
+      state.detailChannel = null;
+      state.selectedChannelItem = 0;
+    } else if (state.detailInstanceName) {
+      state.detailInstanceName = null;
+      state.instanceFocus = 'channels';
+    }
     state.notice = null;
     return;
   }
@@ -253,7 +324,8 @@ export async function handleManagementViewInput(
     startInstanceCreation(state, actions);
     return;
   }
-  if (state.tab === 'overview' && state.detailInstanceName && key.toLowerCase() === 's') {
+  if (state.tab === 'overview' && state.detailInstanceName
+    && (!state.detailChannel || state.detailConversationId) && key.toLowerCase() === 's') {
     state.settingsInstanceName = state.detailInstanceName;
     state.selectedSetting = 0;
     state.notice = null;
@@ -276,16 +348,19 @@ export async function handleManagementViewInput(
         state.selectedSetting = clamp(state.selectedSetting + direction, 0, Math.max(0, total - 1));
       } else if (!state.detailInstanceName) {
         state.selectedInstance = clamp(state.selectedInstance + direction, 0, instances.length);
+        state.instanceFocus = 'channels';
+        state.selectedChannel = 0;
         state.selectedConversation = 0;
+      } else if (state.detailChannel && detailInstance) {
+        const total = channelGroups(detailInstance, state.detailChannel).length + 2;
+        state.selectedChannelItem = clamp(state.selectedChannelItem + direction, 0, Math.max(0, total - 1));
       } else {
-        const detailInstance = instances.find((instance) => instance.name === state.detailInstanceName);
-        const total = detailInstance?.store.listConversations().length ?? 0;
-        state.selectedConversation = clamp(state.selectedConversation + direction, 0, Math.max(0, total - 1));
+        moveInstanceSelection(state, detailInstance, direction);
       }
     }
     return;
   }
-  if (key === '\r' || key === '\n') {
+  if (forward) {
     if (state.tab === 'overview') {
       if (state.settingsInstanceName) {
         if (!settingsInstance) return;
@@ -303,7 +378,7 @@ export async function handleManagementViewInput(
           state.notice = actionNotice ?? `${entry.label} 已切换为 ${entry.value === 'enabled' ? 'disabled' : 'enabled'}`;
           return;
         }
-        state.editing = { key: entry.key, label: entry.label, value: entry.value };
+        state.editing = { key: entry.key, label: entry.label, value: entry.value, cursor: textLength(entry.value) };
         return;
       }
       if (!state.detailInstanceName) {
@@ -313,15 +388,144 @@ export async function handleManagementViewInput(
         }
         if (!overviewInstance) return;
         state.detailInstanceName = overviewInstance.name;
+        state.instanceFocus = 'channels';
+        state.selectedChannel = 0;
         state.selectedConversation = 0;
+      } else if (state.detailChannel) {
+        if (!detailInstance) return;
+        await activateChannelItem(state, detailInstance, actions);
       } else {
-        if (!overviewInstance) return;
-        state.detailConversationId = selectedConversationId(overviewInstance.store, state.selectedConversation);
+        if (!detailInstance) return;
+        if (state.instanceFocus === 'channels') {
+          const channel = configuredChannels(detailInstance.config)[state.selectedChannel];
+          if (!channel) return;
+          state.detailChannel = {
+            instanceName: detailInstance.name,
+            channelId: channel.id,
+            profileId: channel.profileId,
+          };
+          state.selectedChannelItem = 0;
+        } else {
+          state.detailConversationId = selectedConversationId(detailInstance.store, state.selectedConversation);
+        }
       }
       return;
     }
     return;
   }
+}
+
+async function activateChannelItem(
+  state: ManagementViewState,
+  instance: ViewInstance,
+  actions: ManagementViewActions,
+): Promise<void> {
+  const target = state.detailChannel!;
+  const groups = channelGroups(instance, target);
+  if (state.selectedChannelItem === 0) {
+    const entry = createChannelSettingEntry(instance.config, instance.store, target, instance.configFile);
+    await entry.apply(entry.value === 'enabled' ? 'disabled' : 'enabled');
+    const actionNotice = await actions.afterSettingApplied?.(instance, entry);
+    state.notice = actionNotice ?? `${entry.label} 已切换为 ${entry.value === 'enabled' ? 'disabled' : 'enabled'}`;
+    return;
+  }
+  if (state.selectedChannelItem <= groups.length) {
+    state.detailConversationId = groups[state.selectedChannelItem - 1]!.id;
+    state.notice = null;
+    return;
+  }
+  if (!actions.searchGroups) throw new Error('当前 View 入口未提供群搜索能力');
+  state.groupSearch = { target, phase: 'query', query: '', cursor: 0, results: [], selected: 0 };
+  state.notice = null;
+}
+
+async function handleGroupSearchInput(
+  key: string,
+  state: ManagementViewState,
+  instances: ViewInstance[],
+  stop: () => void,
+  actions: ManagementViewActions,
+): Promise<void> {
+  const draft = state.groupSearch!;
+  const back = key === '\u001b' || (draft.phase === 'results' && key === '\u001b[D');
+  const forward = key === '\r' || key === '\n' || key === '\u001b[C';
+  if (key === '\u0003') {
+    stop();
+    return;
+  }
+  if (back) {
+    if (draft.phase === 'results') {
+      draft.phase = 'query';
+      draft.results = [];
+      draft.selected = 0;
+      draft.cursor = textLength(draft.query);
+      state.notice = '可修改关键词后重新搜索';
+    } else {
+      state.groupSearch = null;
+      state.notice = null;
+    }
+    return;
+  }
+  if (draft.phase === 'query') {
+    if (key !== '\r' && key !== '\n') {
+      const line = { value: draft.query, cursor: draft.cursor };
+      editSingleLine(line, key);
+      draft.query = line.value;
+      draft.cursor = line.cursor;
+      return;
+    }
+    const instance = instances.find((item) => item.name === draft.target.instanceName);
+    if (!instance) throw new Error('目标 instance 已不存在');
+    if (!actions.searchGroups) throw new Error('当前 View 入口未提供群搜索能力');
+    const query = draft.query.trim();
+    if (!query) throw new Error('群搜索关键词不能为空');
+    const seen = new Set<string>();
+    draft.results = (await actions.searchGroups(instance, query)).filter((candidate) => {
+      if (!candidate.title.trim() || !candidate.externalId.trim() || seen.has(candidate.externalId)) return false;
+      seen.add(candidate.externalId);
+      return true;
+    });
+    draft.phase = 'results';
+    draft.selected = 0;
+    state.notice = draft.results.length > 0 ? `找到 ${draft.results.length} 个群组` : '没有匹配群组；← 返回修改关键词';
+    return;
+  }
+  const direction = key === '\u001b[A' || key.toLowerCase() === 'k' ? -1
+    : key === '\u001b[B' || key.toLowerCase() === 'j' ? 1 : 0;
+  if (direction !== 0) {
+    draft.selected = clamp(draft.selected + direction, 0, Math.max(0, draft.results.length - 1));
+    return;
+  }
+  if (!forward || draft.results.length === 0) return;
+  const instance = instances.find((item) => item.name === draft.target.instanceName);
+  if (!instance) throw new Error('目标 instance 已不存在');
+  const candidate = draft.results[draft.selected]!;
+  let conversation = findChannelGroup(instance, draft.target, candidate.externalId);
+  if (!conversation) {
+    try {
+      conversation = instance.store.addConversation({
+        channelId: draft.target.channelId,
+        channelProfileId: draft.target.profileId,
+        kind: 'group',
+        externalId: candidate.externalId,
+        title: candidate.title,
+        responsibility: instance.config.identity.role,
+        mode: 'shadow',
+        runtimeId: instance.config.runtime.id,
+      });
+      state.notice = `已绑定群组“${candidate.title}”；默认职责继承 Agent 角色，模式为 shadow`;
+    } catch (error) {
+      conversation = findChannelGroup(instance, draft.target, candidate.externalId);
+      if (!conversation) throw error;
+      state.notice = `群组“${candidate.title}”已由其他操作绑定`;
+    }
+  } else {
+    state.notice = `群组“${candidate.title}”已绑定，已打开会话详情`;
+  }
+  state.groupSearch = null;
+  state.detailConversationId = conversation.id;
+  const index = instance.store.listConversations().findIndex((item) => item.id === conversation!.id);
+  state.selectedConversation = Math.max(0, index);
 }
 
 async function handleInstanceCreationInput(
@@ -341,12 +545,8 @@ async function handleInstanceCreationInput(
     state.notice = '已取消新增 Instance';
     return;
   }
-  if (key === '\u007f' || key === '\b') {
-    draft.value = draft.value.slice(0, -1);
-    return;
-  }
   if (key !== '\r' && key !== '\n') {
-    if (!key.startsWith('\u001b')) draft.value += key.replace(/[\u0000-\u001f]/g, '');
+    editSingleLine(draft, key);
     return;
   }
 
@@ -357,6 +557,7 @@ async function handleInstanceCreationInput(
     draft.values.instance = value;
     draft.step = 'cwd';
     draft.value = process.cwd();
+    draft.cursor = textLength(draft.value);
     return;
   }
   if (!value) throw new Error(`${creationStepLabel(draft.step)}不能为空`);
@@ -364,12 +565,14 @@ async function handleInstanceCreationInput(
     draft.values.cwd = value;
     draft.step = 'name';
     draft.value = 'DingTalk Agent';
+    draft.cursor = textLength(draft.value);
     return;
   }
   if (draft.step === 'name') {
     draft.values.name = value;
     draft.step = 'role';
     draft.value = '在授权会话内提供职责范围内的分析和答复';
+    draft.cursor = textLength(draft.value);
     return;
   }
 
@@ -380,15 +583,20 @@ async function handleInstanceCreationInput(
   instances.push(created);
   state.selectedInstance = instances.length - 1;
   state.detailInstanceName = created.name;
-  state.settingsInstanceName = created.name;
-  state.selectedSetting = 0;
+  const channel = configuredChannels(created.config)[0];
+  state.detailChannel = channel
+    ? { instanceName: created.name, channelId: channel.id, profileId: channel.profileId }
+    : null;
+  state.instanceFocus = 'channels';
+  state.selectedChannel = 0;
+  state.selectedChannelItem = 0;
   await actions.startInstance?.(created);
-  state.notice = `Instance ${created.name} 已创建；Channel 默认 disabled，请确认配置后启用`;
+  state.notice = `Instance ${created.name} 已创建；Channel 默认 disabled，可在当前页确认后启用`;
 }
 
 function startInstanceCreation(state: ManagementViewState, actions: ManagementViewActions): void {
   if (!actions.createInstance) throw new Error('当前 View 入口未提供 instance 创建能力');
-  state.creatingInstance = { step: 'instance', values: {}, value: '' };
+  state.creatingInstance = { step: 'instance', values: {}, value: '', cursor: 0 };
   state.notice = null;
 }
 
@@ -433,25 +641,6 @@ export function createSettingEntries(
       (next, value) => { next.scheduling.maxBatchMessages = integer(value, 1, 200, '单批消息上限'); },
     ),
   ];
-  entries.push(...configuredChannels(config).map((channel) => {
-    const entry = configSetting(
-      `channel:${channel.id}:${channel.profileId}:enabled`,
-      `${channel.id}/${channel.profileId}`,
-      channel.enabled ? 'enabled' : 'disabled',
-      'Enter 切换；View owner 即时重启，attach 需重启',
-      config,
-      store,
-      configFile,
-      (next, value) => {
-        if (value !== 'enabled' && value !== 'disabled') throw new Error('Channel 状态必须是 enabled 或 disabled');
-        next.channel.enabled = value === 'enabled';
-      },
-    );
-    entry.section = 'channels';
-    entry.input = 'toggle';
-    entry.restartHost = true;
-    return entry;
-  }));
   if (!conversationId) return entries;
   const conversation = store.getConversation(conversationId);
   if (!conversation) return entries;
@@ -489,6 +678,34 @@ export function createSettingEntries(
     );
   }
   return entries;
+}
+
+export function createChannelSettingEntry(
+  config: HostConfig,
+  store: Store,
+  target: Pick<ChannelTarget, 'channelId' | 'profileId'>,
+  configFile?: string,
+): SettingEntry {
+  const channel = configuredChannels(config)
+    .find((item) => item.id === target.channelId && item.profileId === target.profileId);
+  if (!channel) throw new Error(`Channel 不存在：${target.channelId}/${target.profileId}`);
+  const entry = configSetting(
+    `channel:${channel.id}:${channel.profileId}:enabled`,
+    `${channel.id}/${channel.profileId}`,
+    channel.enabled ? 'enabled' : 'disabled',
+    '切换后 View owner 即时重启；attach Host 需手动重启',
+    config,
+    store,
+    configFile,
+    (next, value) => {
+      if (value !== 'enabled' && value !== 'disabled') throw new Error('Channel 状态必须是 enabled 或 disabled');
+      next.channel.enabled = value === 'enabled';
+    },
+  );
+  entry.section = 'channels';
+  entry.input = 'toggle';
+  entry.restartHost = true;
+  return entry;
 }
 
 function configSetting(
@@ -565,23 +782,33 @@ export function renderManagementView(
     ansi('─'.repeat(Math.min(width, 120)), 'dim', color),
   ];
   if (state.tab === 'settings') lines.push(...renderGlobalSettings(instances, width, color));
+  else if (state.groupSearch && detailInstance) lines.push(...renderGroupSearch(detailInstance, state.groupSearch, width, color));
   else if (settingsInstance) lines.push(...renderInstanceSettings(settingsInstance, detail, settings, state, width, color));
   else if (state.detailConversationId) lines.push(...renderConversationDetail(detail, width, color));
+  else if (state.detailChannel && detailInstance) lines.push(...renderChannelManagement(detailInstance, state.detailChannel, state, width, color));
   else if (detailInstance) lines.push(...renderInstanceOverview(detailInstance, detailInstance.store.status(showContent), state, width, color));
   else lines.push(...renderGlobalOverview(snapshots, state, width, color));
   const notice = state.notice ?? (settingsInstance ?? selectedInstance)?.notices.at(-1) ?? null;
   if (notice) lines.push('', ansi(`提示：${notice}`, 'yellow-bold', color));
   lines.push('', state.creatingInstance
-    ? ansi(`新增 Instance · ${creationStepLabel(state.creatingInstance.step)}：${state.creatingInstance.value}█  Enter 下一步 / Esc 取消`, 'cyan-bold', color)
+    ? ansi(`新增 Instance · ${creationStepLabel(state.creatingInstance.step)}：${renderTextCursor(state.creatingInstance.value, state.creatingInstance.cursor)}  ←/→ 移动  Enter 下一步  Esc 取消`, 'cyan-bold', color)
+    : state.groupSearch?.phase === 'query'
+      ? ansi(`群组搜索：${renderTextCursor(state.groupSearch.query, state.groupSearch.cursor)}  ←/→ 移动  Enter 搜索  Esc 返回 Channel`, 'cyan-bold', color)
+      : state.groupSearch?.phase === 'results'
+        ? ansi('↑/↓ 选择  →/Enter 绑定或打开  ←/Esc 修改关键词  q 退出', 'dim', color)
     : state.editing
-      ? ansi(`编辑 ${state.editing.label}：${state.editing.value}█  Enter 保存 / Esc 取消`, 'cyan-bold', color)
+      ? ansi(`编辑 ${state.editing.label}：${renderTextCursor(state.editing.value, state.editing.cursor)}  ←/→ 移动  Enter 保存  Esc 取消`, 'cyan-bold', color)
       : state.tab === 'settings'
-        ? ansi('Tab/←/→ 切换  全局设置不包含 Instance 配置  Esc 返回总览  q 退出', 'dim', color)
+        ? ansi('Tab 切换总览  ←/Esc 返回总览  q 退出', 'dim', color)
         : state.settingsInstanceName
-          ? ansi('↑/↓ 选择  Enter 编辑/切换  Esc 返回 Instance 详情  q 退出', 'dim', color)
+          ? ansi('↑/↓ 选择  →/Enter 编辑  ←/Esc 返回  q 退出', 'dim', color)
+          : state.detailConversationId
+            ? ansi('s Instance 设置  ←/Esc 返回  q 退出', 'dim', color)
+            : state.detailChannel
+              ? ansi('↑/↓ 选择  →/Enter 操作或下钻  ←/Esc 返回 Instance  q 退出', 'dim', color)
           : state.detailInstanceName
-            ? ansi('↑/↓ 选择  Enter 下钻会话  s Instance 设置  Esc 返回  q 退出', 'dim', color)
-            : ansi('Tab/←/→ 切换  ↑/↓ 选择  Enter 下钻  a 新增 Instance  q 退出', 'dim', color));
+            ? ansi('↑/↓ 选择  →/Enter 下钻  s Instance 设置  ←/Esc 返回  q 退出', 'dim', color)
+            : ansi('↑/↓ 选择  →/Enter 下钻  a 新增 Instance  Tab 全局设置  q 退出', 'dim', color));
   return lines.join('\n');
 }
 
@@ -674,7 +901,18 @@ function renderInstanceOverview(
   width: number,
   color: boolean,
 ): string[] {
-  const channels = array(snapshot.channels);
+  const connectionRows = array(snapshot.channels);
+  const channels = configuredChannels(instance.config).map((channel) => {
+    const connection = connectionRows.find((row) => row.channelId === channel.id && row.profileId === channel.profileId) ?? {};
+    return {
+      channelId: channel.id,
+      profileId: channel.profileId,
+      state: connection.state ?? (channel.enabled ? 'stopped' : 'disabled'),
+      pid: connection.pid ?? '-',
+      lastEventAt: connection.lastEventAt,
+      error: connection.error,
+    };
+  });
   const conversations = array(snapshot.conversations);
   const runtimeAdapters = array(snapshot.runtimeAdapters);
   const alerts = array(snapshot.alerts);
@@ -684,10 +922,13 @@ function renderInstanceOverview(
     '', heading('CHANNELS', color),
   ];
   lines.push(...table(
-    ['CHANNEL', 'PROFILE', 'STATE', 'PID', 'LAST EVENT', 'ERROR'],
-    channels.map((row) => [row.channelId, row.profileId, row.state, row.pid, age(row.lastEventAt), row.error ?? '-']),
+    ['', 'CHANNEL', 'PROFILE', 'STATE', 'PID', 'LAST EVENT', 'ERROR'],
+    channels.map((row, index) => [
+      state.instanceFocus === 'channels' && index === state.selectedChannel ? '>' : ' ',
+      row.channelId, row.profileId, row.state, row.pid, age(row.lastEventAt), row.error ?? '-',
+    ]),
     width,
-    semanticTable(color),
+    semanticTable(color, state.instanceFocus === 'channels' ? state.selectedChannel : -1, 2),
   ));
   lines.push('', messageSummary({
     received: number(snapshot.received),
@@ -701,10 +942,10 @@ function renderInstanceOverview(
   lines.push(...table(
     ['', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'WORKER', 'SESSION', 'CONTEXT', 'MEMBERS', 'RUNTIME'],
     conversations.map((row, index) => [
-      index === state.selectedConversation ? '>' : ' ', row.channelId, row.title, row.mode, row.pending,
+      state.instanceFocus === 'conversations' && index === state.selectedConversation ? '>' : ' ', row.channelId, row.title, row.mode, row.pending,
       row.workerState, row.sessionState, `v${row.contextVersion ?? 0}@${row.contextThroughSequence ?? 0}`,
       row.memberCount ?? 0, row.runtimeId,
-    ]), width, semanticTable(color, state.selectedConversation, 2),
+    ]), width, semanticTable(color, state.instanceFocus === 'conversations' ? state.selectedConversation : -1, 2),
   ));
   lines.push('', heading('RUNTIMES', color));
   lines.push(...table(
@@ -716,6 +957,83 @@ function renderInstanceOverview(
   if (alerts.length > 0) {
     lines.push('', heading('ALERTS', color), ...alerts.map((row) => ansi(`- ${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`, 'red-bold', color)));
   }
+  return lines;
+}
+
+function renderChannelManagement(
+  instance: ViewInstance,
+  target: ChannelTarget,
+  state: ManagementViewState,
+  width: number,
+  color: boolean,
+): string[] {
+  const channel = configuredChannels(instance.config)
+    .find((item) => item.id === target.channelId && item.profileId === target.profileId);
+  if (!channel) return [ansi(`Channel 不存在：${target.channelId}/${target.profileId}`, 'red-bold', color)];
+  const snapshot = instance.store.status();
+  const connection = array(snapshot.channels)
+    .find((row) => row.channelId === target.channelId && row.profileId === target.profileId) ?? {};
+  const groups = channelGroups(instance, target);
+  const selectedGroupRow = state.selectedChannelItem > 0 ? state.selectedChannelItem - 1 : -1;
+  const lines = [
+    `${heading(`Channel 设置 / ${instance.name} / ${channel.id}/${channel.profileId}`, color)}  Agent=${instance.config.identity.name}`,
+    `配置=${statusText(channel.enabled ? 'enabled' : 'disabled', color)}  连接=${statusText(text(connection.state) ?? (channel.enabled ? 'stopped' : 'disabled'), color)}  owner=${text(connection.pid) ?? '-'}`,
+    ansi(channel.enabled
+      ? 'Channel 已启用；由当前 View 启动的 Host 会持有唯一 owner。'
+      : 'Channel 已停用；群组绑定会保留，但不会启动接收 owner。', channel.enabled ? 'green' : 'yellow', color),
+    '', heading('CHANNEL', color),
+    ...table(
+      ['', 'ACTION', 'VALUE', 'EFFECT'],
+      [[state.selectedChannelItem === 0 ? '>' : ' ', '启用 / 停用', channel.enabled ? 'enabled' : 'disabled', '切换目标 Instance 的 Channel owner']],
+      width,
+      {
+        separator: ' │ ', dividerSeparator: '─┼─', dividerFill: '─',
+        decorate: tableDecorator(color, state.selectedChannelItem === 0 ? 0 : -1, 2),
+      },
+    ),
+    '', heading('GROUPS', color),
+    ...table(
+      ['', 'GROUP', 'STATE', 'MODE', 'RESPONSIBILITY', 'RUNTIME'],
+      [
+        ...groups.map((group, index) => [
+          state.selectedChannelItem === index + 1 ? '>' : ' ', group.title,
+          group.enabled ? 'enabled' : 'disabled', group.mode, group.responsibility, group.runtimeId,
+        ]),
+        [state.selectedChannelItem === groups.length + 1 ? '>' : ' ', '+ 搜索并绑定群组', '-', 'shadow', '默认继承 Agent 角色', instance.config.runtime.id],
+      ],
+      width,
+      semanticTable(color, selectedGroupRow, 2),
+    ),
+  ];
+  return lines;
+}
+
+function renderGroupSearch(
+  instance: ViewInstance,
+  draft: GroupSearchDraft,
+  width: number,
+  color: boolean,
+): string[] {
+  const lines = [
+    heading(`群组搜索 / ${instance.name} / ${draft.target.channelId}/${draft.target.profileId}`, color),
+    ansi('搜索是只读 Channel 操作；选择后写入当前 Instance 的 conversation allowlist，不会发送消息。', 'dim', color),
+    '', `关键词：${draft.query || '(尚未输入)'}`,
+  ];
+  if (draft.phase === 'query') {
+    lines.push('', ansi('输入群名关键词后按 Enter。外部 conversation ID 不会显示在 View 中。', 'yellow', color));
+    return lines;
+  }
+  lines.push('', heading('SEARCH RESULTS', color));
+  lines.push(...table(
+    ['', 'GROUP', 'BINDING'],
+    draft.results.map((candidate, index) => [
+      index === draft.selected ? '>' : ' ',
+      candidate.title,
+      findChannelGroup(instance, draft.target, candidate.externalId) ? '已绑定' : '可绑定',
+    ]),
+    width,
+    semanticTable(color, draft.selected, 2),
+  ));
   return lines;
 }
 
@@ -848,6 +1166,41 @@ function selectedConversationId(store: Store, index: number): string | null {
   return store.listConversations()[index]?.id ?? null;
 }
 
+function channelGroups(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
+  return instance.store.listConversations().filter((conversation) => (
+    conversation.kind === 'group'
+    && conversation.channelId === target.channelId
+    && conversation.channelProfileId === target.profileId
+  ));
+}
+
+function findChannelGroup(
+  instance: ViewInstance,
+  target: Pick<ChannelTarget, 'channelId' | 'profileId'>,
+  externalId: string,
+): Conversation | null {
+  return channelGroups(instance, target).find((conversation) => conversation.externalId === externalId) ?? null;
+}
+
+function moveInstanceSelection(state: ManagementViewState, instance: ViewInstance | null, direction: number): void {
+  if (!instance) return;
+  const channelCount = configuredChannels(instance.config).length;
+  const conversationCount = instance.store.listConversations().length;
+  const total = channelCount + conversationCount;
+  if (total === 0) return;
+  const current = state.instanceFocus === 'channels'
+    ? state.selectedChannel
+    : channelCount + state.selectedConversation;
+  const next = clamp(current + direction, 0, total - 1);
+  if (next < channelCount) {
+    state.instanceFocus = 'channels';
+    state.selectedChannel = next;
+  } else {
+    state.instanceFocus = 'conversations';
+    state.selectedConversation = next - channelCount;
+  }
+}
+
 function selectedIdForSettings(state: ManagementViewState, instance: ViewInstance): string | null {
   if (state.detailInstanceName !== instance.name) return null;
   return state.detailConversationId;
@@ -857,7 +1210,27 @@ function normalizeSelection(state: ManagementViewState, instances: ViewInstance[
   state.selectedInstance = clamp(state.selectedInstance, 0, instances.length);
   if (state.detailInstanceName && !instances.some((instance) => instance.name === state.detailInstanceName)) {
     state.detailInstanceName = null;
+    state.detailChannel = null;
     state.detailConversationId = null;
+    state.groupSearch = null;
+  }
+  const detailInstance = state.detailInstanceName
+    ? instances.find((instance) => instance.name === state.detailInstanceName) ?? null
+    : null;
+  if (detailInstance) {
+    state.selectedChannel = clamp(state.selectedChannel, 0, Math.max(0, configuredChannels(detailInstance.config).length - 1));
+    state.selectedConversation = clamp(state.selectedConversation, 0, Math.max(0, detailInstance.store.listConversations().length - 1));
+  }
+  if (state.detailChannel && (
+    !detailInstance
+    || state.detailChannel.instanceName !== detailInstance.name
+    || !configuredChannels(detailInstance.config).some((channel) => (
+      channel.id === state.detailChannel!.channelId && channel.profileId === state.detailChannel!.profileId
+    ))
+  )) {
+    state.detailChannel = null;
+    state.groupSearch = null;
+    state.selectedChannelItem = 0;
   }
   if (state.settingsInstanceName && !instances.some((instance) => instance.name === state.settingsInstanceName)) {
     state.settingsInstanceName = null;
@@ -1008,6 +1381,58 @@ function integer(value: string, min: number, max: number, label: string): number
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < min || parsed > max) throw new Error(`${label} 必须是 ${min}-${max} 的整数`);
   return parsed;
+}
+
+function editSingleLine(line: { value: string; cursor: number }, key: string): void {
+  const characters = Array.from(line.value);
+  line.cursor = clamp(line.cursor, 0, characters.length);
+  if (key === '\u001b[D') {
+    line.cursor = Math.max(0, line.cursor - 1);
+    return;
+  }
+  if (key === '\u001b[C') {
+    line.cursor = Math.min(characters.length, line.cursor + 1);
+    return;
+  }
+  if (key === '\u001b[H' || key === '\u001b[1~') {
+    line.cursor = 0;
+    return;
+  }
+  if (key === '\u001b[F' || key === '\u001b[4~') {
+    line.cursor = characters.length;
+    return;
+  }
+  if (key === '\u007f' || key === '\b') {
+    if (line.cursor > 0) {
+      characters.splice(line.cursor - 1, 1);
+      line.cursor--;
+      line.value = characters.join('');
+    }
+    return;
+  }
+  if (key === '\u001b[3~') {
+    if (line.cursor < characters.length) {
+      characters.splice(line.cursor, 1);
+      line.value = characters.join('');
+    }
+    return;
+  }
+  if (key.startsWith('\u001b') || key === '\u0003') return;
+  const inserted = Array.from(key.replace(/[\u0000-\u001f]/g, ''));
+  if (inserted.length === 0) return;
+  characters.splice(line.cursor, 0, ...inserted);
+  line.cursor += inserted.length;
+  line.value = characters.join('');
+}
+
+function renderTextCursor(value: string, cursor: number): string {
+  const characters = Array.from(value);
+  const index = clamp(cursor, 0, characters.length);
+  return `${characters.slice(0, index).join('')}█${characters.slice(index).join('')}`;
+}
+
+function textLength(value: string): number {
+  return Array.from(value).length;
 }
 
 function clamp(value: number, min: number, max: number): number {

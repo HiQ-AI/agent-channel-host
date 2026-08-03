@@ -186,13 +186,17 @@ agent-channel view
 
 `view` 会从用户状态目录发现全部已初始化 instance。顶层固定为 `总览 | 全局设置`，不会把某个 instance 的配置误称为全局设置：
 
-- `总览` 聚合 instance、Channel、conversation、runtime 和消息状态，其中 `INSTANCES` 表就是 instance 的管理入口，不是同级 tab。上下键选择，`Enter` 下钻到 Instance 详情；在详情或 conversation 详情按 `s` 才进入该 Instance 的设置，`Esc` 逐层返回。
-- `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View。
+- `总览` 聚合 instance、Channel、conversation、runtime 和消息状态，其中 `INSTANCES` 表就是 instance 的管理入口，不是同级 tab。`↑/↓` 选择，`Enter/→` 下钻，`Esc/←` 逐层返回；`Tab` 只切换顶层“总览 / 全局设置”。该导航语义参考 Claude Code agent view，但业务层级仍是本项目的 `Instance → Channel → 群组/Conversation`。
+- Instance 详情中的 Channel 和 Conversation 都可选择。进入 Channel 后，第一项直接切换 `enabled/disabled`，下面显示该 Channel 已绑定的群组，末行“搜索并绑定群组”支持输入关键词、选择候选并写入现有 conversation registry；外部群 ID 不在界面展示。
+- 新绑定群组默认 `shadow`，职责继承该 Instance 的 Agent 默认角色，runtime 使用 Instance 当前配置。绑定不创建第二套接收服务、不自动发送消息；Channel disabled 时可先配置群组，重新启用后继续复用原 registry 和 session 映射。
+- `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 
-每个 instance 设置页可修改 Agent 身份、runtime model/effort、合批参数、当前会话职责/mode/warm TTL、已观察成员资料，以及其 `CHANNELS`。当前只有 DingTalk；`Enter` 可切换 `enabled/disabled`。未来 Channel adapter 从同一列表扩展，不增加 DingTalk 专用页面。TUI 新建 instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner；检查配置后再在该 instance 的 `CHANNELS` 中启用。
+每个 Instance 设置页可修改 Agent 身份、runtime model/effort、合批参数、当前会话职责/mode/warm TTL 和已观察成员资料；Channel 开关与群组绑定统一放在 Instance 下钻后的 Channel 页面，不再埋在长设置列表中。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
 
-交互式终端会用少量语义颜色突出当前选中项、正常/等待/异常状态和告警；表格宽度仍按纯文本计算，不影响列对齐。`INSTANCES` 及 instance 设置中的表格使用竖线分隔并统一左对齐。`view --once` 和非交互输出始终不带 ANSI；需要在交互终端禁用颜色时设置 `NO_COLOR`：
+字段设置、新增 Instance 向导和群搜索输入都支持单行光标编辑：`←/→` 移动，Home/End 跳到首尾，Backspace 删除光标前字符，Delete 删除光标后字符，Enter 提交，Esc 取消或返回。只有在非编辑态，`←/→` 才表示返回/下钻。
+
+交互式终端会进入 alternate screen，以固定窗口刷新，不把历史帧留在主终端 scrollback；退出或收到 SIGINT/SIGTERM 时恢复原屏幕和光标。界面用少量语义颜色突出当前选中项、正常/等待/异常状态和告警，表格宽度仍按纯文本计算。`INSTANCES`、Channel 与 Instance 设置表格使用清晰分隔并左对齐。`view --once` 和非交互输出不进入 alternate screen，也始终不带 ANSI；需要在交互终端禁用颜色时设置 `NO_COLOR`：
 
 ```powershell
 $env:NO_COLOR = '1'
@@ -201,7 +205,7 @@ agent-channel view
 
 - 某个 instance 的 Host 未运行：`view` 在当前进程内为该 instance 启动唯一 Host；退出时只停止由本次 view 启动的 Host。
 - 某个 instance 的 Host 已运行：`view` 只 attach 该 instance 状态，不创建第二个 Channel owner；退出不停止原有 Host。
-- Channel 开关保存后：由当前 View 启动的 Host 只重启目标 instance；attach 的外部 Host 不会被 View 越权停止，只提示用户重启该 Host。
+- Channel 页面切换开关后：由当前 View 启动的 Host 只重启目标 Instance；attach 的外部 Host 不会被 View 越权停止，只提示用户重启该 Host。
 - 尚无 instance：仍进入空总览，`INSTANCES` 表直接显示“新增 Instance”；按 `a` 或在该行按 `Enter` 创建，不要求退出执行外部命令。
 - `--once`：聚合输出全部 instance 的一次脱敏快照，绝不启动 Host。
 - 非交互式服务：继续使用单 instance 的 `agent-channel run --instance <name>`。

@@ -4,7 +4,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.js';
-import { normalizeDwsEvent, consumerArgs, fetchRecentGroupHistory } from '../src/dws.js';
+import { normalizeDwsEvent, consumerArgs, fetchRecentGroupHistory, searchDwsGroups } from '../src/dws.js';
 import { defaultConfig } from '../src/config.js';
 
 test('授权会话才可持久化，事件按会话单调编号并去重', () => {
@@ -119,6 +119,32 @@ test('DWS consumer 参数固定读取 flatten NDJSON stdout', () => {
     'event', 'consume', 'user_im_message_receive_group_all', '--ephemeral', '--flatten', '--format', 'ndjson',
     '--profile', 'corp:user',
   ]);
+});
+
+test('DWS 群搜索只投影有效候选并按 openConversationId 去重', async () => {
+  const config = defaultConfig('search', '.', 'Agent', 'role');
+  let captured: string[] = [];
+  const groups = await searchDwsGroups(config, ' 编辑器 ', async (_config, args) => {
+    captured = args;
+    return {
+      success: true,
+      result: {
+        groups: [
+          { title: '编辑器群 A', openConversationId: 'group-a', secret: 'not-projected' },
+          { title: '重复项', openConversationId: 'group-a' },
+          { title: '编辑器群 B', openConversationId: 'group-b' },
+          { title: '', openConversationId: 'invalid-title' },
+          { title: 'invalid-id' },
+        ],
+      },
+    };
+  });
+  assert.deepEqual(captured, ['chat', 'search', '--query', '编辑器']);
+  assert.deepEqual(groups, [
+    { title: '编辑器群 A', openConversationId: 'group-a' },
+    { title: '编辑器群 B', openConversationId: 'group-b' },
+  ]);
+  await assert.rejects(searchDwsGroups(config, '  ', async () => ({})), /关键词不能为空/);
 });
 
 test('私聊 allowlist 使用对端 openDingTalkId，不与 conversationId 混淆', () => {
