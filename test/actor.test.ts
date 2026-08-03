@@ -192,7 +192,7 @@ test('首次群历史返回 silent 时标记完成且不发送、不重复读取
   assert.match(prompts[0]!, /发送者：同事甲/);
   assert.equal(prompts[0]!.includes('静默群'), false);
   assert.equal(sends, 0);
-  assert.equal(store.getGroupOnboarding(conversation.id)?.state, 'submitted');
+  assert.equal(store.getGroupOnboarding(conversation.id)?.state, 'completed');
   assert.equal(store.getGroupOnboarding(conversation.id)?.introText, null);
   await worker.stop();
 

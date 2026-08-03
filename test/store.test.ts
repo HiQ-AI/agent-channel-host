@@ -531,7 +531,7 @@ test('v1 会话迁移后补 onboarding 和每类生命周期默认值', () => {
     assert.equal(migrated.getConversation('group-v1')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v1')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 9);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
     assert.equal(migrated.getConversation('group-v1')?.policyVersion, 1);
     migrated.close();
   } finally {
@@ -565,7 +565,7 @@ test('v2 会话迁移到当前 schema 时得到固定逻辑 session 和按需 Wo
     assert.equal(migrated.getConversation('group-v2')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v2')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 9);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -630,7 +630,7 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
     assert.equal(onboarding?.introUuid, null);
     assert.equal(migrated.getGroupOnboarding('group-v3-submitted')?.state, 'submitted');
     assert.deepEqual(migrated.db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 9);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -672,7 +672,7 @@ test('v5 Channel 状态表迁移后保留旧记录并允许 disabled', () => {
       `).get() as { state: string; label: string };
       assert.equal(row.state, 'disabled');
       assert.equal(row.label, 'DingTalk DWS');
-      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 9);
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
     } finally {
       migrated.close();
     }

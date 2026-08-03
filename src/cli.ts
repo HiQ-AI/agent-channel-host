@@ -19,6 +19,7 @@ import { CLI_NAME, PRODUCT_VERSION } from './product.js';
 import {
   deleteConversationWithLifecycle, deleteInstanceWithLifecycle, initializeInstance,
 } from './instance.js';
+import { inspectOnboardingDelivery, reconcileOnboardingDelivery } from './delivery-reconciliation.js';
 
 const program = new Command();
 program
@@ -226,6 +227,29 @@ program.command('status')
     } finally {
       store.close();
     }
+  });
+
+program.command('delivery')
+  .description('只读回查或显式协调首次群历史回复；绝不自动重发 delivery_unknown')
+  .requiredOption('--instance <name>', 'instance 名称')
+  .requiredOption('--id <id>', '群 conversation UUID')
+  .option('--check', '只读回查群历史，不修改 SQLite、不发送消息', false)
+  .option('--apply', '在 Host 停止且已备份后显式协调发送', false)
+  .option('--backup-dir <path>', 'apply 模式必填的 SQLite 备份目录')
+  .option('--yes', '确认执行可能的单次重发', false)
+  .action(async (options) => {
+    if (Boolean(options.check) === Boolean(options.apply)) throw new Error('--check 与 --apply 必须且只能指定一个');
+    const config = await loadConfig(options.instance);
+    const databasePath = statePath(options.instance);
+    if (options.check) {
+      print({ ok: true, check: true, instance: options.instance, conversationId: options.id,
+        ...(await inspectOnboardingDelivery(config, databasePath, options.id)) });
+      return;
+    }
+    if (!options.yes) throw new Error('--apply 必须同时提供 --yes');
+    if (!options.backupDir) throw new Error('--apply 必须提供 --backup-dir');
+    print({ ok: true, check: false, instance: options.instance, conversationId: options.id,
+      ...(await reconcileOnboardingDelivery(config, databasePath, options.id, options.backupDir)) });
   });
 
 program.command('view')

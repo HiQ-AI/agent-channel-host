@@ -133,7 +133,7 @@ export interface OutboxRecord {
 
 export interface GroupOnboardingRecord {
   conversationId: string;
-  state: 'pending' | 'prepared' | 'sending' | 'submitted' | 'failed' | 'delivery_unknown';
+  state: 'pending' | 'prepared' | 'sending' | 'completed' | 'submitted' | 'delivered' | 'failed' | 'delivery_unknown';
   historyCount: number | null;
   historyLoadedAt: string | null;
   introTurnId: string | null;

@@ -440,6 +440,37 @@ export class Store {
         COMMIT;
       `);
     }
+    const onboardingEvidenceVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (onboardingEvidenceVersion < 10) {
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE group_onboarding_v10 (
+          conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+          state TEXT NOT NULL CHECK(state IN (
+            'pending','prepared','sending','completed','submitted','delivered','failed','delivery_unknown'
+          )),
+          history_count INTEGER,
+          history_loaded_at TEXT,
+          intro_turn_id TEXT,
+          intro_text TEXT,
+          intro_uuid TEXT UNIQUE,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO group_onboarding_v10(
+          conversation_id,state,history_count,history_loaded_at,intro_turn_id,intro_text,intro_uuid,error,created_at,updated_at
+        ) SELECT
+          conversation_id,
+          CASE WHEN state='submitted' AND intro_text IS NULL THEN 'completed' ELSE state END,
+          history_count,history_loaded_at,intro_turn_id,intro_text,intro_uuid,error,created_at,updated_at
+        FROM group_onboarding;
+        DROP TABLE group_onboarding;
+        ALTER TABLE group_onboarding_v10 RENAME TO group_onboarding;
+        PRAGMA user_version=10;
+        COMMIT;
+      `);
+    }
   }
 
   addConversation(input: {
@@ -896,7 +927,7 @@ export class Store {
       const pendingGroupHistory = this.db.prepare(`
         SELECT g.conversation_id FROM group_onboarding g
         JOIN runtime_sessions s ON s.conversation_id=g.conversation_id
-        WHERE g.state NOT IN ('submitted','delivery_unknown') AND g.intro_text IS NULL
+        WHERE g.state NOT IN ('completed','submitted','delivered','delivery_unknown') AND g.intro_text IS NULL
       `).all() as Row[];
       for (const row of pendingGroupHistory) {
         const conversationId = String(row.conversation_id);
@@ -938,7 +969,7 @@ export class Store {
         WHERE c.enabled=1 AND (
           e.id IS NOT NULL OR
           o.id IS NOT NULL OR
-          (c.kind='group' AND g.state NOT IN ('submitted','delivery_unknown')
+          (c.kind='group' AND g.state NOT IN ('completed','submitted','delivered','delivery_unknown')
             AND (g.intro_text IS NULL OR c.mode='reply'))
         )
         ORDER BY c.id
@@ -1086,7 +1117,7 @@ export class Store {
       UPDATE group_onboarding SET
         state='prepared',history_count=?,history_loaded_at=?,intro_turn_id=?,intro_text=?,intro_uuid=?,
         error=NULL,updated_at=?
-      WHERE conversation_id=? AND state NOT IN ('submitted','delivery_unknown')
+      WHERE conversation_id=? AND state NOT IN ('completed','submitted','delivered','delivery_unknown')
     `).run(historyCount, now, introTurnId, introText, introUuid, now, conversationId);
     const record = this.getGroupOnboarding(conversationId);
     if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
@@ -1101,9 +1132,9 @@ export class Store {
     const now = new Date().toISOString();
     this.db.prepare(`
       UPDATE group_onboarding SET
-        state='submitted',history_count=?,history_loaded_at=?,intro_turn_id=?,
+        state='completed',history_count=?,history_loaded_at=?,intro_turn_id=?,
         intro_text=NULL,intro_uuid=NULL,error=NULL,updated_at=?
-      WHERE conversation_id=? AND state NOT IN ('submitted','delivery_unknown')
+      WHERE conversation_id=? AND state NOT IN ('completed','submitted','delivered','delivery_unknown')
     `).run(historyCount, now, turnId, now, conversationId);
     const record = this.getGroupOnboarding(conversationId);
     if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
@@ -1114,7 +1145,7 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const current = this.getGroupOnboarding(conversationId);
-      if (!current || current.state === 'submitted' || current.state === 'delivery_unknown'
+      if (!current || ['completed', 'submitted', 'delivered', 'delivery_unknown'].includes(current.state)
         || !current.introText || !current.introUuid) {
         this.db.exec('COMMIT');
         return null;
@@ -1131,11 +1162,35 @@ export class Store {
 
   finishGroupOnboardingIntro(
     conversationId: string,
-    state: 'submitted' | 'failed' | 'delivery_unknown',
+    state: 'submitted' | 'delivered' | 'failed' | 'delivery_unknown',
     error: string | null,
   ): void {
     this.db.prepare('UPDATE group_onboarding SET state=?,error=?,updated_at=? WHERE conversation_id=?')
       .run(state, error, new Date().toISOString(), conversationId);
+  }
+
+  claimGroupOnboardingReconciliation(
+    conversationId: string,
+    expectedUuid: string,
+    nextUuid: string,
+  ): GroupOnboardingRecord {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.getGroupOnboarding(conversationId);
+      if (!current || current.state !== 'delivery_unknown' || current.introUuid !== expectedUuid
+        || !current.introText || !current.introTurnId) {
+        throw new Error('onboarding 结果不明状态已变化，拒绝重发');
+      }
+      this.db.prepare(`
+        UPDATE group_onboarding SET state='sending',intro_uuid=?,error=NULL,updated_at=?
+        WHERE conversation_id=? AND state='delivery_unknown' AND intro_uuid=?
+      `).run(nextUuid, new Date().toISOString(), conversationId, expectedUuid);
+      this.db.exec('COMMIT');
+      return this.getGroupOnboarding(conversationId)!;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   acquireLease(key: string, ownerId: string, nowMs: number, ttlMs: number): boolean {
@@ -1374,7 +1429,9 @@ export class Store {
         (SELECT COUNT(*) FROM inbound_events WHERE processing_state='failed') AS failed_messages,
         (SELECT COUNT(*) FROM outbox WHERE state='submitted') AS submitted,
         (SELECT COUNT(*) FROM outbox WHERE state IN ('pending','sending')) AS pending_outbox,
-        (SELECT COUNT(*) FROM group_onboarding WHERE state IN ('pending','prepared','sending','failed')) AS pending_group_onboarding
+        (SELECT COUNT(*) FROM group_onboarding WHERE state IN ('pending','prepared','sending','failed')) AS pending_group_onboarding,
+        (SELECT COALESCE(SUM(history_count),0) FROM group_onboarding WHERE history_loaded_at IS NOT NULL) AS history_loaded,
+        (SELECT COALESCE(SUM(history_count),0) FROM group_onboarding WHERE intro_turn_id IS NOT NULL) AS history_judged
     `).get() as Row;
     const channels = this.db.prepare(`
       SELECT channel_id,profile_id,label,state,owner_pid,connected_at,last_event_at,error,updated_at
@@ -1390,6 +1447,7 @@ export class Store {
         s.provider_session_id,s.lifecycle AS session_state,s.generation,s.protocol_fingerprint,
         x.version AS context_version,x.through_sequence AS context_through_sequence,
         r.label AS runtime_label,r.model AS runtime_model,r.state AS runtime_adapter_state,
+        g.state AS onboarding_state,g.history_count,g.history_loaded_at,g.intro_turn_id,
         (SELECT COUNT(*) FROM inbound_events e
           WHERE e.conversation_id=c.id AND e.processing_state IN ('admitted','claimed')) AS pending_count,
         (SELECT COALESCE(MAX(sequence),0) FROM inbound_events e WHERE e.conversation_id=c.id) AS latest_sequence,
@@ -1401,6 +1459,7 @@ export class Store {
       LEFT JOIN runtime_sessions s ON s.conversation_id=c.id
       LEFT JOIN conversation_context x ON x.conversation_id=c.id
       LEFT JOIN runtime_adapters r ON r.runtime_id=c.runtime_id
+      LEFT JOIN group_onboarding g ON g.conversation_id=c.id
       ORDER BY c.kind,c.title,c.id
     `).all() as Row[];
     const messages = this.db.prepare(`
@@ -1495,6 +1554,9 @@ export class Store {
         contextThroughSequence: row.context_through_sequence === null || row.context_through_sequence === undefined
           ? 0 : Number(row.context_through_sequence),
         memberCount: Number(row.member_count),
+        historyLoaded: row.history_loaded_at ? Number(row.history_count ?? 0) : 0,
+        historyJudged: row.intro_turn_id ? Number(row.history_count ?? 0) : 0,
+        onboardingState: row.onboarding_state ? String(row.onboarding_state) : null,
       })),
       messages: messages.map((row) => ({
         conversationId: row.conversation_id,

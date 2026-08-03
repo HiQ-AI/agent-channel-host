@@ -12,6 +12,8 @@ Runtime 返回不是精确的 `{action, replyText}` 最小结构时，当前 bat
 
 Host 启动时会一次性恢复被中断的 claim，并重试未达 3 次上限的 failed inbox/outbox。outbox 沿用原 UUID，发送前再次检查 Conversation 是否仍允许回复以及对应入站 sequence 是否仍是最新；DWS 明确返回同 UUID 重复时记为 `delivery_unknown`，不会换 UUID 或自动重发，并保留告警供人工核实。只有 DWS 本次明确成功才记为 `submitted`，但仍不等于 delivered。DWS 非零退出优先解析结构化 JSON，持久错误不包含完整 `--text` 命令参数。已完成、已提交、结果不明和达到上限的记录不会自动重放。该机制降低进程中断造成的漏处理风险，但不把 DWS 易失 event bus 提升为端到端 exactly-once。
 
+`delivery_unknown` 的显式协调命令要求唯一 Host 已停止，先从群历史精确匹配已准备正文，再通过 SQLite `VACUUM INTO` 生成完整备份。只有回读零命中才使用由目标、正文和上一 UUID 共同绑定的新 UUID 单次发送；DWS 调用成功后仍需群历史回读命中才标记 `delivered`。任意发送异常重新进入 `delivery_unknown`，不会在 Host 重启后盲目发送。
+
 Host 不设置 turn 超时。活动 claim 不按时间自动释放，而由 Conversation 唯一 Worker 和 Host lease 隔离；新消息抢占、Host 停止或 runtime 退出时显式收口，异常进程退出后由下次启动 reconciliation 释放。部署方应监控长期无输出的 runtime turn，并通过停止 Host 或发送新消息触发受控中断，不能依赖时间阈值自动杀进程。
 
 每轮 Codex CLI 完成后子进程退出；Worker 的 warm TTL 只释放宿主内对象，不删除 SQLite 中的 provider session ID 或 Codex 本地 rollout。`view` 的 Conversation 删除会清理 Host 自己保存的消息、session 映射、outbox、旧 checkpoint 和成员资料，但不会删除 provider CLI 在其用户目录维护的本地 rollout；若保留策略要求物理清除 provider 数据，仍需停止 Host 后按该 provider 的受控流程处理。不能把进程退出、空闲释放或 Host 侧删除等同于 provider 全链路删除。

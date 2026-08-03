@@ -290,6 +290,15 @@ agent-channel run --instance triss
 
 `status --instance` 输出一个 instance 的机器可读 JSON；`view` 是跨 instance 的交互管理面。非编辑态第一次按 `q` 或任何状态下按 `Ctrl+C` 只打开退出确认，并明确显示会停止多少个 View-owned Host；再次按 `q`、`Ctrl+C` 或 Enter 才退出，按 Esc/`←` 取消且保留当前页面与尚未提交的编辑内容。进程收到外部 SIGINT/SIGTERM 时仍立即安全收尾。总览和详情默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。instance 设置先通过与启动相同的 schema 校验，再原子保存；标记“重启后生效”的配置不会伪装成已即时应用。
 
+首次拉取的群历史不进入普通实时消息计数；`view` 单独显示 `HISTORY loaded/judged`，会话行显示 `HISTORY` 与 onboarding `DELIVERY`。`completed` 表示 Agent 已判断且选择静默，`submitted` 只表示 DWS 明确接受发送调用，`delivered` 表示 Host 随后在群历史中精确回读到回复，`delivery_unknown` 表示发送结果不明且禁止自动重试。
+
+对 `delivery_unknown` 必须显式协调。先只读回查；只有确认群内没有精确回复、停止唯一 Host 后，才允许备份并执行一次内容绑定的新 UUID 重发。apply 内部会再次回查，发送后也会再次回读；输出不包含正文、群外部 ID 或 UUID。
+
+```powershell
+agent-channel delivery --instance triss --id '<conversation UUID>' --check
+agent-channel delivery --instance triss --id '<conversation UUID>' --apply --backup-dir 'D:\baibu-agent\artifacts\agent-channel-delivery' --yes
+```
+
 先在 `shadow` 模式确认 `received/processed`、固定 provider session 前缀、重启 resume 和 Agent 判断，才切到发送模式：
 
 ```powershell
@@ -309,7 +318,7 @@ agent-channel service remove --instance triss
 
 - SQLite WAL 保证 Host 收到事件后的本地 admission/outbox 原子性。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
 - Host 启动恢复只重试未达 3 次上限的 failed inbox 与未确认 outbox；outbox 沿用原 UUID，并在实际发送前再次校验 Conversation 权限和最新消息 sequence。DWS 返回 `Request is repeated with uuid` 时只能证明该幂等键已经登记，不能证明当前内容已提交或已送达；Host 将其记为 `delivery_unknown`，不换 UUID、不自动重发，并在 View 中保留告警。达到上限、已完成、已提交或发送结果不明的记录不会自动重放。
-- `submitted` 只表示 DWS 本次发送调用明确成功，不等于消息已送达、对端已读或业务已接受。
+- `submitted` 只表示 DWS 本次发送调用明确成功，不等于消息已送达、对端已读或业务已接受；只有精确群历史回读命中后才标记 `delivered`。
 - Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner、一个 bus，以及按群聊/私聊订阅范围启停的共享 consumer。
 - Host 仅在 `dws event status` 同时返回 `state=running` 和可用 live RPC 时认定 bus ready；只有存活 PID、没有 IPC 的状态会明确报告为 stale bus/PID 复用。DWS 子进程退出时保留经脱敏且有界的 stderr 根因，不再只显示 `code=5`。
 - Host 不覆盖 Codex 的 `approval_policy`、sandbox、network 或 writable roots；这些权限与 MCP/skills 一样由 runtime 自身配置加载。`runtime.cwd` 必须指向专用工作目录，部署者必须按该 runtime 的权限模型独立审计。

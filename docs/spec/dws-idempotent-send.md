@@ -21,3 +21,11 @@ Host 使用稳定 UUID 重试发送。DWS 已登记该 UUID 时以非零退出�
 - 单元测试覆盖非零退出 JSON、重复 UUID、其他业务错误和遗留长 ALERTS。
 - 全量执行 `npm run verify`。
 - 真实 Instance 只在唯一 Host 停止后将误记状态精确纠正为 `delivery_unknown`；不得启动第二个 Host。重启后回查 onboarding 不被自动重试、告警保留、Channel/session ready，并且不据此声称 submitted 或 delivered。
+
+## 显式协调与首次历史可观测性
+
+- 首次历史不伪装成实时 `inbound_events`；状态快照单独统计 `history_loaded/history_judged`，会话行展示 onboarding 状态。
+- 生命周期拆分为 `completed`（已判断且静默）、`submitted`（DWS 明确接受调用）、`delivered`（群历史精确回读命中）和 `delivery_unknown`（结果不明、禁止自动重试）。
+- `delivery --check` 只读打开 SQLite，并在仅规范化 Unicode 兼容形式和平台空白折叠后匹配已准备回复；不迁移数据库、不改状态、不发送。
+- `delivery --apply` 要求 Host lease 已停止、显式 `--yes` 与备份目录。它在备份前回查一次，备份后再核对状态；已可见则只标记 delivered，仍不可见才生成绑定上一 UUID、目标和正文的新 UUID，单次发送并再次回读。
+- apply 的任何发送异常都回到 `delivery_unknown`；DWS 明确成功但有界回读暂未可见时保留 `submitted`，不得冒充 delivered。

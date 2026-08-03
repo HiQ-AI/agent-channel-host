@@ -50,7 +50,8 @@ export class ConversationWorker {
       if (this.conversation.kind === 'group') {
         const onboarding = this.store.getGroupOnboarding(this.conversation.id);
         if (!onboarding) throw new Error(`群 onboarding 状态不存在：${this.conversation.id}`);
-        if (onboarding.state !== 'submitted' && !onboarding.introText) {
+        if (!['completed', 'submitted', 'delivered', 'delivery_unknown'].includes(onboarding.state)
+          && !onboarding.introText) {
           history = await this.loadGroupHistory(this.conversation);
         }
       }
@@ -90,7 +91,7 @@ export class ConversationWorker {
   private async onboardGroup(history: RecentGroupHistory | null): Promise<void> {
     let onboarding = this.store.getGroupOnboarding(this.conversation.id);
     if (!onboarding) throw new Error(`群 onboarding 状态不存在：${this.conversation.id}`);
-    if (onboarding.state === 'submitted' || onboarding.state === 'delivery_unknown') return;
+    if (['completed', 'submitted', 'delivered', 'delivery_unknown'].includes(onboarding.state)) return;
     if (!onboarding.introText) {
       if (!history) throw new Error('群 onboarding 缺少最近消息上下文');
       if (history.count === 0) {
@@ -122,7 +123,7 @@ export class ConversationWorker {
         historyCount: history.count, turnIdPrefix: result.turnId.slice(0, 12),
       });
     }
-    if (onboarding.state === 'submitted') return;
+    if (['completed', 'submitted', 'delivered'].includes(onboarding.state)) return;
     if (this.conversation.mode !== 'reply') {
       this.log({ type: 'GROUP_ONBOARDING_DEFERRED', conversationId: this.conversation.id, reason: 'shadow-mode' });
       return;
