@@ -11,6 +11,7 @@ test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   assert.deepEqual(current.channel, {
     id: 'dingtalk', enabled: true, profileId: 'default', command: 'dws',
     subscriptions: { groups: 'selected', directs: 'selected' },
+    defaultModes: { groups: 'shadow', directs: 'shadow' },
   });
   assert.equal(current.runtime.id, 'codex');
   assert.equal(current.runtime.command, 'codex');
@@ -32,10 +33,12 @@ test('既有 v2 配置缺少 Channel 新字段时保持启用并默认 selected'
     };
     delete legacy.channel.enabled;
     delete legacy.channel.subscriptions;
+    delete legacy.channel.defaultModes;
     await writeFile(path, YAML.stringify(legacy), 'utf8');
     const loaded = await loadConfig('legacy-v2', path);
     assert.equal(loaded.channel.enabled, true);
     assert.deepEqual(loaded.channel.subscriptions, { groups: 'selected', directs: 'selected' });
+    assert.deepEqual(loaded.channel.defaultModes, { groups: 'shadow', directs: 'shadow' });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1,11 +1,12 @@
 import type { ChannelSubscriptionMode, HostConfig } from './config.js';
 import { CHANNEL_SUBSCRIPTION_MODES, configuredChannels, validateConfig, writeConfig } from './config.js';
 import type { Store } from './store.js';
-import type { Conversation } from './types.js';
+import type { Conversation, ConversationMode } from './types.js';
 import { CLI_NAME } from './product.js';
-import { MAX_WORKER_WARM_SECONDS } from './types.js';
+import { CONVERSATION_MODES, MAX_WORKER_WARM_SECONDS } from './types.js';
 import { publishRecoveryContext } from './recovery-context.js';
 import { safeName } from './paths.js';
+import { displayConversationTitle } from './conversation-title.js';
 
 type Json = Record<string, unknown>;
 type TaggedJson = Json & { instance: string };
@@ -59,7 +60,8 @@ export interface ChannelGroupCandidate {
 export interface SettingEntry {
   key: string;
   section: 'instance' | 'channels' | 'conversation' | 'members';
-  input: 'text' | 'toggle';
+  input: 'text' | 'toggle' | 'select';
+  options?: readonly string[];
   label: string;
   value: string;
   hint: string;
@@ -470,6 +472,13 @@ export async function handleManagementViewInput(
           state.notice = actionNotice ?? `${entry.label} 已切换为 ${entry.value === 'enabled' ? 'disabled' : 'enabled'}`;
           return;
         }
+        if (entry.input === 'select') {
+          const next = nextOption(entry);
+          await entry.apply(next);
+          const actionNotice = await actions.afterSettingApplied?.(settingsInstance, entry);
+          state.notice = actionNotice ?? `${entry.label} 已选择 ${next}`;
+          return;
+        }
         state.editing = { key: entry.key, label: entry.label, value: entry.value, cursor: textLength(entry.value) };
         return;
       }
@@ -530,6 +539,15 @@ async function activateChannelItem(
     await entry.apply(next);
     const actionNotice = await actions.afterSettingApplied?.(instance, entry);
     state.notice = actionNotice ?? `${entry.label} 已切换为 ${next}`;
+    return;
+  }
+  if (item.kind === 'groups-default-mode' || item.kind === 'directs-default-mode') {
+    const kind = item.kind === 'groups-default-mode' ? 'groups' : 'directs';
+    const entry = createChannelDefaultModeSettingEntry(instance.config, instance.store, target, kind, instance.configFile);
+    const next = nextOption(entry);
+    await entry.apply(next);
+    const actionNotice = await actions.afterSettingApplied?.(instance, entry);
+    state.notice = actionNotice ?? `${entry.label} 已选择 ${next}`;
     return;
   }
   if (item.kind === 'conversation') {
@@ -609,10 +627,10 @@ async function handleGroupSearchInput(
         externalId: candidate.externalId,
         title: candidate.title,
         responsibility: instance.config.identity.role,
-        mode: 'shadow',
+        mode: instance.config.channel.defaultModes.groups,
         runtimeId: instance.config.runtime.id,
       });
-      state.notice = `已绑定群组“${candidate.title}”；默认职责继承 Agent 角色，模式为 shadow`;
+      state.notice = `已绑定群组“${candidate.title}”；默认职责继承 Agent 角色，模式为 ${instance.config.channel.defaultModes.groups}`;
     } catch (error) {
       conversation = findChannelGroup(instance, draft.target, candidate.externalId);
       if (!conversation) throw error;
@@ -721,9 +739,9 @@ export function createSettingEntries(
       if (!value.trim()) throw new Error('Runtime 模型不能为空');
       next.runtime.model = value.trim();
     }),
-    configSetting('runtime.effort', '推理强度', config.runtime.effort, 'low/medium/high/xhigh/max/ultra', config, store, configFile, (next, value) => {
+    selectSetting(configSetting('runtime.effort', '推理强度', config.runtime.effort, '从固定候选值选择', config, store, configFile, (next, value) => {
       next.runtime.effort = value.trim() as HostConfig['runtime']['effort'];
-    }),
+    }), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
     configSetting(
       'scheduling.quietWindowMilliseconds', '合批静默窗口(ms)', String(config.scheduling.quietWindowMilliseconds),
       '0-60000；下一 batch', config, store, configFile,
@@ -757,11 +775,11 @@ export function createSettingEntries(
       if (!store.setConversationResponsibility(conversationId, value)) throw new Error('conversation 不存在');
       await publishCurrentRecovery(config, store, conversationId);
     }),
-    storeSetting(`conversation:${conversationId}:mode`, `会话模式 · ${conversation.title}`, conversation.mode, 'shadow/reply；发送前即时生效', async (value) => {
+    selectSetting(storeSetting(`conversation:${conversationId}:mode`, `会话模式 · ${conversation.title}`, conversation.mode, '从 shadow/reply 选择；发送前即时生效', async (value) => {
       if (value !== 'shadow' && value !== 'reply') throw new Error('会话模式必须是 shadow 或 reply');
       if (!store.setConversationMode(conversationId, value)) throw new Error('conversation 不存在');
       await publishCurrentRecovery(config, store, conversationId);
-    }),
+    }), CONVERSATION_MODES),
     storeSetting(
       `conversation:${conversationId}:warm`, `Worker 保温秒数 · ${conversation.title}`, String(conversation.workerWarmSeconds),
       `0-${MAX_WORKER_WARM_SECONDS}；下一次 idle`, async (value) => {
@@ -847,6 +865,37 @@ export function createChannelSubscriptionSettingEntry(
   return entry;
 }
 
+export function createChannelDefaultModeSettingEntry(
+  config: HostConfig,
+  store: Store,
+  target: Pick<ChannelTarget, 'channelId' | 'profileId'>,
+  kind: 'groups' | 'directs',
+  configFile?: string,
+): SettingEntry {
+  const channel = configuredChannels(config)
+    .find((item) => item.id === target.channelId && item.profileId === target.profileId);
+  if (!channel) throw new Error(`Channel 不存在：${target.channelId}/${target.profileId}`);
+  const label = kind === 'groups' ? '群聊默认模式' : '私聊默认模式';
+  const entry = selectSetting(configSetting(
+    `channel:${channel.id}:${channel.profileId}:defaultModes:${kind}`,
+    label,
+    channel.defaultModes[kind],
+    '只影响之后新建且未显式指定模式的 Conversation',
+    config,
+    store,
+    configFile,
+    (next, value) => {
+      if (!CONVERSATION_MODES.includes(value as ConversationMode)) {
+        throw new Error('默认模式必须是 shadow 或 reply');
+      }
+      next.channel.defaultModes[kind] = value as ConversationMode;
+    },
+  ), CONVERSATION_MODES);
+  entry.section = 'channels';
+  entry.restartHost = true;
+  return entry;
+}
+
 function configSetting(
   key: string,
   label: string,
@@ -878,6 +927,16 @@ function storeSetting(
   section: SettingEntry['section'] = 'conversation',
 ): SettingEntry {
   return { key, section, input: 'text', label, value, hint, restartHost: false, apply };
+}
+
+function selectSetting(entry: SettingEntry, options: readonly string[]): SettingEntry {
+  return { ...entry, input: 'select', options };
+}
+
+function nextOption(entry: SettingEntry): string {
+  if (!entry.options || entry.options.length === 0) throw new Error(`${entry.label} 缺少候选值`);
+  const current = entry.options.indexOf(entry.value);
+  return entry.options[(current + 1) % entry.options.length]!;
 }
 
 async function publishCurrentRecovery(config: HostConfig, store: Store, conversationId: string): Promise<void> {
@@ -968,11 +1027,11 @@ export function renderManagementView(
       : state.tab === 'settings'
         ? ansi('Tab 切换总览  ←/Esc 返回总览  q 退出', 'dim', color)
         : state.settingsInstanceName
-          ? ansi('↑/↓ 选择  →/Enter 编辑  ←/Esc 返回  q 退出', 'dim', color)
+          ? ansi('↑/↓ 选择  →/Enter 编辑或选择下一项  ←/Esc 返回  q 退出', 'dim', color)
           : state.detailConversationId
             ? ansi('e/s 修改  d 删除  ←/Esc 返回  q 退出', 'dim', color)
             : state.detailChannel
-              ? ansi('↑/↓ 选择  →/Enter 操作或下钻  ←/Esc 返回 Instance  q 退出', 'dim', color)
+              ? ansi('↑/↓ 选择  →/Enter 操作、选择下一项或下钻  ←/Esc 返回 Instance  q 退出', 'dim', color)
           : state.detailInstanceName
             ? ansi('↑/↓ 选择  →/Enter 下钻  s Instance 设置  d 删除 Instance  ←/Esc 返回  q 退出', 'dim', color)
             : ansi('↑/↓ 选择  →/Enter 下钻  a 新增  d 删除 Instance  Tab 全局设置  q 退出', 'dim', color));
@@ -1125,13 +1184,17 @@ function renderChannelManagement(
       ['', 'ACTION', 'VALUE', 'EFFECT'],
       [
         [selected?.kind === 'enabled' ? '>' : ' ', '启用 / 停用', channel.enabled ? 'enabled' : 'disabled', '切换目标 Instance 的 Channel owner'],
-        [selected?.kind === 'groups-subscription' ? '>' : ' ', '群聊订阅', channel.subscriptions.groups, subscriptionEffect(channel.subscriptions.groups)],
-        [selected?.kind === 'directs-subscription' ? '>' : ' ', '私聊订阅', channel.subscriptions.directs, subscriptionEffect(channel.subscriptions.directs)],
+        [selected?.kind === 'groups-subscription' ? '>' : ' ', '群聊订阅', channel.subscriptions.groups, subscriptionEffect(channel.subscriptions.groups, '群聊')],
+        [selected?.kind === 'groups-default-mode' ? '>' : ' ', '群聊默认模式', channel.defaultModes.groups, '只影响之后新建且未显式指定模式的群聊'],
+        [selected?.kind === 'directs-subscription' ? '>' : ' ', '私聊订阅', channel.subscriptions.directs, subscriptionEffect(channel.subscriptions.directs, '私聊')],
+        [selected?.kind === 'directs-default-mode' ? '>' : ' ', '私聊默认模式', channel.defaultModes.directs, '只影响之后新建且未显式指定模式的私聊'],
       ],
       width,
       {
         separator: ' │ ', dividerSeparator: '─┼─', dividerFill: '─',
-        decorate: tableDecorator(color, ['enabled', 'groups-subscription', 'directs-subscription'].indexOf(selected?.kind ?? ''), 2),
+        decorate: tableDecorator(color, [
+          'enabled', 'groups-subscription', 'groups-default-mode', 'directs-subscription', 'directs-default-mode',
+        ].indexOf(selected?.kind ?? ''), 2),
       },
     ),
     '', heading('GROUPS', color),
@@ -1142,7 +1205,10 @@ function renderChannelManagement(
           selected?.kind === 'conversation' && selected.conversation.id === group.id ? '>' : ' ', group.title,
           group.enabled ? 'enabled' : 'disabled', group.mode, group.responsibility, group.runtimeId,
         ]),
-        [selected?.kind === 'search-group' ? '>' : ' ', '+ 搜索并绑定指定群聊', '-', 'shadow', '默认继承 Agent 角色', instance.config.runtime.id],
+        [
+          selected?.kind === 'search-group' ? '>' : ' ', '+ 搜索并绑定指定群聊', '-', channel.defaultModes.groups,
+          '默认继承 Agent 角色', instance.config.runtime.id,
+        ],
       ],
       width,
       semanticTable(color, selected?.kind === 'conversation'
@@ -1161,7 +1227,7 @@ function renderChannelManagement(
         ? directs.findIndex((direct) => direct.id === selected.conversation.id)
         : -1, 2),
     ),
-    ansi('指定私聊使用稳定 openDingTalkId 登记；当前不按姓名猜测 ID。可用 conversation add 添加后在此管理。', 'dim', color),
+    ansi('指定私聊使用稳定 openDingTalkId 登记；事件能提供人员姓名时显示姓名，不按姓名猜测 ID。可用 conversation add 添加后在此管理。', 'dim', color),
   ];
   return lines;
 }
@@ -1329,7 +1395,16 @@ function channelGroups(instance: ViewInstance, target: Pick<ChannelTarget, 'chan
 }
 
 function channelDirects(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
-  return channelConversations(instance, target).filter((conversation) => conversation.kind === 'direct');
+  return channelConversations(instance, target)
+    .filter((conversation) => conversation.kind === 'direct')
+    .map((conversation) => ({
+      ...conversation,
+      title: displayConversationTitle(
+        conversation,
+        instance.store.listConversationMembers(conversation.id)
+          .find((member) => member.externalUserId === conversation.externalId)?.displayName ?? null,
+      ),
+    }));
 }
 
 function channelConversations(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
@@ -1340,7 +1415,7 @@ function channelConversations(instance: ViewInstance, target: Pick<ChannelTarget
 }
 
 type ChannelManagementItem =
-  | { kind: 'enabled' | 'groups-subscription' | 'directs-subscription' | 'search-group' }
+  | { kind: 'enabled' | 'groups-subscription' | 'groups-default-mode' | 'directs-subscription' | 'directs-default-mode' | 'search-group' }
   | { kind: 'conversation'; conversation: Conversation };
 
 function channelManagementItems(
@@ -1350,16 +1425,18 @@ function channelManagementItems(
   return [
     { kind: 'enabled' },
     { kind: 'groups-subscription' },
+    { kind: 'groups-default-mode' },
     { kind: 'directs-subscription' },
+    { kind: 'directs-default-mode' },
     ...channelGroups(instance, target).map((conversation) => ({ kind: 'conversation' as const, conversation })),
     { kind: 'search-group' },
     ...channelDirects(instance, target).map((conversation) => ({ kind: 'conversation' as const, conversation })),
   ];
 }
 
-function subscriptionEffect(mode: ChannelSubscriptionMode): string {
+function subscriptionEffect(mode: ChannelSubscriptionMode, kind: '群聊' | '私聊'): string {
   if (mode === 'none') return '拒绝该类全部消息';
-  if (mode === 'all') return '未知会话自动以 shadow 建档';
+  if (mode === 'all') return `未知${kind}按对应默认模式建档`;
   return '仅准入已启用的指定会话';
 }
 

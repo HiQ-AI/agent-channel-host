@@ -37,6 +37,7 @@ class FakeSession implements AgentSession {
   stopped = 0;
   blockFirst = false;
   blockStart = false;
+  failFirst = false;
   private resolveActive: ((result: DecisionRun) => void) | null = null;
   private resolveStart: (() => void) | null = null;
 
@@ -51,6 +52,9 @@ class FakeSession implements AgentSession {
 
   runDecision(prompt: string): Promise<DecisionRun> {
     this.prompts.push(prompt);
+    if (this.failFirst && this.prompts.length === 1) {
+      return Promise.reject(new Error('模拟会话级决策失败'));
+    }
     if (this.blockFirst && this.prompts.length === 1) {
       return new Promise((resolve) => { this.resolveActive = resolve; });
     }
@@ -79,15 +83,55 @@ class FakeRuntime implements RuntimeAdapter {
   readonly sessions: FakeSession[] = [];
   blockFirst = false;
   blockStart = false;
+  failFirst = false;
 
   createSession(_conversation: Conversation): AgentSession {
     const session = new FakeSession();
     session.blockFirst = this.blockFirst;
     session.blockStart = this.blockStart;
+    session.failFirst = this.failFirst;
     this.sessions.push(session);
     return session;
   }
 }
+
+test('会话级决策失败不升级为 Host fatal，后续消息仍由同一 Channel 处理', async () => {
+  const config = defaultConfig('scheduler-decision-isolation', '.', 'Agent', 'role');
+  config.scheduling.quietWindowMilliseconds = 0;
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'decision-isolation-user', title: '隔离私聊',
+    responsibility: '回答问题', mode: 'shadow', workerWarmSeconds: 60,
+  });
+  const runtime = new FakeRuntime();
+  runtime.failFirst = true;
+  const fatalErrors: Error[] = [];
+  const scheduler = new EventDrivenScheduler(
+    config,
+    store,
+    new Map([['dingtalk\0default', new FakeChannel()]]),
+    new Map([['codex', runtime]]),
+    () => undefined,
+    (error) => fatalErrors.push(error),
+    10,
+  );
+  try {
+    admit(store, conversation, 'decision-failure-1');
+    scheduler.signal(conversation.id);
+    await waitFor(() => store.status().failed_messages === 1);
+    assert.deepEqual(fatalErrors, []);
+
+    admit(store, conversation, 'decision-recovery-2');
+    scheduler.signal(conversation.id);
+    await waitFor(() => store.status().processed === 1);
+    assert.deepEqual(fatalErrors, []);
+    assert.equal(runtime.sessions.length, 1);
+    assert.equal(runtime.sessions[0]!.prompts.length, 2);
+  } finally {
+    await scheduler.stop();
+    store.close();
+  }
+});
 
 test('ready signal 将 burst 聚合为一次 turn，warm TTL 后释放 Worker', async () => {
   const config = defaultConfig('scheduler-burst', '.', 'Agent', 'role');
@@ -326,7 +370,7 @@ test('Channel disabled 时 Host 不启动 Channel 且不获取其 owner', async 
   }
 });
 
-test('Channel 群聊/私聊订阅策略在唯一事件流准入，all 自动建 shadow 档且 disabled 优先拒绝', () => {
+test('Channel 订阅范围与新会话默认模式独立，名称优先取群名或人员姓名且已有 mode 不被覆盖', () => {
   const config = defaultConfig('subscription-policy', '.', '翠丝', '负责编辑器答疑');
   const store = new Store(':memory:');
   try {
@@ -338,12 +382,16 @@ test('Channel 群聊/私聊订阅策略在唯一事件流准入，all 自动建 
     assert.equal(store.listConversations().length, 0);
 
     config.channel.subscriptions.groups = 'all';
+    config.channel.defaultModes.groups = 'reply';
     const auto = resolveEventConversation(config, store, groupEvent);
     assert.equal(auto.reason, 'auto-created');
     assert.equal(auto.conversation?.title, '编辑器讨论群');
     assert.equal(auto.conversation?.responsibility, config.identity.role);
-    assert.equal(auto.conversation?.mode, 'shadow');
+    assert.equal(auto.conversation?.mode, 'reply');
     assert.equal(store.listConversations().length, 1);
+
+    config.channel.defaultModes.groups = 'shadow';
+    assert.equal(resolveEventConversation(config, store, groupEvent).conversation?.mode, 'reply');
 
     store.setConversationEnabled(auto.conversation!.id, false);
     assert.equal(resolveEventConversation(config, store, groupEvent).reason, 'conversation-disabled');
@@ -356,9 +404,24 @@ test('Channel 群聊/私聊订阅策略在唯一事件流准入，all 自动建 
     })!;
     assert.equal(resolveEventConversation(config, store, directEvent).reason, 'conversation-not-authorized');
     config.channel.subscriptions.directs = 'all';
+    config.channel.defaultModes.directs = 'reply';
     const direct = resolveEventConversation(config, store, directEvent);
     assert.equal(direct.reason, 'auto-created');
-    assert.match(direct.conversation?.title ?? '', /^未命名私聊 · [0-9a-f]{8}$/);
+    assert.equal(direct.conversation?.title, '同事甲');
+    assert.equal(direct.conversation?.mode, 'reply');
+
+    const anonymous = normalizeDwsEvent({
+      type: 'user_im_message_receive_o2o_all', event_id: 'direct-policy-2',
+      sender_open_dingtalk_id: 'direct-anonymous', content: '私聊',
+    })!;
+    const anonymousConversation = resolveEventConversation(config, store, anonymous).conversation!;
+    assert.match(anonymousConversation.title, /^私聊 · [0-9a-f]{8}$/);
+    assert.doesNotMatch(anonymousConversation.title, /未命名/);
+    const namedLater = normalizeDwsEvent({
+      type: 'user_im_message_receive_o2o_all', event_id: 'direct-policy-3',
+      sender_open_dingtalk_id: 'direct-anonymous', sender_name: '后来取得姓名', content: '再次私聊',
+    })!;
+    assert.equal(resolveEventConversation(config, store, namedLater).conversation?.title, '后来取得姓名');
   } finally {
     store.close();
   }

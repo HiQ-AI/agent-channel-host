@@ -41,7 +41,7 @@ flowchart LR
 2. `ConversationHost / EventDrivenScheduler` 负责 route binding、durable inbox、ready signal、lease/claim、合批、取消、Worker 生命周期和状态快照，不理解具体 Channel event key 或 runtime CLI 参数。
 3. `RuntimeAdapter / AgentSession` 负责启动 runtime 自己的命令、创建/恢复 session、解析 structured decision、取消活动进程和暴露 session/process identity。当前实现是 Codex CLI；Claude Code、Gemini CLI、Qwen CLI 应各自实现这个契约，不复制 Host、Store 或 Channel。
 
-配置也按这三类职责拆分：`channel`、`runtime`、`scheduling`。当前版本只注册 `dingtalk` 与 `codex`，未知 adapter 会明确失败。每个 Channel 内再分别配置群聊和私聊的准入范围；该策略不改变底层唯一 owner。
+配置也按这三类职责拆分：`channel`、`runtime`、`scheduling`。当前版本只注册 `dingtalk` 与 `codex`，未知 adapter 会明确失败。每个 Channel 内分别配置群聊/私聊的准入范围和新 Conversation 默认模式；这些策略不改变底层唯一 owner。
 
 ## 前置条件
 
@@ -114,7 +114,7 @@ Windows 默认数据目录：
 
 ## 添加授权会话
 
-群聊按标题调用 DWS 搜索，并要求唯一精确匹配。新会话默认 `shadow`：正常处理和留证，但不发送。
+群聊按标题调用 DWS 搜索，并要求唯一精确匹配。省略 `--mode` 时使用 Channel 的“群聊默认模式”；新配置默认 `shadow`，即正常处理和留证但不发送。
 
 ```powershell
 agent-channel conversation add `
@@ -140,7 +140,7 @@ agent-channel conversation add `
   --mode shadow
 ```
 
-`--responsibility` 省略时使用 `identity.role`。`conversation disable/enable --id <UUID>` 控制指定会话；未准入 conversation 的事件只记录脱敏拒绝原因，不持久化正文。
+`--responsibility` 省略时使用 `identity.role`。`--mode` 省略时按 kind 使用“群聊默认模式”或“私聊默认模式”。`conversation disable/enable --id <UUID>` 控制指定会话；未准入 conversation 的事件只记录脱敏拒绝原因，不持久化正文。
 
 ### Channel 订阅范围
 
@@ -148,7 +148,9 @@ agent-channel conversation add `
 
 - `none`：该类消息全部拒绝；
 - `selected`：仅准入已登记且 enabled 的 Conversation；这是旧配置和新 Instance 的默认值；
-- `all`：未知 Conversation 收到首条消息时自动以 Agent 默认职责、`shadow` mode 和当前 runtime 建档，再持久准入。显式 disabled 的 Conversation 仍然拒绝，不会被 `all` 绕过。
+- `all`：未知 Conversation 收到首条消息时自动以 Agent 默认职责、对应默认模式和当前 runtime 建档，再持久准入。显式 disabled 的 Conversation 仍然拒绝，不会被 `all` 绕过。
+
+“群聊默认模式”和“私聊默认模式”分别取 `shadow/reply`，只影响之后自动建档或未显式指定 mode 的新 Conversation；已有 Conversation 的 mode 不会被批量改写。`reply` 表示 Host 允许职责内决定进入发送门禁，不表示每条消息都必须回复。旧 version 2 配置缺少这两个字段时均按 `shadow` 加载。
 
 配置位于 `config.yaml`：
 
@@ -161,9 +163,12 @@ channel:
   subscriptions:
     groups: selected
     directs: selected
+  defaultModes:
+    groups: shadow
+    directs: shadow
 ```
 
-`none/selected/all` 是唯一共享事件流上的 Host 准入策略。无论选择哪一种，DingTalk 仍然只有一个 Channel owner、一个 bus，以及共享的群聊/私聊 consumer；不会为每个群或私聊创建接收服务。交互式 `view` 可在 Instance 的 Channel 页面逐项切换策略。View-owned Host 会按新配置重启；attached Host 只保存配置并提示外部重启。
+`none/selected/all` 是唯一共享事件流上的 Host 准入策略，`shadow/reply` 是新 Conversation 的默认发言权限，两者互不替代。无论如何配置，DingTalk 仍然只有一个 Channel owner、一个 bus，以及共享的群聊/私聊 consumer；不会为每个群或私聊创建接收服务。交互式 `view` 可在 Instance 的 Channel 页面逐项选择。View-owned Host 会按新配置重启；attached Host 只保存配置并提示外部重启。
 
 ## 离线 runtime canary
 
@@ -210,13 +215,13 @@ agent-channel view
 `view` 会从用户状态目录发现全部已初始化 instance。顶层固定为 `总览 | 全局设置`，不会把某个 instance 的配置误称为全局设置：
 
 - `总览` 只展示 INSTANCES 索引、跨实例消息汇总和全局告警，不重复铺开具体 Channel、Conversation、Runtime 或最近消息。Instance 行保留 Host/owner、Channel/Conversation 数、pending 和 alert 数，便于先判断应下钻到哪里。`↑/↓` 选择，`Enter/→` 下钻，`Esc/←` 逐层返回；`Tab` 只切换顶层“总览 / 全局设置”。
-- Instance 详情集中展示该实例的 Channel、最近消息、Conversation、Runtime 和告警。进入 Channel 后，前三项依次切换 `enabled/disabled`、群聊订阅和私聊订阅；后续分区展示指定群聊和指定私聊。群聊末行“搜索并绑定指定群聊”支持输入关键词、选择候选并写入现有 conversation registry；外部群 ID 不在界面展示。
-- 新绑定群组默认 `shadow`，职责继承该 Instance 的 Agent 默认角色，runtime 使用 Instance 当前配置。绑定不创建第二套接收服务、不自动发送消息；Channel disabled 时可先配置群组，重新启用后继续复用原 registry 和 session 映射。
-- 指定私聊继续使用稳定 `openDingTalkId` 登记，当前不按姓名猜测 ID；通过 `conversation add --open-dingtalk-id` 添加后会出现在 Channel 的 DIRECTS 分区，并可下钻修改或删除。
+- Instance 详情集中展示该实例的 Channel、最近消息、Conversation、Runtime 和告警。进入 Channel 后，五项依次为 `enabled/disabled`、群聊订阅、群聊默认模式、私聊订阅、私聊默认模式；后续分区展示指定群聊和指定私聊。群聊末行“搜索并绑定指定群聊”支持输入关键词、选择候选并写入现有 conversation registry；外部群 ID 不在界面展示。
+- 新绑定群组使用“群聊默认模式”，职责继承该 Instance 的 Agent 默认角色，runtime 使用 Instance 当前配置。绑定不创建第二套接收服务；Channel disabled 时可先配置群组，重新启用后继续复用原 registry 和 session 映射。
+- 指定私聊继续使用稳定 `openDingTalkId` 登记，不按姓名猜测 ID；事件提供人员姓名时以姓名作为显示标题，确实拿不到时显示不泄露原始 ID 的稳定占位。通过 `conversation add --open-dingtalk-id` 添加后会出现在 Channel 的 DIRECTS 分区，并可下钻修改或删除。
 - `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 
-每个 Instance 设置页可修改 Agent 身份、runtime model/effort 和合批参数。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、职责、mode、warm TTL 和已观察成员资料；Channel 开关、订阅范围与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
+每个 Instance 设置页可修改 Agent 身份、runtime model/effort 和合批参数。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、职责、mode、warm TTL 和已观察成员资料；`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑，只有名称、职责等自由文本才使用光标编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
 
 ### 删除 Instance 与 Conversation
 
@@ -279,6 +284,7 @@ agent-channel service remove --instance triss
 - Codex 每轮固定 `approval_policy=never`、`sandbox_mode=workspace-write`、network disabled，额外 writable roots 为空；`runtime.cwd` 必须指向专用工作目录。
 - Codex compaction hook 由 Host 为每个子进程内联配置，命令和恢复文件均由本包控制。自动化使用固定版本已审查的 hook 配置，不修改用户级 Codex 配置。
 - 主 session 的命令执行或文件修改一旦出现在 JSONL 证据中，本轮 fail closed，不发送回复。该门禁不替代操作系统账号隔离。
+- Runtime 的结构化决定或实施派发证据不合法时，仅将该 Conversation 的当前 batch 标为 failed 并禁止出站；不会停止唯一 Channel owner，也不会阻断其他 Conversation。成功完成的 `spawn_agent` 调用本身是派发证据，thread ID 只是 runtime 可选的关联信息。
 - 用户配置中的外部 MCP/skills 仍由 Codex CLI 自身加载；部署者必须按其权限模型审计。Host 的 prompt 禁止 runtime 自行调用 Channel 发送工具。
 - 命令模式可观察 provider session 与当前 CLI PID，但不承诺后台 subagent 能在父 CLI 退出后继续运行；这项能力由具体 runtime adapter 决定。
 

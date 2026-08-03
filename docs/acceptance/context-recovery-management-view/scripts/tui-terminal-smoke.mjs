@@ -71,8 +71,12 @@ const keys = [
   [5_700, '\u001b[B'],
   [5_900, '\u001b[C'],
   [6_100, '\u001b[B'],
-  [6_300, '\u001b[B'],
-  [7_000, '\u001b[C'],
+  [6_300, '\u001b[C'],
+  [6_500, '\u001b[B'],
+  [6_700, '\u001b[C'],
+  [6_900, '\u001b[B'],
+  [7_100, '\u001b[B'],
+  [7_300, '\u001b[C'],
   [8_000, '编辑器'],
   [9_000, '\r'],
   [10_000, '\u001b[C'],
@@ -118,6 +122,7 @@ let createdStarted = false;
 let deletedInstance = '';
 const channelToggles = [];
 const subscriptionChanges = [];
+const defaultModeChanges = [];
 const groupSearches = [];
 try {
   await runView(instances, { intervalSeconds: 10, once: false, showContent: false }, {
@@ -138,6 +143,7 @@ try {
     afterSettingApplied: async (instance, entry) => {
       if (entry.key === 'channel:dingtalk:default:enabled') channelToggles.push(instance.name);
       if (entry.key.includes(':subscriptions:')) subscriptionChanges.push(`${entry.key}=${entry.value}`);
+      if (entry.key.includes(':defaultModes:')) defaultModeChanges.push(entry.key);
       return '合成 Host 生命周期回执';
     },
     searchGroups: async (instance, query) => {
@@ -165,7 +171,9 @@ try {
   assert.doesNotMatch(initialFrame, /^CHANNELS$|^CONVERSATIONS$|^RUNTIMES$|编辑器验证群|跨 Channel 私聊/m);
   assert.match(plainTranscript, /Channel 设置 \/ tui-smoke \/ dingtalk\/default/);
   assert.match(plainTranscript, /群聊订阅\s+│\s+all/);
+  assert.match(plainTranscript, /群聊默认模式\s+│\s+reply/);
   assert.match(plainTranscript, /私聊订阅\s+│\s+all/);
+  assert.match(plainTranscript, /私聊默认模式\s+│\s+reply/);
   assert.match(plainTranscript, /GROUPS[\s\S]*DIRECTS/);
   assert.match(plainTranscript, /群组搜索 \/ tui-smoke \/ dingtalk\/default/);
   assert.match(plainTranscript, /合成搜索结果群/);
@@ -204,15 +212,20 @@ try {
     'channel:dingtalk:default:subscriptions:directs=selected',
   ]);
   assert.deepEqual(config.channel.subscriptions, { groups: 'all', directs: 'all' });
+  assert.deepEqual(config.channel.defaultModes, { groups: 'reply', directs: 'reply' });
+  assert.deepEqual(defaultModeChanges, [
+    'channel:dingtalk:default:defaultModes:groups',
+    'channel:dingtalk:default:defaultModes:directs',
+  ]);
   assert.deepEqual(groupSearches, [{ instance: 'tui-smoke', query: '编辑器' }]);
   const searchedConversation = store.listConversations().find((item) => item.title === '合成搜索结果群');
   assert.ok(searchedConversation);
   assert.equal(searchedConversation.responsibility, config.identity.role);
-  assert.equal(searchedConversation.mode, 'shadow');
+  assert.equal(searchedConversation.mode, 'reply');
   await writeFile(resultPath, JSON.stringify({
     ok: true,
     tty: { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY },
-    observed: ['lean-global-overview', 'instance-detail', 'channel-detail', 'channel-toggle', 'group-subscription', 'direct-subscription', 'group-search', 'group-bind', 'conversation-detail', 'delete-confirmation', 'delete-cancel', 'instance-delete', 'immediate-delete-refresh', 'instance-settings', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit-confirmation', 'exit-cancel', 'exit'],
+    observed: ['lean-global-overview', 'instance-detail', 'channel-detail', 'channel-toggle', 'group-subscription', 'group-default-mode', 'direct-subscription', 'direct-default-mode', 'group-search', 'group-bind', 'conversation-detail', 'delete-confirmation', 'delete-cancel', 'instance-delete', 'immediate-delete-refresh', 'instance-settings', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit-confirmation', 'exit-cancel', 'exit'],
     colorObserved: true,
     settingsColumnsDelimited: true,
     instanceCreated: true,
@@ -220,6 +233,7 @@ try {
     groupSearchObserved: groupSearches.length === 1,
     groupBound: Boolean(searchedConversation),
     subscriptionsObserved: config.channel.subscriptions.groups === 'all' && config.channel.subscriptions.directs === 'all',
+    defaultModesObserved: config.channel.defaultModes.groups === 'reply' && config.channel.defaultModes.directs === 'reply',
     deleteConfirmationObserved: true,
     instanceDeleteObserved: deletedInstance === 'created-agent',
     immediateDeleteRefreshObserved: Boolean(deletedFrame),

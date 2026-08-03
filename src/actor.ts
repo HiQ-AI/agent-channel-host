@@ -26,7 +26,6 @@ export class ConversationWorker {
     private readonly sender: Pick<ChannelAdapter, 'send'>,
     private readonly log: (record: Record<string, unknown>) => void,
     private readonly onIdle: (worker: ConversationWorker) => void = () => undefined,
-    private readonly fatal: (error: Error) => void = () => undefined,
     private readonly loadGroupHistory: (conversation: Conversation) => Promise<RecentGroupHistory>
       = (target) => fetchRecentGroupHistory(config, target),
   ) {}
@@ -290,7 +289,6 @@ export class ConversationWorker {
       type: 'WORKER_ERROR', conversationId: this.conversation.id,
       sequences: events.map((event) => event.sequence), error: error.message,
     });
-    this.fatal(error);
   }
 
   async stop(): Promise<void> {

@@ -12,6 +12,9 @@ channel:
   subscriptions:
     groups: selected
     directs: selected
+  defaultModes:
+    groups: shadow
+    directs: shadow
 runtime:
   id: codex
   command: codex

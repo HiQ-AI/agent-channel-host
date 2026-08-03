@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import type { HostConfig } from './config.js';
 import type { ChannelAdapter, RuntimeAdapter } from './contracts.js';
 import { statePath } from './paths.js';
@@ -8,6 +7,7 @@ import { DwsChannelAdapter } from './dws.js';
 import { CodexRuntimeAdapter } from './codex-runtime.js';
 import { ConversationWorker } from './actor.js';
 import type { Conversation, NormalizedEvent } from './types.js';
+import { anonymousConversationTitle, discoveredConversationTitle, isGeneratedConversationTitle } from './conversation-title.js';
 
 interface WorkerHandle {
   worker: ConversationWorker;
@@ -47,9 +47,13 @@ export function resolveEventConversation(
     event.conversationExternalId,
   );
   if (existing) {
-    return existing.enabled
-      ? { conversation: existing, created: false, reason: 'authorized' }
-      : { conversation: null, created: false, reason: 'conversation-disabled' };
+    if (!existing.enabled) return { conversation: null, created: false, reason: 'conversation-disabled' };
+    const discoveredTitle = discoveredConversationTitle(event);
+    if (discoveredTitle && isGeneratedConversationTitle(existing.title, event.kind, event.conversationExternalId)) {
+      store.setConversationTitle(existing.id, discoveredTitle);
+      return { conversation: store.getConversation(existing.id) ?? existing, created: false, reason: 'authorized' };
+    }
+    return { conversation: existing, created: false, reason: 'authorized' };
   }
   if (subscription === 'selected') {
     return { conversation: null, created: false, reason: 'conversation-not-authorized' };
@@ -61,9 +65,9 @@ export function resolveEventConversation(
       channelProfileId: event.channelProfileId,
       kind: event.kind,
       externalId: event.conversationExternalId,
-      title: event.conversationTitle?.trim() || anonymousConversationTitle(event),
+      title: discoveredConversationTitle(event) || anonymousConversationTitle(event.kind, event.conversationExternalId),
       responsibility: config.identity.role,
-      mode: 'shadow',
+      mode: event.kind === 'group' ? config.channel.defaultModes.groups : config.channel.defaultModes.directs,
       runtimeId: config.runtime.id,
     });
   } catch (error) {
@@ -145,7 +149,6 @@ export class EventDrivenScheduler {
       channel,
       this.log,
       (idleWorker) => this.scheduleWarmRelease(idleWorker),
-      this.fatal,
     );
     const leaseKey = `conversation:${conversation.id}`;
     if (!this.store.acquireLease(leaseKey, worker.workerId, Date.now(), 30_000)) {
@@ -433,9 +436,4 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
 
 function channelKey(channelId: string, profileId: string): string {
   return `${channelId}\u0000${profileId}`;
-}
-
-function anonymousConversationTitle(event: NormalizedEvent): string {
-  const digest = createHash('sha256').update(event.conversationExternalId).digest('hex').slice(0, 8);
-  return `${event.kind === 'group' ? '未命名群聊' : '未命名私聊'} · ${digest}`;
 }

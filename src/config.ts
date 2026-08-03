@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import YAML from 'yaml';
 import { z } from 'zod';
 import { configPath } from './paths.js';
+import { CONVERSATION_MODES } from './types.js';
 
 export const CURRENT_CODEX_VERSION = 'codex-cli 0.145.0';
 export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
@@ -29,6 +30,10 @@ const configSchema = z.object({
       groups: z.enum(CHANNEL_SUBSCRIPTION_MODES).default('selected'),
       directs: z.enum(CHANNEL_SUBSCRIPTION_MODES).default('selected'),
     }).default({ groups: 'selected', directs: 'selected' }),
+    defaultModes: z.object({
+      groups: z.enum(CONVERSATION_MODES).default('shadow'),
+      directs: z.enum(CONVERSATION_MODES).default('shadow'),
+    }).default({ groups: 'shadow', directs: 'shadow' }),
   }),
   runtime: z.object({
     id: z.literal('codex'),
@@ -69,6 +74,10 @@ export function defaultConfig(instance: string, cwd: string, name: string, role:
       subscriptions: {
         groups: 'selected',
         directs: 'selected',
+      },
+      defaultModes: {
+        groups: 'shadow',
+        directs: 'shadow',
       },
     },
     runtime: {

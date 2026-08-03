@@ -18,6 +18,7 @@ import type {
   SessionRecord,
 } from './types.js';
 import { safeName } from './paths.js';
+import { displayConversationTitle } from './conversation-title.js';
 
 type Row = Record<string, unknown>;
 const LEGACY_MAX_IDLE_TIMEOUT_MINUTES = 35_791;
@@ -1089,7 +1090,10 @@ export class Store {
         channelId: conversation.channelId,
         channelProfileId: conversation.channelProfileId,
         kind: conversation.kind,
-        title: conversation.title,
+        title: displayConversationTitle(
+          conversation,
+          members.find((member) => member.externalUserId === conversation.externalId)?.displayName ?? null,
+        ),
         responsibility: conversation.responsibility,
         policyVersion: conversation.policyVersion,
         mode: conversation.mode,
@@ -1169,7 +1173,9 @@ export class Store {
         (SELECT COUNT(*) FROM inbound_events e
           WHERE e.conversation_id=c.id AND e.processing_state IN ('admitted','claimed')) AS pending_count,
         (SELECT COALESCE(MAX(sequence),0) FROM inbound_events e WHERE e.conversation_id=c.id) AS latest_sequence,
-        (SELECT COUNT(*) FROM conversation_members m WHERE m.conversation_id=c.id) AS member_count
+        (SELECT COUNT(*) FROM conversation_members m WHERE m.conversation_id=c.id) AS member_count,
+        (SELECT m.display_name FROM conversation_members m
+          WHERE m.conversation_id=c.id AND m.external_user_id=c.external_id LIMIT 1) AS direct_display_name
       FROM conversations c
       LEFT JOIN runtime_workers w ON w.conversation_id=c.id
       LEFT JOIN runtime_sessions s ON s.conversation_id=c.id
@@ -1179,7 +1185,9 @@ export class Store {
     `).all() as Row[];
     const messages = this.db.prepare(`
       SELECT e.conversation_id,e.sequence,e.received_at,e.processing_state,e.sender_name,e.sender_id,e.body_json,
-        c.title,c.kind,c.channel_id,c.runtime_id,d.action,o.state AS outbox_state
+        c.title,c.kind,c.external_id,c.channel_id,c.runtime_id,d.action,o.state AS outbox_state,
+        (SELECT m.display_name FROM conversation_members m
+          WHERE m.conversation_id=c.id AND m.external_user_id=c.external_id LIMIT 1) AS direct_display_name
       FROM inbound_events e
       JOIN conversations c ON c.id=e.conversation_id
       LEFT JOIN decisions d ON d.inbound_event_id=e.id
@@ -1187,7 +1195,10 @@ export class Store {
       ORDER BY e.received_at DESC,e.sequence DESC LIMIT 12
     `).all() as Row[];
     const failedOutbox = this.db.prepare(`
-      SELECT c.title,o.error,o.updated_at FROM outbox o
+      SELECT c.title,c.kind,c.external_id,o.error,o.updated_at,
+        (SELECT m.display_name FROM conversation_members m
+          WHERE m.conversation_id=c.id AND m.external_user_id=c.external_id LIMIT 1) AS direct_display_name
+      FROM outbox o
       JOIN conversations c ON c.id=o.conversation_id
       WHERE o.state='failed' ORDER BY o.updated_at DESC LIMIT 5
     `).all() as Row[];
@@ -1208,13 +1219,13 @@ export class Store {
         error: String(row.error), at: String(row.updated_at),
       })),
       ...conversations.filter((row) => row.worker_error).map((row) => ({
-        scope: 'worker', target: String(row.title), error: String(row.worker_error), at: String(row.worker_updated_at),
+        scope: 'worker', target: displayTitleFromRow(row), error: String(row.worker_error), at: String(row.worker_updated_at),
       })),
       ...runtimeAdapters.filter((row) => row.error).map((row) => ({
         scope: 'runtime', target: String(row.runtime_id), error: String(row.error), at: String(row.updated_at),
       })),
       ...failedOutbox.map((row) => ({
-        scope: 'outbox', target: String(row.title), error: String(row.error ?? 'send-failed'), at: String(row.updated_at),
+        scope: 'outbox', target: displayTitleFromRow(row), error: String(row.error ?? 'send-failed'), at: String(row.updated_at),
       })),
       ...failedOnboarding.map((row) => ({
         scope: 'onboarding', target: String(row.title), error: String(row.error ?? 'onboarding-failed'), at: String(row.updated_at),
@@ -1247,7 +1258,7 @@ export class Store {
       })),
       conversations: conversations.map((row) => ({
         id: String(row.id), idPrefix: String(row.id).slice(0, 8), channelId: String(row.channel_id),
-        channelProfileId: String(row.channel_profile_id), kind: String(row.kind), title: String(row.title),
+        channelProfileId: String(row.channel_profile_id), kind: String(row.kind), title: displayTitleFromRow(row),
         responsibility: String(row.responsibility), policyVersion: Number(row.policy_version),
         mode: String(row.mode), runtimeId: String(row.runtime_id), enabled: Boolean(row.enabled),
         workerWarmSeconds: Number(row.worker_warm_seconds), pending: Number(row.pending_count),
@@ -1267,7 +1278,7 @@ export class Store {
       })),
       messages: messages.map((row) => ({
         conversationId: row.conversation_id,
-        title: row.title,
+        title: displayTitleFromRow(row),
         kind: row.kind,
         channelId: row.channel_id,
         runtimeId: row.runtime_id,
@@ -1283,7 +1294,7 @@ export class Store {
         runtimeId: String(row.runtime_id), label: row.runtime_label ? String(row.runtime_label) : String(row.runtime_id),
         model: row.runtime_model ? String(row.runtime_model) : null,
         adapterState: row.runtime_adapter_state ? String(row.runtime_adapter_state) : 'unknown',
-        conversation: String(row.title),
+        conversation: displayTitleFromRow(row),
         workerState: String(row.worker_state ?? 'stopped'),
         processId: row.process_id === null || row.process_id === undefined ? null : Number(row.process_id),
         sessionState: row.session_state ? String(row.session_state) : 'unprovisioned',
@@ -1293,6 +1304,17 @@ export class Store {
       alerts,
     };
   }
+}
+
+function displayTitleFromRow(row: Row): string {
+  return displayConversationTitle(
+    {
+      kind: row.kind as ConversationKind,
+      externalId: String(row.external_id),
+      title: String(row.title),
+    },
+    row.direct_display_name ? String(row.direct_display_name) : null,
+  );
 }
 
 function mapConversation(row: Row | undefined): Conversation | null {

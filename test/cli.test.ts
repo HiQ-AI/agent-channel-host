@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { loadConfig, writeConfig } from '../src/config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,7 +58,17 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     const addedBody = JSON.parse(added.stdout);
     assert.equal(addedBody.channelId, 'dingtalk');
     assert.equal(addedBody.runtimeId, 'codex');
+    assert.equal(addedBody.mode, 'shadow');
     assert.equal(addedBody.workerWarmSeconds, 30);
+
+    const currentConfig = await loadConfig('test', join(root, 'instances', 'test', 'config.yaml'));
+    currentConfig.channel.defaultModes.directs = 'reply';
+    await writeConfig(currentConfig, join(root, 'instances', 'test', 'config.yaml'));
+    const defaultReply = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'add', '--instance', 'test', '--kind', 'direct', '--title', '默认回复私聊',
+      '--open-dingtalk-id', 'open-default-reply-user',
+    ], { encoding: 'utf8', env });
+    assert.equal(JSON.parse(defaultReply.stdout).mode, 'reply');
 
     const changed = await execFileAsync(process.execPath, [
       cli, 'conversation', 'worker', '--instance', 'test', '--id', addedBody.id,
