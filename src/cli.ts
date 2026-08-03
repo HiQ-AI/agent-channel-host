@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { access } from 'node:fs/promises';
 import {
-  CODEX_REASONING_EFFORTS, defaultConfig, loadConfig, writeConfig, writeInitialConfig,
+  CODEX_REASONING_EFFORTS, loadConfig, writeConfig,
 } from './config.js';
 import { configPath, discoverInstances, statePath } from './paths.js';
 import { Store } from './store.js';
@@ -11,8 +10,11 @@ import { CodexCommandSession, verifyCodexCommand } from './codex-command.js';
 import { runHost } from './host.js';
 import { installUserService, removeUserService, windowsServicePlan } from './service.js';
 import { MAX_WORKER_WARM_SECONDS } from './types.js';
-import { assertInteractiveView, runView, shouldStartHostForView, type ViewInstance } from './view.js';
+import {
+  assertInteractiveView, runView, shouldStartHostForView, type SettingEntry, type ViewInstance,
+} from './view.js';
 import { CLI_NAME } from './product.js';
+import { initializeInstance } from './instance.js';
 
 const program = new Command();
 program
@@ -32,29 +34,23 @@ program.command('init')
   .option('--effort <effort>', '默认推理强度', 'low')
   .option('--dws-profile <profile>', '可选的 DWS corpId:userId profile')
   .action(async (options) => {
-    const path = configPath(options.instance);
-    await access(path).then(
-      () => { throw new Error(`配置已存在：${path}`); },
-      () => undefined,
-    );
-    const config = defaultConfig(options.instance, options.cwd, options.name, options.role);
-    config.channel.command = options.dwsCommand;
-    config.runtime.command = options.codexCommand;
-    config.runtime.model = options.model;
-    config.runtime.effort = parseReasoningEffort(options.effort);
-    if (options.dwsProfile) config.channel.profile = options.dwsProfile;
-    await writeInitialConfig(config, path);
-    const store = new Store(statePath(options.instance));
-    store.setChannelConnection({
-      channelId: config.channel.id, profileId: config.channel.profileId, label: 'DingTalk DWS',
-      state: 'stopped', ownerPid: null,
+    const initialized = await initializeInstance({
+      instance: options.instance,
+      cwd: options.cwd,
+      name: options.name,
+      role: options.role,
+      dwsCommand: options.dwsCommand,
+      codexCommand: options.codexCommand,
+      model: options.model,
+      effort: parseReasoningEffort(options.effort),
+      dwsProfile: options.dwsProfile,
     });
-    store.setRuntimeAdapter({
-      runtimeId: config.runtime.id, label: 'Codex CLI', state: 'stopped',
-      model: config.runtime.model, contextRecovery: 'session-start-hook',
+    print({
+      ok: true,
+      instance: options.instance,
+      configPath: initialized.configFile,
+      statePath: initialized.stateFile,
     });
-    store.close();
-    print({ ok: true, instance: options.instance, configPath: path, statePath: statePath(options.instance) });
   });
 
 const configCommand = program.command('config').description('管理 Host instance 运行配置');
@@ -90,7 +86,9 @@ program.command('doctor')
   .action(async (options) => {
     const config = await loadConfig(options.instance);
     const [dws, runtime] = await Promise.all([
-      dwsDoctor(config),
+      config.channel.enabled
+        ? dwsDoctor(config)
+        : Promise.resolve({ version: 'disabled', eventStatus: { bus: { entry: { state: 'disabled' } }, subscriptions: [] } }),
       verifyCodexCommand(config),
     ]);
     const eventStatus = dws.eventStatus as Record<string, unknown>;
@@ -226,7 +224,7 @@ program.command('status')
   });
 
 program.command('view')
-  .description('启动或 attach 全部 instance Host，并打开聚合总览、详情和设置界面')
+  .description('启动或 attach 全部 instance Host，并打开总览下钻管理与独立全局设置界面')
   .option('--interval <seconds>', '刷新间隔秒数', parseViewInterval, 1)
   .option('--once', '只读渲染一次且不启动 Host；管道和脚本必须使用此模式', false)
   .option('--show-content', '在当前用户本地显示截断消息正文预览', false)
@@ -244,6 +242,7 @@ program.command('view')
         instances.push({
           name,
           config: await loadConfig(name),
+          configFile: configPath(name),
           store: new Store(statePath(name)),
           hostOwnership: 'readonly',
           notices: [],
@@ -253,31 +252,71 @@ program.command('view')
       for (const instance of instances) instance.store.close();
       throw error;
     }
-    const startedHosts: Array<{ instance: ViewInstance; abort: AbortController; promise: Promise<void> }> = [];
+    const startedHosts = new Map<string, { instance: ViewInstance; abort: AbortController; promise: Promise<void> }>();
     const hostFailures: Array<{ instance: string; error: Error }> = [];
+    const startManagedHost = (instance: ViewInstance) => {
+      const abort = new AbortController();
+      const promise = runHost(instance.config, {
+        signal: abort.signal,
+        handleProcessSignals: false,
+        log: (record) => {
+          instance.notices.push(hostNotice(record));
+          if (instance.notices.length > 50) instance.notices.shift();
+        },
+      }).catch((error) => {
+        if (!abort.signal.aborted) {
+          hostFailures.push({ instance: instance.name, error: error as Error });
+          instance.notices.push(`Host 异常：${(error as Error).message}`);
+        }
+      }).finally(() => {
+        if (startedHosts.get(instance.name)?.promise === promise) startedHosts.delete(instance.name);
+      });
+      instance.hostOwnership = 'view';
+      startedHosts.set(instance.name, { instance, abort, promise });
+    };
+    const stopManagedHost = async (instance: ViewInstance) => {
+      const current = startedHosts.get(instance.name);
+      if (!current) return;
+      current.abort.abort();
+      await current.promise;
+    };
+    const restartManagedHost = async (instance: ViewInstance, entry: SettingEntry): Promise<string> => {
+      if (!entry.restartHost) return `${entry.label} 已保存`;
+      if (instance.hostOwnership !== 'view') {
+        return `${entry.label} 已保存；当前是 ${instance.hostOwnership} Host，请重启外部 Host 后生效`;
+      }
+      await stopManagedHost(instance);
+      startManagedHost(instance);
+      return `${entry.label} 已保存；Instance Host 已按新配置重启`;
+    };
     try {
       for (const instance of instances) {
         const startHost = shouldStartHostForView(options.once, instance.store.status());
         instance.hostOwnership = options.once ? 'readonly' : startHost ? 'view' : 'attached';
         if (!startHost) continue;
-        const abort = new AbortController();
-        const promise = runHost(instance.config, {
-          signal: abort.signal,
-          handleProcessSignals: false,
-          log: (record) => {
-            instance.notices.push(hostNotice(record));
-            if (instance.notices.length > 50) instance.notices.shift();
-          },
-        }).catch((error) => {
-          hostFailures.push({ instance: instance.name, error: error as Error });
-          instance.notices.push(`Host 异常：${(error as Error).message}`);
-        });
-        startedHosts.push({ instance, abort, promise });
+        startManagedHost(instance);
       }
-      await runView(instances, viewOptions);
+      await runView(instances, viewOptions, {
+        createInstance: async (input) => {
+          const initialized = await initializeInstance({ ...input, channelEnabled: false });
+          return {
+            name: initialized.config.instance,
+            config: initialized.config,
+            configFile: initialized.configFile,
+            store: new Store(initialized.stateFile),
+            hostOwnership: 'readonly',
+            notices: [],
+          };
+        },
+        startInstance: async (instance) => {
+          if (!options.once) startManagedHost(instance);
+        },
+        afterSettingApplied: restartManagedHost,
+      });
     } finally {
-      for (const host of startedHosts) host.abort.abort();
-      await Promise.all(startedHosts.map((host) => host.promise));
+      const activeHosts = [...startedHosts.values()];
+      for (const host of activeHosts) host.abort.abort();
+      await Promise.all(activeHosts.map((host) => host.promise));
       for (const instance of instances) instance.store.close();
     }
     if (hostFailures.length > 0) {

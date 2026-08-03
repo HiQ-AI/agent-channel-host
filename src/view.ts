@@ -1,9 +1,10 @@
 import type { HostConfig } from './config.js';
-import { validateConfig, writeConfig } from './config.js';
+import { configuredChannels, validateConfig, writeConfig } from './config.js';
 import type { Store } from './store.js';
 import { CLI_NAME } from './product.js';
 import { MAX_WORKER_WARM_SECONDS } from './types.js';
 import { publishRecoveryContext } from './recovery-context.js';
+import { safeName } from './paths.js';
 
 type Json = Record<string, unknown>;
 type TaggedJson = Json & { instance: string };
@@ -17,6 +18,7 @@ export interface ViewOptions {
 export interface ViewInstance {
   name: string;
   config: HostConfig;
+  configFile?: string;
   store: Store;
   hostOwnership: 'attached' | 'view' | 'readonly';
   notices: string[];
@@ -29,16 +31,42 @@ export interface ManagementViewState {
   selectedSetting: number;
   detailInstanceName: string | null;
   detailConversationId: string | null;
+  settingsInstanceName: string | null;
   editing: { key: string; label: string; value: string } | null;
+  creatingInstance: InstanceCreationDraft | null;
   notice: string | null;
 }
 
 export interface SettingEntry {
   key: string;
+  section: 'instance' | 'channels' | 'conversation' | 'members';
+  input: 'text' | 'toggle';
   label: string;
   value: string;
   hint: string;
+  restartHost: boolean;
   apply(value: string): Promise<void>;
+}
+
+export interface NewInstanceInput {
+  instance: string;
+  cwd: string;
+  name: string;
+  role: string;
+}
+
+export interface ManagementViewActions {
+  createInstance?(input: NewInstanceInput): Promise<ViewInstance>;
+  startInstance?(instance: ViewInstance): Promise<void>;
+  afterSettingApplied?(instance: ViewInstance, entry: SettingEntry): Promise<string | void>;
+}
+
+type InstanceCreationStep = 'instance' | 'cwd' | 'name' | 'role';
+
+interface InstanceCreationDraft {
+  step: InstanceCreationStep;
+  values: Partial<NewInstanceInput>;
+  value: string;
 }
 
 export function createManagementViewState(): ManagementViewState {
@@ -49,7 +77,9 @@ export function createManagementViewState(): ManagementViewState {
     selectedSetting: 0,
     detailInstanceName: null,
     detailConversationId: null,
+    settingsInstanceName: null,
     editing: null,
+    creatingInstance: null,
     notice: null,
   };
 }
@@ -68,7 +98,11 @@ export function shouldUseColor(isTTY: boolean, env: NodeJS.ProcessEnv = process.
   return isTTY && env.NO_COLOR === undefined && env.TERM !== 'dumb';
 }
 
-export async function runView(instances: ViewInstance[], options: ViewOptions): Promise<void> {
+export async function runView(
+  instances: ViewInstance[],
+  options: ViewOptions,
+  actions: ManagementViewActions = {},
+): Promise<void> {
   assertInteractiveView(options);
   if (options.once) {
     process.stdout.write(`${renderStatusView(instances, options.showContent, process.stdout.columns ?? 120)}\n`);
@@ -93,8 +127,16 @@ export async function runView(instances: ViewInstance[], options: ViewOptions): 
     const selectedId = conversations[state.selectedConversation]?.id ?? null;
     const detailId = state.detailConversationId ?? selectedId;
     const detail = detailInstance && detailId ? detailInstance.store.conversationDetail(detailId, options.showContent) : null;
-    const settings = selectedInstance
-      ? createSettingEntries(selectedInstance.config, selectedInstance.store, selectedIdForSettings(state, selectedInstance))
+    const settingsInstance = state.settingsInstanceName
+      ? instances.find((instance) => instance.name === state.settingsInstanceName) ?? null
+      : null;
+    const settings = settingsInstance
+      ? createSettingEntries(
+        settingsInstance.config,
+        settingsInstance.store,
+        selectedIdForSettings(state, settingsInstance),
+        settingsInstance.configFile,
+      )
       : [];
     if (state.selectedSetting >= settings.length) state.selectedSetting = Math.max(0, settings.length - 1);
     return renderManagementView(
@@ -111,7 +153,7 @@ export async function runView(instances: ViewInstance[], options: ViewOptions): 
   const onData = (chunk: Buffer) => {
     if (inputBusy) return;
     inputBusy = true;
-    void handleManagementViewInput(chunk.toString('utf8'), state, instances, resolveStop)
+    void handleManagementViewInput(chunk.toString('utf8'), state, instances, resolveStop, actions)
       .catch((error) => { state.notice = (error as Error).message; })
       .finally(() => {
         inputBusy = false;
@@ -144,9 +186,17 @@ export async function handleManagementViewInput(
   state: ManagementViewState,
   instances: ViewInstance[],
   stop: () => void,
+  actions: ManagementViewActions = {},
 ): Promise<void> {
   normalizeSelection(state, instances);
-  const selectedInstance = instances[state.selectedInstance] ?? null;
+  if (state.creatingInstance) {
+    await handleInstanceCreationInput(key, state, instances, stop, actions);
+    return;
+  }
+  const overviewInstance = instances[state.selectedInstance] ?? null;
+  const settingsInstance = state.settingsInstanceName
+    ? instances.find((instance) => instance.name === state.settingsInstanceName) ?? null
+    : null;
   if (state.editing) {
     if (key === '\u001b') {
       state.editing = null;
@@ -154,13 +204,19 @@ export async function handleManagementViewInput(
       return;
     }
     if (key === '\r' || key === '\n') {
-      if (!selectedInstance) throw new Error('没有可配置的 instance');
-      const selectedId = selectedIdForSettings(state, selectedInstance);
-      const entry = createSettingEntries(selectedInstance.config, selectedInstance.store, selectedId)
+      if (!settingsInstance) throw new Error('没有可配置的 instance');
+      const selectedId = selectedIdForSettings(state, settingsInstance);
+      const entry = createSettingEntries(
+        settingsInstance.config,
+        settingsInstance.store,
+        selectedId,
+        settingsInstance.configFile,
+      )
         .find((item) => item.key === state.editing!.key);
       if (!entry) throw new Error('设置项已变化，请重新选择');
       await entry.apply(state.editing.value);
-      state.notice = `${entry.label} 已保存`;
+      const actionNotice = await actions.afterSettingApplied?.(settingsInstance, entry);
+      state.notice = actionNotice ?? `${entry.label} 已保存`;
       state.editing = null;
       return;
     }
@@ -178,21 +234,27 @@ export async function handleManagementViewInput(
   }
   if (key === '\t' || key === '\u001b[C' || key === '\u001b[D') {
     state.tab = state.tab === 'overview' ? 'settings' : 'overview';
-    state.detailInstanceName = null;
-    state.detailConversationId = null;
+    state.settingsInstanceName = null;
     state.notice = null;
     return;
   }
   if (key === '\u001b') {
-    if (state.detailConversationId) state.detailConversationId = null;
+    if (state.tab === 'settings') {
+      state.tab = 'overview';
+    } else if (state.settingsInstanceName) {
+      state.settingsInstanceName = null;
+      state.selectedSetting = 0;
+    } else if (state.detailConversationId) state.detailConversationId = null;
     else state.detailInstanceName = null;
     state.notice = null;
     return;
   }
-  if (state.tab === 'settings' && (key === '[' || key === ']')) {
-    const direction = key === '[' ? -1 : 1;
-    state.selectedInstance = clamp(state.selectedInstance + direction, 0, Math.max(0, instances.length - 1));
-    state.selectedConversation = 0;
+  if (state.tab === 'overview' && !state.detailInstanceName && !state.settingsInstanceName && key.toLowerCase() === 'a') {
+    startInstanceCreation(state, actions);
+    return;
+  }
+  if (state.tab === 'overview' && state.detailInstanceName && key.toLowerCase() === 's') {
+    state.settingsInstanceName = state.detailInstanceName;
     state.selectedSetting = 0;
     state.notice = null;
     return;
@@ -201,39 +263,137 @@ export async function handleManagementViewInput(
     : key === '\u001b[B' || key.toLowerCase() === 'j' ? 1 : 0;
   if (direction !== 0) {
     if (state.tab === 'overview') {
-      if (!state.detailInstanceName) {
-        state.selectedInstance = clamp(state.selectedInstance + direction, 0, Math.max(0, instances.length - 1));
+      if (state.settingsInstanceName) {
+        const selectedId = settingsInstance ? selectedIdForSettings(state, settingsInstance) : null;
+        const total = settingsInstance
+          ? createSettingEntries(
+            settingsInstance.config,
+            settingsInstance.store,
+            selectedId,
+            settingsInstance.configFile,
+          ).length
+          : 0;
+        state.selectedSetting = clamp(state.selectedSetting + direction, 0, Math.max(0, total - 1));
+      } else if (!state.detailInstanceName) {
+        state.selectedInstance = clamp(state.selectedInstance + direction, 0, instances.length);
         state.selectedConversation = 0;
       } else {
         const detailInstance = instances.find((instance) => instance.name === state.detailInstanceName);
         const total = detailInstance?.store.listConversations().length ?? 0;
         state.selectedConversation = clamp(state.selectedConversation + direction, 0, Math.max(0, total - 1));
       }
-    } else {
-      const selectedId = selectedInstance ? selectedIdForSettings(state, selectedInstance) : null;
-      const total = selectedInstance
-        ? createSettingEntries(selectedInstance.config, selectedInstance.store, selectedId).length
-        : 0;
-      state.selectedSetting = clamp(state.selectedSetting + direction, 0, Math.max(0, total - 1));
     }
     return;
   }
   if (key === '\r' || key === '\n') {
     if (state.tab === 'overview') {
-      if (!selectedInstance) return;
+      if (state.settingsInstanceName) {
+        if (!settingsInstance) return;
+        const selectedId = selectedIdForSettings(state, settingsInstance);
+        const entry = createSettingEntries(
+          settingsInstance.config,
+          settingsInstance.store,
+          selectedId,
+          settingsInstance.configFile,
+        )[state.selectedSetting];
+        if (!entry) return;
+        if (entry.input === 'toggle') {
+          await entry.apply(entry.value === 'enabled' ? 'disabled' : 'enabled');
+          const actionNotice = await actions.afterSettingApplied?.(settingsInstance, entry);
+          state.notice = actionNotice ?? `${entry.label} 已切换为 ${entry.value === 'enabled' ? 'disabled' : 'enabled'}`;
+          return;
+        }
+        state.editing = { key: entry.key, label: entry.label, value: entry.value };
+        return;
+      }
       if (!state.detailInstanceName) {
-        state.detailInstanceName = selectedInstance.name;
+        if (state.selectedInstance >= instances.length) {
+          startInstanceCreation(state, actions);
+          return;
+        }
+        if (!overviewInstance) return;
+        state.detailInstanceName = overviewInstance.name;
         state.selectedConversation = 0;
       } else {
-        state.detailConversationId = selectedConversationId(selectedInstance.store, state.selectedConversation);
+        if (!overviewInstance) return;
+        state.detailConversationId = selectedConversationId(overviewInstance.store, state.selectedConversation);
       }
       return;
     }
-    if (!selectedInstance) return;
-    const selectedId = selectedIdForSettings(state, selectedInstance);
-    const entry = createSettingEntries(selectedInstance.config, selectedInstance.store, selectedId)[state.selectedSetting];
-    if (entry) state.editing = { key: entry.key, label: entry.label, value: entry.value };
+    return;
   }
+}
+
+async function handleInstanceCreationInput(
+  key: string,
+  state: ManagementViewState,
+  instances: ViewInstance[],
+  stop: () => void,
+  actions: ManagementViewActions,
+): Promise<void> {
+  const draft = state.creatingInstance!;
+  if (key === '\u0003') {
+    stop();
+    return;
+  }
+  if (key === '\u001b') {
+    state.creatingInstance = null;
+    state.notice = '已取消新增 Instance';
+    return;
+  }
+  if (key === '\u007f' || key === '\b') {
+    draft.value = draft.value.slice(0, -1);
+    return;
+  }
+  if (key !== '\r' && key !== '\n') {
+    if (!key.startsWith('\u001b')) draft.value += key.replace(/[\u0000-\u001f]/g, '');
+    return;
+  }
+
+  const value = draft.value.trim();
+  if (draft.step === 'instance') {
+    safeName(value);
+    if (instances.some((instance) => instance.name === value)) throw new Error(`instance 已存在：${value}`);
+    draft.values.instance = value;
+    draft.step = 'cwd';
+    draft.value = process.cwd();
+    return;
+  }
+  if (!value) throw new Error(`${creationStepLabel(draft.step)}不能为空`);
+  if (draft.step === 'cwd') {
+    draft.values.cwd = value;
+    draft.step = 'name';
+    draft.value = 'DingTalk Agent';
+    return;
+  }
+  if (draft.step === 'name') {
+    draft.values.name = value;
+    draft.step = 'role';
+    draft.value = '在授权会话内提供职责范围内的分析和答复';
+    return;
+  }
+
+  if (!actions.createInstance) throw new Error('当前 View 入口未提供 instance 创建能力');
+  const input = { ...draft.values, role: value } as NewInstanceInput;
+  const created = await actions.createInstance(input);
+  state.creatingInstance = null;
+  instances.push(created);
+  state.selectedInstance = instances.length - 1;
+  state.detailInstanceName = created.name;
+  state.settingsInstanceName = created.name;
+  state.selectedSetting = 0;
+  await actions.startInstance?.(created);
+  state.notice = `Instance ${created.name} 已创建；Channel 默认 disabled，请确认配置后启用`;
+}
+
+function startInstanceCreation(state: ManagementViewState, actions: ManagementViewActions): void {
+  if (!actions.createInstance) throw new Error('当前 View 入口未提供 instance 创建能力');
+  state.creatingInstance = { step: 'instance', values: {}, value: '' };
+  state.notice = null;
+}
+
+function creationStepLabel(step: InstanceCreationStep): string {
+  return ({ instance: 'Instance 名称', cwd: 'Runtime cwd', name: 'Agent 名称', role: '默认角色' })[step];
 }
 
 export function createSettingEntries(
@@ -273,6 +433,25 @@ export function createSettingEntries(
       (next, value) => { next.scheduling.maxBatchMessages = integer(value, 1, 200, '单批消息上限'); },
     ),
   ];
+  entries.push(...configuredChannels(config).map((channel) => {
+    const entry = configSetting(
+      `channel:${channel.id}:${channel.profileId}:enabled`,
+      `${channel.id}/${channel.profileId}`,
+      channel.enabled ? 'enabled' : 'disabled',
+      'Enter 切换；View owner 即时重启，attach 需重启',
+      config,
+      store,
+      configFile,
+      (next, value) => {
+        if (value !== 'enabled' && value !== 'disabled') throw new Error('Channel 状态必须是 enabled 或 disabled');
+        next.channel.enabled = value === 'enabled';
+      },
+    );
+    entry.section = 'channels';
+    entry.input = 'toggle';
+    entry.restartHost = true;
+    return entry;
+  }));
   if (!conversationId) return entries;
   const conversation = store.getConversation(conversationId);
   if (!conversation) return entries;
@@ -300,13 +479,13 @@ export function createSettingEntries(
     entries.push(
       storeSetting(`member:${member.externalUserId}:organizationRole`, `成员 ${label} · 组织角色`, member.organizationRole, '按需注入', async (value) => {
         store.updateConversationMember(conversationId, member.externalUserId, { organizationRole: value });
-      }),
+      }, 'members'),
       storeSetting(`member:${member.externalUserId}:conversationRole`, `成员 ${label} · 会话角色`, member.conversationRole, '按需注入', async (value) => {
         store.updateConversationMember(conversationId, member.externalUserId, { conversationRole: value });
-      }),
+      }, 'members'),
       storeSetting(`member:${member.externalUserId}:boundary`, `成员 ${label} · 职责边界`, member.responsibilityBoundary, '按需注入', async (value) => {
         store.updateConversationMember(conversationId, member.externalUserId, { responsibilityBoundary: value });
-      }),
+      }, 'members'),
     );
   }
   return entries;
@@ -331,7 +510,7 @@ function configSetting(
     if (store.path !== ':memory:') {
       await Promise.all(store.listConversations().map((conversation) => publishRecoveryContext(config, conversation, store)));
     }
-  });
+  }, 'instance');
 }
 
 function storeSetting(
@@ -340,8 +519,9 @@ function storeSetting(
   value: string,
   hint: string,
   apply: (value: string) => Promise<void>,
+  section: SettingEntry['section'] = 'conversation',
 ): SettingEntry {
-  return { key, label, value, hint, apply };
+  return { key, section, input: 'text', label, value, hint, restartHost: false, apply };
 }
 
 async function publishCurrentRecovery(config: HostConfig, store: Store, conversationId: string): Promise<void> {
@@ -365,30 +545,43 @@ export function renderManagementView(
 ): string {
   normalizeSelection(state, instances);
   const selectedInstance = instances[state.selectedInstance] ?? null;
+  const settingsInstance = state.settingsInstanceName
+    ? instances.find((instance) => instance.name === state.settingsInstanceName) ?? null
+    : null;
   const detailInstance = state.detailInstanceName
     ? instances.find((instance) => instance.name === state.detailInstanceName) ?? null
     : null;
   const snapshots = instances.map((instance) => ({ instance, snapshot: instance.store.status(showContent) }));
   const running = snapshots.filter(({ snapshot }) => text(object(snapshot.host).state) === 'running').length;
-  const tabs = state.tab === 'overview'
-    ? `${ansi('[ 总览 ]', 'cyan-bold', color)}   ${ansi('设置', 'dim', color)}`
-    : `  ${ansi('总览', 'dim', color)}   ${ansi('[ 设置 ]', 'cyan-bold', color)}`;
+  const tabs = (['overview', 'settings'] as const)
+    .map((tab) => {
+      const label = ({ overview: '总览', settings: '全局设置' })[tab];
+      return state.tab === tab ? ansi(`[ ${label} ]`, 'cyan-bold', color) : ansi(label, 'dim', color);
+    })
+    .join('   ');
   const lines = [
     `${ansi(CLI_NAME, 'cyan-bold', color)}  instances=${instances.length}  running=${ansi(String(running), running > 0 ? 'green-bold' : 'dim', color)}  ${ansi(`refreshed=${new Date().toISOString()}`, 'dim', color)}`,
     tabs,
     ansi('─'.repeat(Math.min(width, 120)), 'dim', color),
   ];
-  if (state.tab === 'settings') lines.push(...renderSettings(selectedInstance, detail, settings, state, width, instances.length, color));
+  if (state.tab === 'settings') lines.push(...renderGlobalSettings(instances, width, color));
+  else if (settingsInstance) lines.push(...renderInstanceSettings(settingsInstance, detail, settings, state, width, color));
   else if (state.detailConversationId) lines.push(...renderConversationDetail(detail, width, color));
   else if (detailInstance) lines.push(...renderInstanceOverview(detailInstance, detailInstance.store.status(showContent), state, width, color));
   else lines.push(...renderGlobalOverview(snapshots, state, width, color));
-  const notice = state.notice ?? selectedInstance?.notices.at(-1) ?? null;
+  const notice = state.notice ?? (settingsInstance ?? selectedInstance)?.notices.at(-1) ?? null;
   if (notice) lines.push('', ansi(`提示：${notice}`, 'yellow-bold', color));
-  lines.push('', state.editing
-    ? ansi(`编辑 ${state.editing.label}：${state.editing.value}█  Enter 保存 / Esc 取消`, 'cyan-bold', color)
-    : state.tab === 'settings'
-      ? ansi('Tab/←/→ 切换  [ / ] 选择 instance  ↑/↓ 选择  Enter 编辑  Esc 返回  q 退出', 'dim', color)
-      : ansi('Tab/←/→ 切换  ↑/↓ 选择  Enter 下钻  Esc 返回  q 退出', 'dim', color));
+  lines.push('', state.creatingInstance
+    ? ansi(`新增 Instance · ${creationStepLabel(state.creatingInstance.step)}：${state.creatingInstance.value}█  Enter 下一步 / Esc 取消`, 'cyan-bold', color)
+    : state.editing
+      ? ansi(`编辑 ${state.editing.label}：${state.editing.value}█  Enter 保存 / Esc 取消`, 'cyan-bold', color)
+      : state.tab === 'settings'
+        ? ansi('Tab/←/→ 切换  全局设置不包含 Instance 配置  Esc 返回总览  q 退出', 'dim', color)
+        : state.settingsInstanceName
+          ? ansi('↑/↓ 选择  Enter 编辑/切换  Esc 返回 Instance 详情  q 退出', 'dim', color)
+          : state.detailInstanceName
+            ? ansi('↑/↓ 选择  Enter 下钻会话  s Instance 设置  Esc 返回  q 退出', 'dim', color)
+            : ansi('Tab/←/→ 切换  ↑/↓ 选择  Enter 下钻  a 新增 Instance  q 退出', 'dim', color));
   return lines.join('\n');
 }
 
@@ -398,19 +591,10 @@ function renderGlobalOverview(
   width: number,
   color: boolean,
 ): string[] {
-  if (snapshots.length === 0) {
-    return [
-      heading('INSTANCES', color),
-      ansi('  (none)', 'dim', color),
-      '',
-      ansi('尚未初始化 instance。请先运行：', 'yellow-bold', color),
-      ansi('agent-channel init --instance <name> --cwd <path>', 'cyan', color),
-    ];
-  }
   const lines = [heading('INSTANCES', color)];
   lines.push(...table(
     ['', 'INSTANCE', 'AGENT', 'HOST', 'PID', 'CHANNELS', 'CONVERSATIONS', 'PENDING', 'RUNTIMES', 'OWNER'],
-    snapshots.map(({ instance, snapshot }, index) => {
+    [...snapshots.map(({ instance, snapshot }, index) => {
       const host = object(snapshot.host);
       return [
         index === state.selectedInstance ? '>' : ' ', instance.name, instance.config.identity.name,
@@ -418,10 +602,15 @@ function renderGlobalOverview(
         number(snapshot.pending_messages), array(snapshot.runtimeAdapters).length,
         instance.hostOwnership,
       ];
-    }),
+    }), [
+      state.selectedInstance >= snapshots.length ? '>' : ' ', '+ 新增 Instance', '-', '-', '-', '-', '-', '-', '-', '-',
+    ]],
     width,
     semanticTable(color, state.selectedInstance, 2),
   ));
+  if (snapshots.length === 0) {
+    lines.push('', ansi('尚未初始化 instance。交互模式可按 a 创建；也可运行 agent-channel init --instance <name> --cwd <path>。', 'yellow-bold', color));
+  }
 
   const channels = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.channels));
   lines.push('', heading('CHANNELS', color));
@@ -572,46 +761,74 @@ function renderConversationDetail(detail: Record<string, unknown> | null, width:
   return lines;
 }
 
-function renderSettings(
-  instance: ViewInstance | null,
+function renderGlobalSettings(instances: ViewInstance[], width: number, color: boolean): string[] {
+  const owned = instances.filter((instance) => instance.hostOwnership === 'view').length;
+  const attached = instances.filter((instance) => instance.hostOwnership === 'attached').length;
+  return [
+    heading('全局设置', color),
+    ansi('作用域：当前 agent-channel-host View 及其管理的全部 Instances。', 'dim', color),
+    '',
+    ...table(
+      ['SETTING', 'VALUE', 'SCOPE'],
+      [
+        ['Instances', instances.length, '全局只读状态'],
+        ['View-owned Hosts', owned, '由当前 View 管理'],
+        ['Attached Hosts', attached, '外部进程，仅观察'],
+      ],
+      width,
+      {
+        separator: ' │ ',
+        dividerSeparator: '─┼─',
+        dividerFill: '─',
+        decorate: tableDecorator(color),
+      },
+    ),
+    '',
+    ansi('当前版本暂无可修改的全局配置；Agent、Runtime、Channels 与会话边界请在 INSTANCES 中设置。', 'yellow', color),
+  ];
+}
+
+function renderInstanceSettings(
+  instance: ViewInstance,
   detail: Record<string, unknown> | null,
   settings: SettingEntry[],
   state: ManagementViewState,
   width: number,
-  instanceCount: number,
   color: boolean,
 ): string[] {
-  if (!instance) {
-    return [
-      heading('设置', color),
-      '',
-      ansi('尚未初始化 instance，当前没有可修改的配置。', 'yellow-bold', color),
-      ansi('请先运行 agent-channel init --instance <name> --cwd <path>。', 'cyan', color),
-    ];
-  }
   const conversation = object(detail?.conversation);
+  const channels = configuredChannels(instance.config);
   const lines = [
-    `${heading('设置', color)}  instance=${ansi(instance.name, 'cyan-bold', color)} (${state.selectedInstance + 1}/${instanceCount})  Agent=${instance.config.identity.name}`,
-    `Runtime=${instance.config.runtime.id}  Channel=${instance.config.channel.id}/${instance.config.channel.profileId}`,
+    `${heading(`Instance 设置 / ${instance.name}`, color)}  Agent=${instance.config.identity.name}`,
+    `Runtime=${instance.config.runtime.id}  Channels=${channels.filter((channel) => channel.enabled).length}/${channels.length}`,
     ansi(instance.hostOwnership === 'attached'
       ? '当前连接到外部 Host；conversation/member 设置下一 turn 生效，config.yaml 设置建议重启 Host。'
       : instance.hostOwnership === 'view'
         ? '当前 Host 由 view 启动；配置在后续 turn/batch 生效。'
         : '当前为只读快照；未启动或 attach Host。', instance.hostOwnership === 'view' ? 'yellow' : 'dim', color),
-    `当前会话：${text(conversation.title) ?? '未选择'}`,
-    '',
+    `当前会话：${text(conversation.title) ?? '无（当前仅编辑 instance 配置）'}`,
   ];
-  lines.push(...table(
-    ['', 'SETTING', 'VALUE', 'EFFECT'],
-    settings.map((entry, index) => [index === state.selectedSetting ? '>' : ' ', entry.label, entry.value || '(空)', entry.hint]),
-    width,
-    {
-      separator: ' │ ',
-      dividerSeparator: '─┼─',
-      dividerFill: '─',
-      decorate: tableDecorator(color, state.selectedSetting, 1),
-    },
-  ));
+  for (const section of ['instance', 'channels', 'conversation', 'members'] as const) {
+    const sectionEntries = settings
+      .map((entry, index) => ({ entry, index }))
+      .filter(({ entry }) => entry.section === section);
+    if (sectionEntries.length === 0) continue;
+    const selectedRow = sectionEntries.findIndex(({ index }) => index === state.selectedSetting);
+    lines.push('', heading(section.toUpperCase(), color));
+    lines.push(...table(
+      ['', section === 'channels' ? 'CHANNEL' : 'SETTING', 'VALUE', 'EFFECT'],
+      sectionEntries.map(({ entry, index }) => [
+        index === state.selectedSetting ? '>' : ' ', entry.label, entry.value || '(空)', entry.hint,
+      ]),
+      width,
+      {
+        separator: ' │ ',
+        dividerSeparator: '─┼─',
+        dividerFill: '─',
+        decorate: tableDecorator(color, selectedRow, 1),
+      },
+    ));
+  }
   return lines;
 }
 
@@ -622,7 +839,7 @@ export function renderStatusView(instances: ViewInstance[], showContent = false,
     `${CLI_NAME} view  instances=${instances.length}  refreshed=${new Date().toISOString()}`,
     ...renderGlobalOverview(snapshots, state, width, false),
     '',
-    '只读聚合快照；交互模式会逐 instance 启动或 attach Host，并提供下钻详情和设置 tab',
+    '只读聚合快照；交互模式会逐 instance 启动或 attach Host，并从总览下钻详情与 Instance 设置',
   ];
   return lines.join('\n');
 }
@@ -632,15 +849,19 @@ function selectedConversationId(store: Store, index: number): string | null {
 }
 
 function selectedIdForSettings(state: ManagementViewState, instance: ViewInstance): string | null {
-  if (state.detailInstanceName && state.detailInstanceName !== instance.name) return null;
-  return selectedConversationId(instance.store, state.selectedConversation);
+  if (state.detailInstanceName !== instance.name) return null;
+  return state.detailConversationId;
 }
 
 function normalizeSelection(state: ManagementViewState, instances: ViewInstance[]): void {
-  state.selectedInstance = clamp(state.selectedInstance, 0, Math.max(0, instances.length - 1));
+  state.selectedInstance = clamp(state.selectedInstance, 0, instances.length);
   if (state.detailInstanceName && !instances.some((instance) => instance.name === state.detailInstanceName)) {
     state.detailInstanceName = null;
     state.detailConversationId = null;
+  }
+  if (state.settingsInstanceName && !instances.some((instance) => instance.name === state.settingsInstanceName)) {
+    state.settingsInstanceName = null;
+    state.selectedSetting = 0;
   }
 }
 

@@ -172,7 +172,7 @@ Host 把自然讨论过程和必要工作状态分开管理：
 - Conversation checkpoint 只保存当前主题、仍有效事实、决定、承诺和未决问题，并记录覆盖到的入站 sequence。
 - Runtime 没有长期状态变化时返回 `contextUpdate: null`；有变化时返回完整的当前 checkpoint。Host 将它和本轮决定放在同一 SQLite 事务中提交。
 - Codex 每轮开始前原子发布最新 recovery 文件。新 session 会恢复已有 checkpoint；普通 resume 不重复注入；发生自动 compaction 时，内置 hook 才重新注入。
-- 成员资料独立版本化，观察到的新名称自动更新；角色和职责边界可在 `view` 的设置 tab 修改，并按当前消息相关性提供给 runtime。
+- 成员资料独立版本化，观察到的新名称自动更新；角色和职责边界可从 `view` 总览的 `INSTANCES` 下钻到对应 instance 后修改，并按当前消息相关性提供给 runtime。
 
 Prompt 固定采用“身份、会话职责、决策规则、权限边界、当前输入、输出要求”的顺序。指令使用明确动作，不使用“尽量、酌情、视情况”等模糊表述。
 
@@ -184,9 +184,15 @@ Prompt 固定采用“身份、会话职责、决策规则、权限边界、当�
 agent-channel view
 ```
 
-`view` 会从用户状态目录发现全部已初始化 instance。默认先进入聚合 instance、Channel、conversation、runtime 和消息状态的“总览”tab，而不是某个 instance 或单群页面。上下键选择 instance，`Enter` 先进入实例详情，再选择 conversation 下钻；`Esc` 逐层返回。`Tab` 或左右键切到相邻的“设置”tab，使用 `[` / `]` 选择目标 instance，再修改 Agent 身份、runtime model/effort、合批参数、当前会话职责/mode/warm TTL，以及已观察成员的角色和职责边界。
+`view` 会从用户状态目录发现全部已初始化 instance。顶层固定为 `总览 | 全局设置`，不会把某个 instance 的配置误称为全局设置：
 
-交互式终端会用少量语义颜色突出当前选中项、正常/等待/异常状态和告警；表格宽度仍按纯文本计算，不影响列对齐。设置 tab 的 `SETTING │ VALUE │ EFFECT` 三列使用竖线分隔并统一左对齐。`view --once` 和非交互输出始终不带 ANSI；需要在交互终端禁用颜色时设置 `NO_COLOR`：
+- `总览` 聚合 instance、Channel、conversation、runtime 和消息状态，其中 `INSTANCES` 表就是 instance 的管理入口，不是同级 tab。上下键选择，`Enter` 下钻到 Instance 详情；在详情或 conversation 详情按 `s` 才进入该 Instance 的设置，`Esc` 逐层返回。
+- `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View。
+- `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
+
+每个 instance 设置页可修改 Agent 身份、runtime model/effort、合批参数、当前会话职责/mode/warm TTL、已观察成员资料，以及其 `CHANNELS`。当前只有 DingTalk；`Enter` 可切换 `enabled/disabled`。未来 Channel adapter 从同一列表扩展，不增加 DingTalk 专用页面。TUI 新建 instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner；检查配置后再在该 instance 的 `CHANNELS` 中启用。
+
+交互式终端会用少量语义颜色突出当前选中项、正常/等待/异常状态和告警；表格宽度仍按纯文本计算，不影响列对齐。`INSTANCES` 及 instance 设置中的表格使用竖线分隔并统一左对齐。`view --once` 和非交互输出始终不带 ANSI；需要在交互终端禁用颜色时设置 `NO_COLOR`：
 
 ```powershell
 $env:NO_COLOR = '1'
@@ -195,7 +201,8 @@ agent-channel view
 
 - 某个 instance 的 Host 未运行：`view` 在当前进程内为该 instance 启动唯一 Host；退出时只停止由本次 view 启动的 Host。
 - 某个 instance 的 Host 已运行：`view` 只 attach 该 instance 状态，不创建第二个 Channel owner；退出不停止原有 Host。
-- 尚无 instance：仍进入空总览并显示 `init` 引导，不报“缺少 instance”。
+- Channel 开关保存后：由当前 View 启动的 Host 只重启目标 instance；attach 的外部 Host 不会被 View 越权停止，只提示用户重启该 Host。
+- 尚无 instance：仍进入空总览，`INSTANCES` 表直接显示“新增 Instance”；按 `a` 或在该行按 `Enter` 创建，不要求退出执行外部命令。
 - `--once`：聚合输出全部 instance 的一次脱敏快照，绝不启动 Host。
 - 非交互式服务：继续使用单 instance 的 `agent-channel run --instance <name>`。
 
@@ -207,7 +214,7 @@ agent-channel view --once
 agent-channel run --instance triss
 ```
 
-`status --instance` 输出一个 instance 的机器可读 JSON；`view` 是跨 instance 的交互管理面，用 `q` 或 `Ctrl+C` 退出。总览和详情默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。设置先通过与启动相同的 schema 校验，再原子保存；标记“重启后生效”的配置不会伪装成已即时应用。
+`status --instance` 输出一个 instance 的机器可读 JSON；`view` 是跨 instance 的交互管理面，用 `q` 或 `Ctrl+C` 退出。总览和详情默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。instance 设置先通过与启动相同的 schema 校验，再原子保存；标记“重启后生效”的配置不会伪装成已即时应用。
 
 先在 `shadow` 模式确认 `received/processed`、固定 provider session 前缀、重启 resume 和职责判断，才切到发送模式：
 

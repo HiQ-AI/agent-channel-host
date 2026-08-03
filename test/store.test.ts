@@ -197,7 +197,7 @@ test('v1 会话迁移后补 onboarding 和每类生命周期默认值', () => {
     assert.equal(migrated.getConversation('group-v1')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v1')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
     assert.equal(migrated.getConversation('group-v1')?.policyVersion, 1);
     migrated.close();
   } finally {
@@ -231,7 +231,7 @@ test('v2 会话迁移到当前 schema 时得到固定逻辑 session 和按需 Wo
     assert.equal(migrated.getConversation('group-v2')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v2')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -283,8 +283,47 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
     assert.equal(session?.protocolFingerprint, 'codex-cli 0.145.0:schema-v3');
     assert.equal(migrated.getConversation('group-v3')?.workerWarmSeconds, 30);
     assert.deepEqual(migrated.db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
     migrated.close();
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
+test('v5 Channel 状态表迁移后保留旧记录并允许 disabled', () => {
+  const path = resolve('.test-v5-channel-state', 'state.sqlite3');
+  rmSync(dirname(path), { recursive: true, force: true });
+  mkdirSync(dirname(path), { recursive: true });
+  const old = new DatabaseSync(path);
+  old.exec(`
+    CREATE TABLE channel_connections (
+      channel_id TEXT NOT NULL, profile_id TEXT NOT NULL, label TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('starting','ready','stopped','error')),
+      owner_pid INTEGER, connected_at TEXT, last_event_at TEXT, error TEXT, updated_at TEXT NOT NULL,
+      PRIMARY KEY(channel_id,profile_id)
+    );
+    INSERT INTO channel_connections VALUES(
+      'dingtalk','default','DingTalk DWS','stopped',NULL,NULL,NULL,NULL,'2026-01-01'
+    );
+    PRAGMA user_version=5;
+  `);
+  old.close();
+  try {
+    const migrated = new Store(path);
+    try {
+      migrated.setChannelConnection({
+        channelId: 'dingtalk', profileId: 'default', label: 'DingTalk DWS',
+        state: 'disabled', ownerPid: null,
+      });
+      const row = migrated.db.prepare(`
+        SELECT state,label FROM channel_connections WHERE channel_id='dingtalk' AND profile_id='default'
+      `).get() as { state: string; label: string };
+      assert.equal(row.state, 'disabled');
+      assert.equal(row.label, 'DingTalk DWS');
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
+    } finally {
+      migrated.close();
+    }
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
   }

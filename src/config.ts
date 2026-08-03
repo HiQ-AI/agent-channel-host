@@ -19,6 +19,7 @@ const configSchema = z.object({
   }),
   channel: z.object({
     id: z.literal('dingtalk'),
+    enabled: z.boolean().default(true),
     profileId: z.string().min(1).default('default'),
     command: z.string().min(1).default('dws'),
     profile: z.string().optional(),
@@ -56,6 +57,7 @@ export function defaultConfig(instance: string, cwd: string, name: string, role:
     },
     channel: {
       id: 'dingtalk',
+      enabled: true,
       profileId: 'default',
       command: 'dws',
     },
@@ -74,6 +76,10 @@ export function defaultConfig(instance: string, cwd: string, name: string, role:
       maxBatchMessages: 20,
     },
   };
+}
+
+export function configuredChannels(config: HostConfig): HostConfig['channel'][] {
+  return [config.channel];
 }
 
 export async function writeInitialConfig(config: HostConfig, path = configPath(config.instance)): Promise<void> {

@@ -6,6 +6,7 @@ identity:
   signature: '- 翠丝代回'
 channel:
   id: dingtalk
+  enabled: true
   profileId: default
   command: dws
 runtime:
