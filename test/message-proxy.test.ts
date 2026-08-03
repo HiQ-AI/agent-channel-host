@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultConfig } from '../src/config.js';
 import { normalizeDwsEvent } from '../src/dws.js';
-import { batchPrompt, recentMessagesPrompt } from '../src/prompts.js';
+import { batchPrompt, conversationResponsibilityReminder, prependResponsibilityReminder, recentMessagesPrompt } from '../src/prompts.js';
 import { Store } from '../src/store.js';
 
 test('普通 turn 只转发发送者、时间、内容，不注入 Host 会话资料', () => {
-  const config = defaultConfig('message-proxy', '.', '身份标记', '角色标记');
+  const config = defaultConfig('message-proxy', '.', '身份标记');
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'group',
@@ -39,7 +39,6 @@ test('普通 turn 只转发发送者、时间、内容，不注入 Host 会话�
   assert.match(prompt, /转发内容/);
   for (const forbidden of [
     config.identity.name,
-    config.identity.role,
     conversation.externalId,
     conversation.title,
     conversation.responsibility,
@@ -54,6 +53,16 @@ test('普通 turn 只转发发送者、时间、内容，不注入 Host 会话�
     assert.equal(prompt.includes(forbidden), false, `不应注入：${forbidden}`);
   }
   store.close();
+});
+
+test('会话职责使用独立短提醒，空值不改变普通消息', () => {
+  assert.equal(conversationResponsibilityReminder(' 只做方案与分析 '), '# 会话职责提醒\n只做方案与分析');
+  assert.equal(conversationResponsibilityReminder('  '), null);
+  assert.equal(
+    prependResponsibilityReminder('本轮新增消息', ' 只做方案与分析 '),
+    '# 会话职责提醒\n只做方案与分析\n\n本轮新增消息',
+  );
+  assert.equal(prependResponsibilityReminder('本轮新增消息', '  '), '本轮新增消息');
 });
 
 test('首次群聊最近消息使用相同的最小信封与返回约定', () => {

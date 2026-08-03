@@ -58,7 +58,7 @@ test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完�
     assert.doesNotMatch(serialized, /open-secret-user|高度敏感|provider-session-complete-secret|张三/);
     assert.match(serialized, /provider-ses/);
     assert.match(serialized, /张\*\*\*三/);
-    const rendered = renderStatusView([viewInstance('test', defaultConfig('test', '.', 'Agent', '角色'), store)], false, 120);
+    const rendered = renderStatusView([viewInstance('test', defaultConfig('test', '.', 'Agent'), store)], false, 120);
     assert.match(rendered, /INSTANCES/);
     assert.match(rendered, /MESSAGES/);
     assert.doesNotMatch(rendered, /^CHANNELS$|^CONVERSATIONS$|^RUNTIMES$/m);
@@ -82,7 +82,7 @@ test('既有匿名私聊只读展示已持久化人员姓名且不改写原始�
     type: 'user_im_message_receive_o2o_all', event_id: 'known-direct-name-event',
     sender_open_dingtalk_id: externalId, sender_name: '同事甲', content: '消息',
   })!);
-  const config = defaultConfig('known-direct-name', '.', '小小鹏', '回答编辑器问题');
+  const config = defaultConfig('known-direct-name', '.', '小小鹏');
   const instance = viewInstance('known-direct-name', config, store);
   try {
     const snapshotConversation = (store.status().conversations as Array<{ title: string }>)[0];
@@ -106,8 +106,8 @@ test('既有匿名私聊只读展示已持久化人员姓名且不改写原始�
 test('management view 明确分离总览内 INSTANCES 与全局设置', () => {
   const store = new Store(':memory:');
   const secondStore = new Store(':memory:');
-  const config = defaultConfig('management-view', '.', 'Agent', '角色');
-  const secondConfig = defaultConfig('second-agent', '.', 'Second Agent', '评审');
+  const config = defaultConfig('management-view', '.', 'Agent');
+  const secondConfig = defaultConfig('second-agent', '.', 'Second Agent');
   const first = store.addConversation({
     kind: 'direct', externalId: 'member-a', title: '私聊 A', responsibility: '答疑', mode: 'shadow',
   });
@@ -170,7 +170,7 @@ test('management view 明确分离总览内 INSTANCES 与全局设置', () => {
 
 test('management view 在交互终端使用语义颜色，纯文本输出不带 ANSI', () => {
   const store = new Store(':memory:');
-  const config = defaultConfig('colored-view', '.', 'Agent', '角色');
+  const config = defaultConfig('colored-view', '.', 'Agent');
   const conversation = store.addConversation({
     kind: 'group', externalId: 'colored-group', title: '彩色验证群', responsibility: '答疑', mode: 'shadow',
   });
@@ -199,7 +199,7 @@ test('management view 在交互终端使用语义颜色，纯文本输出不带 
 
 test('instance 设置使用清晰的列分隔符并保持左对齐', () => {
   const store = new Store(':memory:');
-  const config = defaultConfig('settings-layout', '.', 'Agent', '角色');
+  const config = defaultConfig('settings-layout', '.', 'Agent');
   try {
     const state = createManagementViewState();
     state.tab = 'overview';
@@ -226,7 +226,7 @@ test('settings 使用同一 schema 原子保存 config，并更新 conversation 
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   const store = new Store(':memory:');
-  const config = defaultConfig('view-settings', '.', 'Agent', '角色');
+  const config = defaultConfig('view-settings', '.', 'Agent');
   const conversation = store.addConversation({
     kind: 'direct', externalId: 'member-settings', title: '设置私聊', responsibility: '旧职责', mode: 'shadow',
   });
@@ -251,9 +251,9 @@ test('settings 使用同一 schema 原子保存 config，并更新 conversation 
     assert.deepEqual(entries.find((entry) => entry.key === 'runtime.effort')?.options, ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
     assert.equal(entries.find((entry) => entry.key.endsWith(':mode'))?.input, 'select');
     assert.deepEqual(entries.find((entry) => entry.key.endsWith(':mode'))?.options, ['shadow', 'reply']);
-    await entries.find((entry) => entry.key === 'identity.role')!.apply('更新后的角色');
-    assert.equal(config.identity.role, '更新后的角色');
-    assert.match(await readFile(configFile, 'utf8'), /role: 更新后的角色/);
+    assert.equal(entries.some((entry) => entry.key === 'identity.role'), false);
+    assert.equal(entries.some((entry) => entry.key === 'identity.signature'), false);
+    assert.doesNotMatch(await readFile(configFile, 'utf8'), /\n\s+(role|signature):/);
     await assert.rejects(entries.find((entry) => entry.key === 'runtime.effort')!.apply('light'), /Invalid option/);
 
     entries = createSettingEntries(config, store, conversation.id, configFile);
@@ -297,7 +297,7 @@ test('view 颜色遵循 TTY、NO_COLOR 与 dumb terminal', () => {
 
 test('management view 使用右键下钻、左键返回并可进入 instance 设置编辑', async () => {
   const store = new Store(':memory:');
-  const config = defaultConfig('view-input', '.', 'Agent', '角色');
+  const config = defaultConfig('view-input', '.', 'Agent');
   const conversation = store.addConversation({
     kind: 'group', externalId: 'view-input-group', title: '按键验证群', responsibility: '答疑', mode: 'shadow',
   });
@@ -333,7 +333,7 @@ test('management view 使用右键下钻、左键返回并可进入 instance 设
 
 test('CONVERSATIONS 以稳定 ID 选择，跨 Channel 排序和标题刷新后下钻不漂移', async () => {
   const store = new Store(':memory:');
-  const config = defaultConfig('stable-conversation-selection', '.', 'Agent', '角色');
+  const config = defaultConfig('stable-conversation-selection', '.', 'Agent');
   const selected = store.addConversation({
     channelId: 'z-channel', channelProfileId: 'workspace', runtimeId: 'codex',
     kind: 'direct', externalId: 'selected-direct', title: 'A 私聊', responsibility: '答疑', mode: 'shadow',
@@ -375,8 +375,8 @@ test('CONVERSATIONS 以稳定 ID 选择，跨 Channel 排序和标题刷新后�
 test('退出确认说明 Host 影响，取消后保留编辑现场且 Ctrl+C/Enter 二次确认', async () => {
   const firstStore = new Store(':memory:');
   const secondStore = new Store(':memory:');
-  const first = viewInstance('exit-owned', defaultConfig('exit-owned', '.', '小小鹏', '编辑器答疑'), firstStore);
-  const second = viewInstance('exit-attached', defaultConfig('exit-attached', '.', '翠丝', '方案评审'), secondStore);
+  const first = viewInstance('exit-owned', defaultConfig('exit-owned', '.', '小小鹏'), firstStore);
+  const second = viewInstance('exit-attached', defaultConfig('exit-attached', '.', '翠丝'), secondStore);
   first.hostOwnership = 'view';
   const instances = [first, second];
   const state = createManagementViewState();
@@ -414,8 +414,8 @@ test('退出确认说明 Host 影响，取消后保留编辑现场且 Ctrl+C/Ent
 
 test('Instance 设置表按终端显示宽度对齐中文、全角、emoji 与组合字符', () => {
   const store = new Store(':memory:');
-  const config = defaultConfig('display-width', '.', '小小鹏🙂', '回答编辑器需求、方案以及 bug 排查');
-  config.identity.signature = 'Ａgent e\u0301';
+  const config = defaultConfig('display-width', '.', '小小鹏🙂');
+  config.runtime.model = 'Ａgent e\u0301';
   const instance = viewInstance('display-width', config, store);
   const state = createManagementViewState();
   state.detailInstanceName = instance.name;
@@ -446,8 +446,8 @@ test('Instance 设置表按终端显示宽度对齐中文、全角、emoji 与�
 test('INSTANCES 在上层 view 中显式选择 instance 后编辑对应配置', async () => {
   const firstStore = new Store(':memory:');
   const secondStore = new Store(':memory:');
-  const firstConfig = defaultConfig('first', '.', 'First Agent', '答疑');
-  const secondConfig = defaultConfig('second', '.', 'Second Agent', '评审');
+  const firstConfig = defaultConfig('first', '.', 'First Agent');
+  const secondConfig = defaultConfig('second', '.', 'Second Agent');
   const instances = [
     viewInstance('first', firstConfig, firstStore),
     viewInstance('second', secondConfig, secondStore),
@@ -478,7 +478,7 @@ test('Channel 独立页面第一项可直接 toggle，并原子持久化及通�
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   const store = new Store(':memory:');
-  const config = defaultConfig('toggle-channel', '.', 'Agent', 'role');
+  const config = defaultConfig('toggle-channel', '.', 'Agent');
   const instance = { ...viewInstance('toggle-channel', config, store), configFile };
   const instances = [instance];
   const state = createManagementViewState();
@@ -508,13 +508,13 @@ test('TUI 可在 INSTANCES 中通过受校验向导新增并启动 instance', as
   const instances: ViewInstance[] = [];
   const state = createManagementViewState();
   state.tab = 'overview';
-  const createdInputs: Array<{ instance: string; cwd: string; name: string; role: string }> = [];
+  const createdInputs: Array<{ instance: string; cwd: string; name: string }> = [];
   let started = '';
   const createdStores: Store[] = [];
   const actions = {
-    createInstance: async (input: { instance: string; cwd: string; name: string; role: string }) => {
+    createInstance: async (input: { instance: string; cwd: string; name: string }) => {
       createdInputs.push(input);
-      const config = defaultConfig(input.instance, input.cwd, input.name, input.role);
+      const config = defaultConfig(input.instance, input.cwd, input.name);
       config.channel.enabled = false;
       const store = new Store(':memory:');
       createdStores.push(store);
@@ -528,22 +528,21 @@ test('TUI 可在 INSTANCES 中通过受校验向导新增并启动 instance', as
     await handleManagementViewInput('\r', state, instances, () => undefined, actions);
     await handleManagementViewInput('\r', state, instances, () => undefined, actions);
     await handleManagementViewInput('\r', state, instances, () => undefined, actions);
-    await handleManagementViewInput('\r', state, instances, () => undefined, actions);
     assert.equal(instances.length, 1);
     assert.equal(instances[0]?.name, 'new-agent');
     assert.equal(instances[0]?.config.channel.enabled, false);
     assert.deepEqual(state.detailChannel, { instanceName: 'new-agent', channelId: 'dingtalk', profileId: 'default' });
     assert.equal(started, 'new-agent');
     assert.equal(createdInputs[0]?.name, 'DingTalk Agent');
-    assert.match(createdInputs[0]?.role ?? '', /职责范围/);
+    assert.equal(Object.hasOwn(createdInputs[0] ?? {}, 'role'), false);
   } finally {
     for (const store of createdStores) store.close();
   }
 });
 
-test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，默认继承角色且重复选择不新增', async () => {
+test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，职责未配置且重复选择不新增', async () => {
   const store = new Store(':memory:');
-  const config = defaultConfig('group-search', '.', '小小鹏', '回答编辑器方案与 bug 排查');
+  const config = defaultConfig('group-search', '.', '小小鹏');
   const instance = viewInstance('group-search', config, store);
   const instances = [instance];
   const state = createManagementViewState();
@@ -576,7 +575,7 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，默认继�
     const bound = store.listConversations();
     assert.equal(bound.length, 1);
     assert.equal(bound[0]?.kind, 'group');
-    assert.equal(bound[0]?.responsibility, config.identity.role);
+    assert.equal(bound[0]?.responsibility, '');
     assert.equal(bound[0]?.mode, 'reply');
     assert.equal(bound[0]?.channelId, 'dingtalk');
     assert.equal(bound[0]?.runtimeId, 'codex');
@@ -595,7 +594,7 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，默认继�
 
 test('Tab 只切顶层，左右键负责层级导航，alternate screen 序列成对', async () => {
   const store = new Store(':memory:');
-  const config = defaultConfig('navigation', '.', 'Agent', '角色');
+  const config = defaultConfig('navigation', '.', 'Agent');
   const state = createManagementViewState();
   const instances = [viewInstance('navigation', config, store)];
   try {
@@ -619,7 +618,7 @@ test('Tab 只切顶层，左右键负责层级导航，alternate screen 序列�
 
 test('设置、群搜索和 Instance 向导支持光标移动、Home End 及前后删除', async () => {
   const store = new Store(':memory:');
-  const config = defaultConfig('cursor-edit', '.', 'Agent', '角色');
+  const config = defaultConfig('cursor-edit', '.', 'Agent');
   const instance = viewInstance('cursor-edit', config, store);
   const instances = [instance];
   const state = createManagementViewState();
@@ -679,7 +678,7 @@ test('Channel 页面分别选择群聊/私聊订阅与默认模式，并展示�
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   const store = new Store(':memory:');
-  const config = defaultConfig('channel-subscriptions', '.', 'Agent', 'role');
+  const config = defaultConfig('channel-subscriptions', '.', 'Agent');
   const group = store.addConversation({
     kind: 'group', externalId: 'group-binding', title: '指定群聊', responsibility: '答疑', mode: 'shadow',
   });
@@ -758,7 +757,7 @@ test('耗时设置在等待前进入进度态，持续帧不读取 Store，完�
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
   const store = new Store(':memory:');
-  const config = defaultConfig('pending-operation', '.', 'Agent', 'role');
+  const config = defaultConfig('pending-operation', '.', 'Agent');
   const instance = { ...viewInstance('pending-operation', config, store), configFile };
   const state = createManagementViewState();
   state.detailInstanceName = instance.name;
@@ -798,8 +797,8 @@ test('耗时设置在等待前进入进度态，持续帧不读取 Store，完�
 test('Instance 与 Conversation 删除均需二次确认，取消无副作用并由 action 执行生命周期', async () => {
   const firstStore = new Store(':memory:');
   const secondStore = new Store(':memory:');
-  const first = viewInstance('delete-instance', defaultConfig('delete-instance', '.', 'Agent', 'role'), firstStore);
-  const second = viewInstance('keep-instance', defaultConfig('keep-instance', '.', 'Agent', 'role'), secondStore);
+  const first = viewInstance('delete-instance', defaultConfig('delete-instance', '.', 'Agent'), firstStore);
+  const second = viewInstance('keep-instance', defaultConfig('keep-instance', '.', 'Agent'), secondStore);
   const conversation = firstStore.addConversation({
     kind: 'group', externalId: 'delete-conversation', title: '待删除会话', responsibility: '答疑', mode: 'shadow',
   });

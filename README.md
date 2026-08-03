@@ -28,8 +28,8 @@ flowchart LR
 - 常驻的是 Host、DWS 长连接和 SQLite 状态，不是每个 conversation 的 provider 进程。消息到达后才启动一轮 runtime CLI；该轮完成后进程退出。
 - 每个群聊/私聊持久化自己的 `(channel, profile, conversation) → runtime + provider session ID + generation`，彼此不共享 transcript。
 - 新 Codex 会话执行 `codex exec --json --output-schema`；已有会话执行 `codex exec resume <原 ID>`。每次 resume 都校验 `thread.started.thread_id` 必须等于原 ID，否则 fail closed，不创建第二条 session。
-- 普通 turn 只转发本批消息的“发送者、时间、内容”。引用和合并转发折叠进内容；Host 不附带群名、私聊标识、职责、成员资料、历史摘要或 checkpoint。
-- Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不向 provider session 注入身份或恢复指令；Agent 的长期规则由 runtime 工作目录自行维护。
+- 普通 turn 只转发本批消息的“发送者、时间、内容”。引用和合并转发折叠进内容；Host 不附带群名、私聊标识、成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息前增加一份短提醒。
+- Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不覆盖 provider 的 developer/system 指令；Agent 的长期规则由 runtime 工作目录自行维护。
 - 每条消息先写 SQLite WAL，提交后才发进程内 ready signal。Worker 不轮询 DWS 或 SQLite；Host 启动时一次性 reconciliation：释放中断的 claim、重新处理未完成及未达 3 次上限的失败消息，并用原 UUID 重试未确认的 outbox。已完成消息和已提交 outbox 不重放，达到上限的失败项保留终止状态。
 - quiet window 默认 300 ms，一次最多合并 20 条消息。active turn 期间的新消息会终止旧 CLI 进程，释放旧 claim，再与新消息合并处理。
 - Host 不配置 turn 超时，也不会因运行时长终止活动 turn。claim 由该 Conversation 的唯一 Worker 和 Host lease 持有，不按时间过期；只有新消息抢占、Host 停止或 runtime 自身退出会结束 turn，进程中断后的 claim 在下次 Host 启动时统一恢复。
@@ -105,8 +105,7 @@ agent-channel status --instance $instanceName
 agent-channel init `
   --instance triss `
   --cwd 'D:\agent-workspaces\triss' `
-  --name '翠丝' `
-  --role '公司数字化员工；按自身角色与各会话职责边界参与讨论'
+  --name '翠丝'
 
 agent-channel doctor --instance triss
 ```
@@ -174,7 +173,7 @@ agent-channel conversation add `
   --mode shadow
 ```
 
-`--responsibility` 省略时使用 `identity.role`，但该字段只作为 Host 本地管理备注，不自动注入 runtime；Agent 的真实职责应配置在自己的 runtime 工作目录。`--mode` 省略时按 kind 使用“群聊默认模式”或“私聊默认模式”。`conversation disable/enable --id <UUID>` 控制指定会话；未准入 conversation 的事件只记录脱敏拒绝原因，不持久化正文。
+`--responsibility` 省略时保存为空，表示使用 Agent 在 runtime 工作目录中的自身职责；非空值按“长会话与上下文压缩”一节的周期提醒传给该 Conversation 的固定 session。`--mode` 省略时按 kind 使用“群聊默认模式”或“私聊默认模式”。`conversation disable/enable --id <UUID>` 控制指定会话；未准入 conversation 的事件只记录脱敏拒绝原因，不持久化正文。
 
 ### Channel 订阅范围
 
@@ -182,7 +181,7 @@ agent-channel conversation add `
 
 - `none`：该类消息全部拒绝；
 - `selected`：仅准入已登记且 enabled 的 Conversation；这是旧配置和新 Instance 的默认值；
-- `all`：未知 Conversation 收到首条消息时自动以 Agent 默认职责、对应默认模式和当前 runtime 建档，再持久准入。显式 disabled 的 Conversation 仍然拒绝，不会被 `all` 绕过。
+- `all`：未知 Conversation 收到首条消息时以空职责、对应默认模式和当前 runtime 建档，再持久准入；空职责使用 Agent 自身职责。显式 disabled 的 Conversation 仍然拒绝，不会被 `all` 绕过。
 
 “群聊默认模式”和“私聊默认模式”分别取 `shadow/reply`，只影响之后自动建档或未显式指定 mode 的新 Conversation；已有 Conversation 的 mode 不会被批量改写。`reply` 表示 Host 允许 Agent 的 reply 决定进入发送门禁，不表示每条消息都必须回复。旧 version 2 配置缺少这两个字段时均按 `shadow` 加载。
 
@@ -228,9 +227,9 @@ agent-channel conversation worker `
 
 ## 长会话与上下文压缩
 
-自然讨论过程由各 runtime 的固定 session 保存，并由 runtime 自己 resume 与自动压缩。Host 不猜测何时发生压缩，也不重复注入身份、职责或摘要；需要跨压缩长期保留的信息，应由 Agent 自己的工作目录、skill 或 runtime 原生机制维护。Host 中已有的成员与职责字段可供本地管理界面查询，但不会进入普通 turn。
+自然讨论过程由各 runtime 的固定 session 保存，并由 runtime 自己 resume 与自动压缩。Host 不猜测何时发生压缩，也不安装 provider 专用 hook。Conversation 职责非空时，Host 在当前 Worker 的首个 turn、职责变更后的首个 turn，以及上次成功提醒后每满 5 个已完成 turn，在新增消息前增加一份 `# 会话职责提醒`；失败或被抢占的 turn 不推进周期。Worker/Host 重启后恢复固定 session 的首个 turn会再次提醒。这样无法保证精确命中压缩后的紧接一轮，最坏会经过 4 个不带提醒的普通 turn；需要更强长期约束的身份、安全和权限规则仍应放在 Agent 自己的工作目录、skill 或 runtime 原生配置中。
 
-每次消息 prompt 只有一组重复的“发送者、时间、内容”和固定的最小返回约定，不包含会话字段。这样新增 Claude Code、Gemini CLI、Qwen CLI adapter 时可以复用同一消息语义，而不继承 Codex 专用行为指令。
+除上述低频职责提醒外，每次消息 prompt 只有一组重复的“发送者、时间、内容”和固定的最小返回约定，不包含会话字段。该周期由 RuntimeAdapter 的 session 对象维护，不依赖 Codex 专用压缩事件，Claude Code、Gemini CLI、Qwen CLI adapter 可复用同一语义。
 
 ## 前台启动与管理视图
 
@@ -244,12 +243,12 @@ agent-channel view
 
 - `总览` 只展示 INSTANCES 索引、跨实例消息汇总和全局告警，不重复铺开具体 Channel、Conversation、Runtime 或最近消息。Instance 行保留 Host/owner、Channel/Conversation 数、pending 和 alert 数，便于先判断应下钻到哪里。`↑/↓` 选择，`Enter/→` 下钻，`Esc/←` 逐层返回；`Tab` 只切换顶层“总览 / 全局设置”。
 - Instance 详情集中展示该实例的 Channel、Conversation、消息汇总与最近消息、Runtime 和告警，其中 `CONVERSATIONS` 固定在 `MESSAGES` 上方。Conversation 选择以稳定 ID 跟踪，标题更新或跨 Channel 排序刷新后下钻仍打开当前高亮项。进入 Channel 后，五项依次为 `enabled/disabled`、群聊订阅、群聊默认模式、私聊订阅、私聊默认模式；后续分区展示指定群聊和指定私聊。群聊末行“搜索并绑定指定群聊”支持输入关键词、选择候选并写入现有 conversation registry；外部群 ID 不在界面展示。
-- 新绑定群组使用“群聊默认模式”，本地职责备注继承该 Instance 的 Agent 默认角色，runtime 使用 Instance 当前配置。首次启动会拉取最近消息交给 Agent 自主判断。绑定不创建第二套接收服务；Channel disabled 时可先配置群组，重新启用后继续复用原 registry 和 session 映射。
+- 新绑定群组使用“群聊默认模式”，会话职责初始为空并使用 Agent 自身职责，runtime 使用 Instance 当前配置。首次启动会拉取最近消息交给 Agent 自主判断。绑定不创建第二套接收服务；Channel disabled 时可先配置群组，重新启用后继续复用原 registry 和 session 映射。
 - 指定私聊继续使用稳定 `openDingTalkId` 登记，不按姓名猜测 ID；事件提供人员姓名时以姓名作为显示标题，确实拿不到时显示不泄露原始 ID 的稳定占位。通过 `conversation add --open-dingtalk-id` 添加后会出现在 Channel 的 DIRECTS 分区，并可下钻修改或删除。
 - `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 
-每个 Instance 设置页可修改 Agent 显示信息、Runtime cwd、runtime model/effort 和合批参数。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；View-owned Host 随配置重启，attached Host 提示外部重启。若已有 provider session 的 cwd 与新值不一致，Host 会提升 generation 后创建新 session。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、本地职责备注、mode、warm TTL 和已观察成员资料；这些资料不自动注入 runtime。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
+每个 Instance 设置页可修改仅供本地展示的 Agent 名称、Runtime cwd、runtime model/effort 和合批参数，不再维护 Agent 默认角色或回复签名。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；View-owned Host 随配置重启，attached Host 提示外部重启。若已有 provider session 的 cwd 与新值不一致，Host 会提升 generation 后创建新 session。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、会话职责、mode、warm TTL 和已观察成员资料；会话职责按周期提醒进入对应 runtime session，成员资料仍只供本地查询。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
 
 ### 删除 Instance 与 Conversation
 
@@ -314,7 +313,7 @@ agent-channel service remove --instance triss
 - Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner、一个 bus，以及按群聊/私聊订阅范围启停的共享 consumer。
 - Host 仅在 `dws event status` 同时返回 `state=running` 和可用 live RPC 时认定 bus ready；只有存活 PID、没有 IPC 的状态会明确报告为 stale bus/PID 复用。DWS 子进程退出时保留经脱敏且有界的 stderr 根因，不再只显示 `code=5`。
 - Host 不覆盖 Codex 的 `approval_policy`、sandbox、network 或 writable roots；这些权限与 MCP/skills 一样由 runtime 自身配置加载。`runtime.cwd` 必须指向专用工作目录，部署者必须按该 runtime 的权限模型独立审计。
-- Host 不安装 compaction hook，也不审查 Agent 的命令、文件或内部任务行为。
+- Host 不安装 compaction hook，也不覆盖用户的 developer/system 指令；短职责提醒属于低频普通上下文，不能作为权限隔离。Host 不审查 Agent 的命令、文件或内部任务行为。
 - Runtime 返回不符合 `{action, replyText}` 最小结构时，仅将对应 Conversation 的当前 batch 标为 failed 并禁止出站；不会停止唯一 Channel owner或阻断其他 Conversation。
 - 决定、inbox 完成和可选 outbox 在同一事务内写入。Host 重启发现活动 claim 时会提升 session generation，避免把同一消息再次输入可能已包含该消息的旧 transcript。
 

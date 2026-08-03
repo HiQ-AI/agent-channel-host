@@ -401,7 +401,7 @@ export class Store {
         ) VALUES(?,?,?,?,?,?,?,?,?,?,1,1,?,?)
       `).run(
         id, channelId, channelProfileId, input.kind, input.externalId, input.title,
-        input.responsibility, input.mode, runtimeId, workerWarmSeconds, now, now,
+        input.responsibility.trim(), input.mode, runtimeId, workerWarmSeconds, now, now,
       );
       this.db.prepare(`
         INSERT INTO runtime_workers(conversation_id,runtime_id,state,updated_at) VALUES(?,?,'stopped',?)
@@ -441,7 +441,9 @@ export class Store {
 
   setConversationResponsibility(id: string, responsibility: string): boolean {
     const value = responsibility.trim();
-    if (!value) throw new Error('responsibility 不能为空');
+    const current = this.getConversation(id);
+    if (!current) return false;
+    if (current.responsibility === value) return true;
     const result = this.db.prepare(`
       UPDATE conversations SET responsibility=?,policy_version=policy_version+1,updated_at=? WHERE id=?
     `).run(value, new Date().toISOString(), id);

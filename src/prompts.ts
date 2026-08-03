@@ -7,6 +7,16 @@ interface MessageEnvelope {
   content: string;
 }
 
+export function conversationResponsibilityReminder(responsibility: string): string | null {
+  const value = responsibility.trim();
+  return value ? `# 会话职责提醒\n${value}` : null;
+}
+
+export function prependResponsibilityReminder(prompt: string, responsibility: string): string {
+  const reminder = conversationResponsibilityReminder(responsibility);
+  return reminder ? `${reminder}\n\n${prompt}` : prompt;
+}
+
 export function batchPrompt(events: AdmittedEvent[]): string {
   return messagePrompt(events.map((event) => ({
     sender: event.senderName ?? event.senderId ?? '未知',

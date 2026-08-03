@@ -22,7 +22,7 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     assert.match(help.stdout, /^Usage: agent-channel /);
     assert.doesNotMatch(help.stdout, /dingtalk-codex/);
     const initialized = await execFileAsync(process.execPath, [
-      cli, 'init', '--instance', 'test', '--cwd', process.cwd(), '--name', '测试员工', '--role', '测试角色',
+      cli, 'init', '--instance', 'test', '--cwd', process.cwd(), '--name', '测试员工',
     ], { encoding: 'utf8', env });
     assert.equal(JSON.parse(initialized.stdout).ok, true);
     const status = await execFileAsync(process.execPath, [cli, 'status', '--instance', 'test'], { encoding: 'utf8', env });
@@ -62,6 +62,7 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     assert.equal(addedBody.channelId, 'dingtalk');
     assert.equal(addedBody.runtimeId, 'codex');
     assert.equal(addedBody.mode, 'shadow');
+    assert.equal(addedBody.responsibility, '');
     assert.equal(addedBody.workerWarmSeconds, 30);
 
     const currentConfig = await loadConfig('test', join(root, 'instances', 'test', 'config.yaml'));

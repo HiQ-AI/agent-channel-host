@@ -10,7 +10,7 @@ const marker = join(root, 'worker-done.txt');
 await rm(root, { recursive: true, force: true });
 await mkdir(root, { recursive: true });
 
-const config = defaultConfig('delegation-canary', root, '验证员工', '验证主会话后台委派');
+const config = defaultConfig('delegation-canary', root, '验证员工');
 const store = new Store(join(root, 'state.sqlite3'));
 const conversation = store.addConversation({
   kind: 'direct',

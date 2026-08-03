@@ -66,7 +66,7 @@ export function resolveEventConversation(
       kind: event.kind,
       externalId: event.conversationExternalId,
       title: discoveredConversationTitle(event) || anonymousConversationTitle(event.kind, event.conversationExternalId),
-      responsibility: config.identity.role,
+      responsibility: '',
       mode: event.kind === 'group' ? config.channel.defaultModes.groups : config.channel.defaultModes.directs,
       runtimeId: config.runtime.id,
     });

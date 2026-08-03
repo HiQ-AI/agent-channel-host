@@ -18,9 +18,9 @@ test('共享初始化入口支持 TUI 安全创建 disabled Channel 并拒绝覆
       instance: 'created-from-tui',
       cwd: '.',
       name: 'TUI Agent',
-      role: '测试角色',
       channelEnabled: false,
     }, env);
+    assert.deepEqual(initialized.config.identity, { name: 'TUI Agent' });
     assert.equal(initialized.config.channel.enabled, false);
     assert.match(await readFile(initialized.configFile, 'utf8'), /enabled: false/);
     assert.equal((await loadConfig('created-from-tui', initialized.configFile)).channel.enabled, false);
@@ -32,7 +32,7 @@ test('共享初始化入口支持 TUI 安全创建 disabled Channel 并拒绝覆
       store.close();
     }
     await assert.rejects(initializeInstance({
-      instance: 'created-from-tui', cwd: '.', name: 'Duplicate', role: 'role',
+      instance: 'created-from-tui', cwd: '.', name: 'Duplicate',
     }, env), /配置已存在/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -44,8 +44,8 @@ test('Instance 删除只移除经过校验的目标目录', async () => {
   const env = { ...process.env, AGENT_CHANNEL_HOME: root };
   await rm(root, { recursive: true, force: true });
   try {
-    await initializeInstance({ instance: 'delete-me', cwd: '.', name: 'Delete', role: 'role' }, env);
-    await initializeInstance({ instance: 'keep-me', cwd: '.', name: 'Keep', role: 'role' }, env);
+    await initializeInstance({ instance: 'delete-me', cwd: '.', name: 'Delete' }, env);
+    await initializeInstance({ instance: 'keep-me', cwd: '.', name: 'Keep' }, env);
     const removed = await deleteInstanceData('delete-me', env);
     assert.match(removed, /instances[\\/]delete-me$/);
     assert.deepEqual(await discoverInstances(env), ['keep-me']);

@@ -17,8 +17,6 @@ const configSchema = z.object({
   instance: z.string().min(1),
   identity: z.object({
     name: z.string().min(1),
-    role: z.string().min(1),
-    signature: z.string().min(1),
   }),
   channel: z.object({
     id: z.literal('dingtalk'),
@@ -56,14 +54,12 @@ export function validateConfig(value: unknown): HostConfig {
   return configSchema.parse(value);
 }
 
-export function defaultConfig(instance: string, cwd: string, name: string, role: string): HostConfig {
+export function defaultConfig(instance: string, cwd: string, name: string): HostConfig {
   return {
     version: 2,
     instance,
     identity: {
       name,
-      role,
-      signature: `- ${name}代回`,
     },
     channel: {
       id: 'dingtalk',

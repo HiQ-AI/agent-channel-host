@@ -22,7 +22,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       label: 'Codex CLI',
       model: this.config.runtime.model,
       protocolFingerprint: this.identity.fingerprint,
-      contextRecovery: 'runtime-native' as const,
+      contextRecovery: 'adapter-managed' as const,
     };
   }
 

@@ -9,7 +9,7 @@ const root = resolve(process.argv[2] ?? '.resume-canary');
 await rm(root, { recursive: true, force: true });
 await mkdir(root, { recursive: true });
 
-const config = defaultConfig('resume-canary', root, '验证员工', '验证空闲释放后恢复原会话');
+const config = defaultConfig('resume-canary', root, '验证员工');
 const store = new Store(join(root, 'state.sqlite3'));
 const conversation = store.addConversation({
   kind: 'direct', externalId: 'resume-canary-user', title: '恢复 canary',
