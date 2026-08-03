@@ -4,7 +4,17 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.js';
-import { normalizeDwsEvent, consumerArgs, fetchRecentGroupHistory, searchDwsGroups } from '../src/dws.js';
+import {
+  DIRECT_EVENT,
+  GROUP_EVENT,
+  consumerArgs,
+  dwsProcessExitError,
+  fetchRecentGroupHistory,
+  inspectDwsBusStatus,
+  normalizeDwsEvent,
+  searchDwsGroups,
+  subscribedEventKeys,
+} from '../src/dws.js';
 import { defaultConfig } from '../src/config.js';
 
 test('授权会话才可持久化，事件按会话单调编号并去重', () => {
@@ -310,6 +320,38 @@ test('DWS consumer 参数固定读取 flatten NDJSON stdout', () => {
     'event', 'consume', 'user_im_message_receive_group_all', '--ephemeral', '--flatten', '--format', 'ndjson',
     '--profile', 'corp:user',
   ]);
+});
+
+test('DWS 只启动配置允许的共享 consumer，全部 none 时不启动事件流', () => {
+  const config = defaultConfig('subscription-processes', '.', 'Agent', 'role');
+  config.channel.subscriptions = { groups: 'selected', directs: 'none' };
+  assert.deepEqual(subscribedEventKeys(config), [GROUP_EVENT]);
+  config.channel.subscriptions = { groups: 'none', directs: 'all' };
+  assert.deepEqual(subscribedEventKeys(config), [DIRECT_EVENT]);
+  config.channel.subscriptions = { groups: 'none', directs: 'none' };
+  assert.deepEqual(subscribedEventKeys(config), []);
+});
+
+test('DWS bus ready 必须同时具备 running 状态与可用 status RPC', () => {
+  assert.deepEqual(inspectDwsBusStatus({ bus: { entry: { state: 'running' }, live: { consumers: [] } } }), {
+    state: 'running', live: true,
+  });
+  assert.deepEqual(inspectDwsBusStatus({ bus: { entry: { state: 'running' } } }), {
+    state: 'running', live: false,
+  });
+  assert.deepEqual(inspectDwsBusStatus({ bus: { entry: { state: 'not_running' } } }), {
+    state: 'not_running', live: false,
+  });
+});
+
+test('DWS 子进程异常保留有界 stderr 根因并脱敏凭据', () => {
+  const error = dwsProcessExitError('DWS consumer 退出', 5, null, [
+    'access_token=secret-value',
+    'fork/exec dws.exe: not supported by windows',
+  ]);
+  assert.match(error.message, /code=5/);
+  assert.match(error.message, /not supported by windows/);
+  assert.doesNotMatch(error.message, /secret-value/);
 });
 
 test('DWS 群搜索只投影有效候选并按 openConversationId 去重', async () => {
