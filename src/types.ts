@@ -3,6 +3,7 @@ export const CONVERSATION_MODES = ['shadow', 'reply'] as const;
 export type ConversationMode = typeof CONVERSATION_MODES[number];
 export const DEFAULT_WORKER_WARM_SECONDS = 30;
 export const MAX_WORKER_WARM_SECONDS = 2_147_483;
+export const MAX_RECOVERY_ATTEMPTS = 3;
 
 export interface Conversation {
   id: string;
@@ -130,6 +131,7 @@ export interface OutboxRecord {
   uuid: string;
   text: string;
   state: 'pending' | 'sending' | 'submitted' | 'failed' | 'suppressed';
+  attemptCount: number;
   error: string | null;
   createdAt: string;
   updatedAt: string;

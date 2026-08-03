@@ -187,6 +187,39 @@ test('群 onboarding 发送失败后以同一 UUID 重试', async () => {
   store.close();
 });
 
+test('Worker 启动时用原 UUID 提交 reconciliation 恢复的 outbox', async () => {
+  const config = defaultConfig('outbox-recovery', '.', 'Agent', 'role');
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'outbox-recovery-user', title: '恢复私聊', responsibility: '回答问题', mode: 'reply',
+  });
+  const event = store.admitEvent(conversation, normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: 'outbox-recovery-event',
+    sender_open_dingtalk_id: conversation.externalId, content: '恢复发送',
+  })!).event!;
+  const outbox = store.enqueueOutbox(event, '恢复后的回复', '00000000-0000-4000-8000-000000000779')!;
+  store.db.prepare("UPDATE outbox SET state='failed',attempt_count=1,error='temporary-send' WHERE id=?").run(outbox.id);
+  assert.deepEqual(store.recoverPendingWork(), [conversation.id]);
+  const sent: Array<{ text: string; uuid: string }> = [];
+  const worker = new ConversationWorker(
+    config,
+    conversation,
+    new OnboardingSession(),
+    store,
+    { send: async (_target, record) => { sent.push({ text: record.text, uuid: record.uuid }); } },
+    () => undefined,
+  );
+  try {
+    await worker.start();
+    assert.deepEqual(sent, [{ text: '恢复后的回复', uuid: outbox.uuid }]);
+    assert.equal(store.getOutbox(outbox.id)?.state, 'submitted');
+    assert.equal(store.getOutbox(outbox.id)?.attemptCount, 2);
+  } finally {
+    await worker.stop();
+    store.close();
+  }
+});
+
 test('单个 conversation 的无效决策 fail closed，但 Worker 与 Channel 生命周期不被终止', async () => {
   const config = defaultConfig('decision-isolation', '.', 'Agent', 'role');
   config.scheduling.quietWindowMilliseconds = 0;

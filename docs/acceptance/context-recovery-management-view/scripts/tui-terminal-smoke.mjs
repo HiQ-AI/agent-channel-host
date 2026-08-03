@@ -74,42 +74,42 @@ const keys = [
   [6_300, '\u001b[C'],
   [6_500, '\u001b[B'],
   [6_700, '\u001b[C'],
-  [6_900, '\u001b[B'],
-  [7_100, '\u001b[B'],
-  [7_300, '\u001b[C'],
-  [8_000, '编辑器'],
-  [9_000, '\r'],
-  [10_000, '\u001b[C'],
-  [10_400, 'd'],
-  [10_700, '\u001b'],
-  [11_000, '\u001b[D'],
-  [12_000, '\u001b[D'],
-  [13_000, 's'],
-  [14_000, '\u001b[C'],
-  [14_200, '\u001b[H'],
+  [7_300, '\u001b[B'],
+  [7_500, '\u001b[B'],
+  [7_700, '\u001b[C'],
+  [8_400, '编辑器'],
+  [9_400, '\r'],
+  [10_400, '\u001b[C'],
+  [10_800, 'd'],
+  [11_100, '\u001b'],
+  [11_400, '\u001b[D'],
+  [12_400, '\u001b[D'],
+  [13_400, 's'],
   [14_400, '\u001b[C'],
-  [14_600, '·'],
-  [14_800, '\u001b[F'],
-  [15_000, '\r'],
-  [16_000, '\u001b[D'],
-  [17_000, '\u001b[D'],
-  [18_000, '\t'],
-  [19_000, '\u001b[D'],
-  [20_000, 'a'],
-  [21_000, 'created-agent'],
-  [22_000, '\r'],
-  [23_000, '\r'],
-  [24_000, '\r'],
-  [25_000, '\r'],
-  [26_000, '\u001b[C'],
-  [27_000, '\u001b[D'],
-  [28_000, '\u001b[D'],
-  [29_000, 'd'],
-  [30_000, '\r'],
-  [31_000, 'q'],
-  [32_000, '\u001b'],
-  [33_000, 'q'],
-  [34_000, '\r'],
+  [14_600, '\u001b[H'],
+  [14_800, '\u001b[C'],
+  [15_000, '·'],
+  [15_200, '\u001b[F'],
+  [15_400, '\r'],
+  [16_400, '\u001b[D'],
+  [17_400, '\u001b[D'],
+  [18_400, '\t'],
+  [19_400, '\u001b[D'],
+  [20_400, 'a'],
+  [21_400, 'created-agent'],
+  [22_400, '\r'],
+  [23_400, '\r'],
+  [24_400, '\r'],
+  [25_400, '\r'],
+  [26_400, '\u001b[C'],
+  [27_400, '\u001b[D'],
+  [28_400, '\u001b[D'],
+  [29_400, 'd'],
+  [30_400, '\r'],
+  [31_400, 'q'],
+  [32_400, '\u001b'],
+  [33_400, 'q'],
+  [34_400, '\r'],
 ];
 for (const [delay, key] of keys) setTimeout(() => process.stdin.emit('data', Buffer.from(key)), delay);
 
@@ -144,6 +144,9 @@ try {
       if (entry.key === 'channel:dingtalk:default:enabled') channelToggles.push(instance.name);
       if (entry.key.includes(':subscriptions:')) subscriptionChanges.push(`${entry.key}=${entry.value}`);
       if (entry.key.includes(':defaultModes:')) defaultModeChanges.push(entry.key);
+      if (entry.key.endsWith(':defaultModes:directs')) {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 360));
+      }
       return '合成 Host 生命周期回执';
     },
     searchGroups: async (instance, query) => {
@@ -169,16 +172,26 @@ try {
   assert.match(plainTranscript, /编辑器验证群/);
   assert.match(plainTranscript, /INSTANCES/);
   assert.doesNotMatch(initialFrame, /^CHANNELS$|^CONVERSATIONS$|^RUNTIMES$|编辑器验证群|跨 Channel 私聊/m);
+  const instanceDetailFrame = plainTranscript.split('\u001b[H\u001b[2J')
+    .find((frame) => frame.includes('实例详情 / tui-smoke'));
+  assert.ok(instanceDetailFrame);
+  assert.ok(instanceDetailFrame.indexOf('CONVERSATIONS') < instanceDetailFrame.indexOf('MESSAGES received='));
   assert.match(plainTranscript, /Channel 设置 \/ tui-smoke \/ dingtalk\/default/);
   assert.match(plainTranscript, /群聊订阅\s+│\s+all/);
   assert.match(plainTranscript, /群聊默认模式\s+│\s+reply/);
   assert.match(plainTranscript, /私聊订阅\s+│\s+all/);
   assert.match(plainTranscript, /私聊默认模式\s+│\s+reply/);
+  const progressFrames = plainTranscript.split('\u001b[H\u001b[2J')
+    .filter((frame) => frame.includes('处理中：应用 私聊默认模式'));
+  assert.ok(progressFrames.length >= 2);
+  assert.match(progressFrames.join('\n'), /输入已暂时锁定，完成后自动刷新/);
   assert.match(plainTranscript, /GROUPS[\s\S]*DIRECTS/);
+  assert.match(plainTranscript, /d 删除会话/);
   assert.match(plainTranscript, /群组搜索 \/ tui-smoke \/ dingtalk\/default/);
   assert.match(plainTranscript, /合成搜索结果群/);
   assert.doesNotMatch(plainTranscript, /synthetic-search-result-id/);
   assert.match(plainTranscript, /Instance 设置 \/ tui-smoke/);
+  assert.match(plainTranscript, /Runtime cwd\s+│/);
   assert.match(plainTranscript, /小·小鹏/);
   assert.match(plainTranscript, /SETTING\s+│\s+VALUE\s+│\s+EFFECT/);
   assert.match(plainTranscript, /─+┼─+┼─+/);
@@ -225,15 +238,19 @@ try {
   await writeFile(resultPath, JSON.stringify({
     ok: true,
     tty: { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY },
-    observed: ['lean-global-overview', 'instance-detail', 'channel-detail', 'channel-toggle', 'group-subscription', 'group-default-mode', 'direct-subscription', 'direct-default-mode', 'group-search', 'group-bind', 'conversation-detail', 'delete-confirmation', 'delete-cancel', 'instance-delete', 'immediate-delete-refresh', 'instance-settings', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit-confirmation', 'exit-cancel', 'exit'],
+    observed: ['lean-global-overview', 'instance-detail', 'conversation-before-messages', 'channel-detail', 'channel-toggle', 'channel-delete-action', 'group-subscription', 'group-default-mode', 'direct-subscription', 'direct-default-mode', 'operation-progress', 'group-search', 'group-bind', 'conversation-detail', 'delete-confirmation', 'delete-cancel', 'instance-delete', 'immediate-delete-refresh', 'instance-settings', 'runtime-cwd-setting', 'cursor-edit', 'instance-create', 'global-settings', 'left-right-navigation', 'alternate-screen', 'exit-confirmation', 'exit-cancel', 'exit'],
     colorObserved: true,
     settingsColumnsDelimited: true,
+    conversationBeforeMessages: true,
+    runtimeCwdObserved: true,
+    channelDeleteActionObserved: true,
     instanceCreated: true,
     channelToggleObserved: channelToggles.length === 2,
     groupSearchObserved: groupSearches.length === 1,
     groupBound: Boolean(searchedConversation),
     subscriptionsObserved: config.channel.subscriptions.groups === 'all' && config.channel.subscriptions.directs === 'all',
     defaultModesObserved: config.channel.defaultModes.groups === 'reply' && config.channel.defaultModes.directs === 'reply',
+    operationProgressObserved: progressFrames.length >= 2,
     deleteConfirmationObserved: true,
     instanceDeleteObserved: deletedInstance === 'created-agent',
     immediateDeleteRefreshObserved: Boolean(deletedFrame),
