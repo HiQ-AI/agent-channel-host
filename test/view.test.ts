@@ -651,6 +651,10 @@ test('Instance 与 Conversation 删除均需二次确认，取消无副作用并
     assert.equal(deletedConversation, `${first.name}/${conversation.id}`);
     assert.equal(firstStore.getConversation(conversation.id), null);
     assert.equal(state.detailConversationId, null);
+    const conversationRefreshed = renderManagementView(instances, state, null, [], 120);
+    assert.match(conversationRefreshed, /CONVERSATIONS\n  \(none\)/);
+    assert.match(conversationRefreshed, /Conversation 待删除会话 已删除/);
+    assert.doesNotMatch(conversationRefreshed, /删除确认/);
 
     state.detailInstanceName = null;
     state.selectedInstance = 0;
@@ -659,6 +663,13 @@ test('Instance 与 Conversation 删除均需二次确认，取消无副作用并
     await handleManagementViewInput('d', state, instances, () => undefined, actions);
     assert.equal(deletedInstance, first.name);
     assert.deepEqual(instances.map((instance) => instance.name), [second.name]);
+    const refreshed = renderManagementView(instances, state, null, [], 120);
+    assert.match(refreshed, /instances=1/);
+    assert.doesNotMatch(refreshed, />\s+delete-instance/);
+    assert.match(refreshed, />\s+keep-instance/);
+    assert.equal(state.selectedInstance, 0);
+    assert.match(refreshed, /Instance delete-instance 已删除/);
+    assert.doesNotMatch(refreshed, /删除确认/);
   } finally {
     firstStore.close();
     secondStore.close();
