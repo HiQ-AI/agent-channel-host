@@ -27,17 +27,17 @@ flowchart LR
 - 常驻的是 Host、DWS 长连接和 SQLite 状态，不是每个 conversation 的 provider 进程。消息到达后才启动一轮 runtime CLI；该轮完成后进程退出。
 - 每个群聊/私聊持久化自己的 `(channel, profile, conversation) → runtime + provider session ID + generation`，彼此不共享 transcript。
 - 新 Codex 会话执行 `codex exec --json`；已有会话执行 `codex exec resume <原 ID> --json`。每次 resume 都校验 `thread.started.thread_id` 必须等于原 ID，否则 fail closed，不创建第二条 session。Host 不配置 output schema，也不解析 Agent final text。
-- 每个 turn 只转发一条消息的“发送者、时间、内容”。引用和合并转发折叠进内容；Host 不附带群名、私聊标识、成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息前增加一份短提醒。
+- 每个 turn 只转发当前批次内各条消息的“发送者、时间、内容”。引用和合并转发折叠进内容；Host 不附带群名、私聊标识、成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息前增加一份短提醒。
 - Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不覆盖 provider 的 developer/system 指令；Agent 的长期规则由 runtime 工作目录自行维护。
-- 每条消息先写 SQLite WAL，提交后才发进程内 ready signal。Host 启动时释放中断的 claim，并重新投递未完成及未达 3 次上限的失败消息。`turn.completed` 只证明 runtime 已完成本次输入，不代表 Agent 已回复或业务已完成。
-- quiet window 只用于降低 Worker 启动抖动，不再合并消息。新消息在当前 turn 后排队，Host 不打断已经传入 runtime 的消息。
+- 每条消息先写 SQLite WAL，提交后才发进程内 ready signal；静默窗口内已到达的消息按 `maxBatchMessages` 合成一次 runtime 输入。Host 启动时释放中断的 claim，并重新投递未完成及未达 3 次上限的失败消息。`turn.completed` 只证明 runtime 已完成本次输入，不代表 Agent 已回复或业务已完成。
+- quiet window 用于合并短时间内连续到达的消息。活动 turn 开始后才到达的新消息在当前 turn 后排队，Host 不打断已经传入 runtime 的消息；command runtime 不支持向活动 turn 追加输入或并发 resume 同一 session。
 - Host 不配置 turn 超时，也不会因运行时长或新消息终止活动 turn。Host 停止或 runtime 自身退出造成的未完成 claim 在下次启动时恢复。
-- 群首次接入时只读拉取最近 50 条消息，先逐条写入 history inbox，再按时间顺序交给该群固定 session。Host 不要求自我介绍、不接收决定，也不发送回复。
+- 群首次接入时只读拉取最近 50 条消息，先逐条写入 history inbox，再按时间顺序合成一个首次引导交给该群固定 session。Host 不要求自我介绍、不接收决定，也不发送回复。
 
 ## 三段扩展边界
 
 1. `ChannelAdapter` 负责连接、标准化入站和错误上报。当前实现是 DingTalk DWS；新增 Slack、Teams 等 Channel 时不得自行管理 Agent session。
-2. `ConversationHost / EventDrivenScheduler` 负责 route binding、durable inbox、ready signal、lease/claim、逐条顺序投递、Worker 生命周期和状态快照。
+2. `ConversationHost / EventDrivenScheduler` 负责 route binding、durable inbox、ready signal、lease/claim、同会话顺序合批投递、Worker 生命周期和状态快照。
 3. `RuntimeAdapter / AgentSession` 负责启动 runtime 命令、创建/恢复 session、接收一条消息并返回完成回执，以及暴露 session/process identity。当前实现是 Codex CLI；其他 runtime 各自实现这个契约。
 
 配置也按这三类职责拆分：`channel`、`runtime`、`scheduling`。当前版本只注册 `dingtalk` 与 `codex`，未知 adapter 会明确失败。每个 Channel 内分别配置群聊/私聊的准入范围和新 Conversation 默认模式；这些策略不改变底层唯一 owner。
@@ -308,7 +308,7 @@ agent-channel service remove --instance triss
 - Host 不覆盖 Codex 的 `approval_policy`、sandbox、network 或 writable roots；这些权限与 MCP/skills 一样由 runtime 自身配置加载。`runtime.cwd` 必须指向专用工作目录，部署者必须按该 runtime 的权限模型独立审计。
 - Host 不安装 compaction hook，也不覆盖用户的 developer/system 指令；短职责提醒属于低频普通上下文，不能作为权限隔离。Host 不审查 Agent 的命令、文件或内部任务行为。
 - Runtime 未返回 `turn.completed` 或命令异常退出时，仅将对应消息投递标为 failed；不会停止唯一 Channel owner 或阻断其他 Conversation。Host 不读取 Agent final text。
-- inbox 完成状态按单条消息写入。Host 重启发现活动 claim 时会提升 session generation，避免把同一消息再次输入可能已包含该消息的旧 transcript。
+- inbox 完成状态仍按单条消息写入；同一批消息共享一次 runtime turn。Host 重启发现活动 claim 时会提升 session generation，避免把同一消息再次输入可能已包含该消息的旧 transcript。
 
 ## 开发与验收
 
@@ -321,6 +321,6 @@ $canaryRoot = 'D:\baibu-agent\scratchpad\agent-channel-host-command-canary'
 node docs/acceptance/message-forwarding-proxy/scripts/codex-message-proxy-canary.mjs $canaryRoot
 ```
 
-自动化测试覆盖最小消息信封、实时与首次群历史逐条投递、Host 零发送、SQLite admission/去重/sequence、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、claim/release/有界失败恢复、session generation 重置审计、跨 Channel 路由、固定 session resume、lease、ready signal、新消息排队且不抢占、无 turn 超时、warm TTL、DWS 参数、错误处理、稳定 Conversation 选择、详情分区顺序、Runtime cwd 原子保存、Channel 行删除、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
+自动化测试覆盖最小消息信封、实时 burst 与首次群历史合批投递、Host 零发送、SQLite admission/去重/sequence、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、claim/release/有界失败恢复、session generation 重置审计、跨 Channel 路由、固定 session resume、lease、ready signal、活动 turn 后到消息排队且不并发 resume、无 turn 超时、warm TTL、DWS 参数、错误处理、稳定 Conversation 选择、详情分区顺序、Runtime cwd 原子保存、Channel 行删除、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
 
 真实 Codex canary 只验证 runtime CLI 与固定 session 恢复，不连接或发送 DingTalk。真实 DWS 收发必须在专用测试群/账号获得单独授权后执行。

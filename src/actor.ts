@@ -76,9 +76,13 @@ export class ConversationWorker {
     for (const message of history.messages) {
       this.store.admitEvent(this.conversation, historyEvent(this.conversation, message), 'history');
     }
-    while (true) {
-      const events = this.store.claimPendingEvents(this.conversation, this.workerId, 1, 'history');
-      if (events.length === 0) break;
+    const events = this.store.claimPendingEvents(
+      this.conversation,
+      this.workerId,
+      Math.max(1, history.messages.length),
+      'history',
+    );
+    if (events.length > 0) {
       try {
         const result = await this.session.deliver(batchPrompt(events));
         if (result.status !== 'completed') {
@@ -88,7 +92,7 @@ export class ConversationWorker {
         this.store.recordBatchDecision(events, this.workerId, result.turnId, 'completed', null, null);
         this.log({
           type: 'GROUP_HISTORY_DELIVERED', conversationId: this.conversation.id,
-          sequence: events[0]!.sequence, turnIdPrefix: result.turnId.slice(0, 12),
+          sequences: events.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
         });
       } catch (error) {
         this.store.recordBatchDecision(events, this.workerId, null, 'failed', null, null, (error as Error).message);
@@ -124,13 +128,16 @@ export class ConversationWorker {
   private async drain(): Promise<void> {
     while (!this.closed) {
       await this.waitForQuietWindow();
-      const events = this.store.claimPendingEvents(this.conversation, this.workerId, 1);
+      const events = this.store.claimPendingEvents(
+        this.conversation,
+        this.workerId,
+        this.config.scheduling.maxBatchMessages,
+      );
       if (events.length === 0) break;
-      const event = events[0]!;
       this.store.setWorkerState({
         conversationId: this.conversation.id, workerId: this.workerId,
         runtimeId: this.conversation.runtimeId, state: 'running', processId: this.session.processId,
-        claimedFromSequence: event.sequence, claimedToSequence: event.sequence,
+        claimedFromSequence: events[0]!.sequence, claimedToSequence: events.at(-1)!.sequence,
       });
       try {
         const result = await this.session.deliver(batchPrompt(events));
@@ -138,14 +145,14 @@ export class ConversationWorker {
           this.store.releaseClaimedEvents(events, this.workerId);
           this.log({
             type: 'MESSAGE_DELIVERY_INTERRUPTED', conversationId: this.conversation.id,
-            sequence: event.sequence, turnIdPrefix: result.turnId.slice(0, 12),
+            sequences: events.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
           });
           break;
         }
         this.store.recordBatchDecision(events, this.workerId, result.turnId, 'completed', null, null);
         this.log({
           type: 'MESSAGE_DELIVERED', conversationId: this.conversation.id,
-          sequence: event.sequence, turnIdPrefix: result.turnId.slice(0, 12),
+          sequences: events.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
         });
       } catch (error) {
         this.store.recordBatchDecision(events, this.workerId, null, 'failed', null, null, (error as Error).message);

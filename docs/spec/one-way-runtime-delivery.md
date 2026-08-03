@@ -9,8 +9,8 @@ Host 只可靠地把已授权 Channel 消息逐条送入对应 conversation 的�
 ```text
 Channel event
   → SQLite durable admission
-  → conversation 单 writer claim 一条消息
-  → RuntimeAdapter.deliver(发送者、时间、内容)
+  → conversation 单 writer claim 当前可用批次
+  → RuntimeAdapter.deliver(批次内各消息的发送者、时间、内容)
   → runtime turn.completed
   → inbox completed
 ```
@@ -19,7 +19,7 @@ Channel event
 - 新消息在当前 turn 后排队，不触发取消。
 - `turn.completed` 仅是 runtime 投递完成凭据，不表示 Agent 已处理或回复。
 - runtime final text、工具调用和回复行为均不进入 Host 协议。
-- 首次群历史先逐条写入 `ingress=history` 的 durable inbox，再按相同路径投递。
+- 首次群历史先逐条写入 `ingress=history` 的 durable inbox，再合成一次首次引导投递；每条消息仍保留独立 durable 状态。
 - Host 重启只恢复未完成/可重试 inbox，不恢复或发送旧 outbox。
 
 ## Runtime 契约

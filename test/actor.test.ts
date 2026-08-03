@@ -20,7 +20,7 @@ class RecordingSession implements AgentSession {
   async stop(): Promise<void> {}
 }
 
-test('实时消息逐条顺序传入固定 runtime session，Host 不调用 Channel send', async () => {
+test('实时消息按可用批次传入固定 runtime session，Host 不调用 Channel send', async () => {
   const config = defaultConfig('actor', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
@@ -41,10 +41,9 @@ test('实时消息逐条顺序传入固定 runtime session，Host 不调用 Chan
     admit('第二条');
     worker.signal();
     await waitFor(() => store.status().processed === 2);
-    assert.equal(session.prompts.length, 2);
+    assert.equal(session.prompts.length, 1);
     assert.match(session.prompts[0]!, /内容：第一条/);
-    assert.doesNotMatch(session.prompts[0]!, /第二条/);
-    assert.match(session.prompts[1]!, /内容：第二条/);
+    assert.match(session.prompts[0]!, /内容：第二条/);
     assert.equal(store.status().submitted, 0);
   } finally {
     await worker.stop();
@@ -52,7 +51,7 @@ test('实时消息逐条顺序传入固定 runtime session，Host 不调用 Chan
   }
 });
 
-test('首次群历史逐条传入 runtime，不接收决定也不发送回复', async () => {
+test('首次群历史合成一次引导传入 runtime，不接收决定也不发送回复', async () => {
   const config = defaultConfig('history', '.', 'Agent');
   const store = new Store(':memory:');
   const conversation = store.addConversation({
@@ -71,10 +70,9 @@ test('首次群历史逐条传入 runtime，不接收决定也不发送回复', 
   );
   try {
     await worker.start();
-    assert.equal(session.prompts.length, 2);
+    assert.equal(session.prompts.length, 1);
     assert.match(session.prompts[0]!, /历史一/);
-    assert.doesNotMatch(session.prompts[0]!, /历史二/);
-    assert.match(session.prompts[1]!, /历史二/);
+    assert.match(session.prompts[0]!, /历史二/);
     assert.equal(store.getGroupOnboarding(conversation.id)?.state, 'completed');
   } finally {
     await worker.stop();

@@ -142,7 +142,7 @@ test('会话级决策失败不升级为 Host fatal，后续消息仍由同一 Ch
   }
 });
 
-test('ready signal 将 burst 逐条投递到同一 session，warm TTL 后释放 Worker', async () => {
+test('ready signal 将 quiet window 内 burst 合批投递到同一 session，warm TTL 后释放 Worker', async () => {
   const config = defaultConfig('scheduler-burst', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 20;
   config.scheduling.maxBatchMessages = 20;
@@ -169,9 +169,9 @@ test('ready signal 将 burst 逐条投递到同一 session，warm TTL 后释放 
     }
     await waitFor(() => store.status().processed === 3);
     assert.equal(runtime.sessions.length, 1);
-    assert.equal(runtime.sessions[0]!.prompts.length, 3);
+    assert.equal(runtime.sessions[0]!.prompts.length, 1);
     assert.match(runtime.sessions[0]!.prompts[0]!, /消息 1/);
-    assert.match(runtime.sessions[0]!.prompts[2]!, /消息 1/);
+    assert.match(runtime.sessions[0]!.prompts[0]!, /消息 3/);
     assert.equal(scheduler.activeWorkerCount(), 1);
     await waitFor(() => runtime.sessions[0]!.stopped === 1);
     assert.equal(scheduler.activeWorkerCount(), 0);
@@ -249,10 +249,10 @@ test('active turn 内新消息排队且不打断已传入 runtime 的消息', as
     session.completeActive();
     await waitFor(() => store.status().processed === 3);
     assert.equal(session.interrupts, 0);
-    assert.equal(session.prompts.length, 3);
+    assert.equal(session.prompts.length, 2);
     assert.match(session.prompts[0]!, /cancel-1/);
     assert.match(session.prompts[1]!, /cancel-2/);
-    assert.match(session.prompts[2]!, /cancel-3/);
+    assert.match(session.prompts[1]!, /cancel-3/);
   } finally {
     await scheduler.stop();
     store.close();
