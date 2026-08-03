@@ -15,6 +15,9 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
   const cli = join(process.cwd(), 'dist', 'src', 'cli.js');
   const env = { ...process.env, AGENT_CHANNEL_HOME: root };
   try {
+    const packageJson = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')) as { version: string };
+    const version = await execFileAsync(process.execPath, [cli, '--version'], { encoding: 'utf8', env });
+    assert.equal(version.stdout.trim(), packageJson.version);
     const help = await execFileAsync(process.execPath, [cli, '--help'], { encoding: 'utf8', env });
     assert.match(help.stdout, /^Usage: agent-channel /);
     assert.doesNotMatch(help.stdout, /dingtalk-codex/);
