@@ -161,8 +161,12 @@ export function parseRecentGroupHistory(value: unknown): RecentGroupHistory {
 }
 
 export function formatDwsLocalTime(value: Date): string {
-  const pad = (part: number) => String(part).padStart(2, '0');
-  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(value);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value;
+  return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}`;
 }
 
 export async function fetchConversationBackfill(
@@ -668,6 +672,8 @@ function parseDwsMessageTime(value: unknown): string | null {
   const numeric = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
   const parsed = Number.isFinite(numeric)
     ? new Date(numeric < 10_000_000_000 ? numeric * 1_000 : numeric)
-    : new Date(raw.includes('T') ? raw : raw.replace(' ', 'T'));
+    : new Date(/(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)
+      ? raw
+      : `${raw.replace(' ', 'T')}+08:00`);
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }

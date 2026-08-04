@@ -1738,7 +1738,9 @@ function parseStoredMessageTime(value: unknown): number | null {
     return numeric < 10_000_000_000 ? numeric * 1_000 : numeric;
   }
   if (typeof value !== 'string' || !value.trim()) return null;
-  const parsed = Date.parse(value.includes('T') ? value : value.replace(' ', 'T'));
+  const parsed = Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/.test(value)
+    ? value
+    : `${value.replace(' ', 'T')}+08:00`);
   return Number.isFinite(parsed) ? parsed : null;
 }
 

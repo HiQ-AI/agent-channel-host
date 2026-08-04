@@ -539,7 +539,7 @@ test('首次群历史固定从当前本地时间向前拉 50 条，并按时间�
   const history = await fetchRecentGroupHistory(
     config,
     conversation,
-    new Date(2026, 7, 1, 1, 2, 3),
+    new Date('2026-08-01T01:02:03+08:00'),
     async (_config, args) => {
       captured = args;
       return {

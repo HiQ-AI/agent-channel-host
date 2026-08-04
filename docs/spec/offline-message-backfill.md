@@ -26,6 +26,7 @@ Host 重新启动后，对每个已启用 Conversation 补全本地最后一条�
 - 不新增第二个网络接收服务，不用轮询替代实时事件。
 - 不维护与 inbox 双写的独立水位表；水位从 durable inbox 推导。
 - DWS 历史接口只接受秒级本地时间，因此必须保留重叠窗口并依赖 message ID/fingerprint 幂等。
+- DWS 的无时区时间按钉钉中国区 `Asia/Shanghai` 解释和格式化，不依赖 Host 运行机器时区，保证 Windows 与 Linux 行为一致。
 - 首次群 onboarding 仍保留最近 50 条引导语义；启动补拉写入普通 durable inbox，不复用或改写 onboarding 状态。
 
 ## 验证

@@ -2,7 +2,7 @@
 
 ## 结果
 
-Round 1 全部 8 个用例 PASS，状态以 `matrix.csv` 为准。
+Round 2 全部 8 个用例 PASS，状态以 `matrix.csv` 为准。Round 2 额外在 `TZ=UTC` 下验证，消除了首轮 GitHub Actions 暴露的运行机器时区依赖。
 
 ## 已验证能力
 

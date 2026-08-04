@@ -309,7 +309,7 @@ agent-channel service remove --instance triss
 ## 可靠性与安全边界
 
 - SQLite WAL 保证 Host 收到事件后的本地 admission 与投递状态持久化。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
-- 离线补拉使用 `dws chat message list --direction newer`：群聊按 `--group`、私聊按 `--open-dingtalk-id` 分页读取。DWS 时间参数只有秒级，因此采用 2 秒重叠窗口；本地 durable inbox 是唯一水位事实源，不另维护双写 cursor。
+- 离线补拉使用 `dws chat message list --direction newer`：群聊按 `--group`、私聊按 `--open-dingtalk-id` 分页读取。DWS 时间参数只有秒级且无时区，Host 固定按 `Asia/Shanghai` 解释，因此采用 2 秒重叠窗口；本地 durable inbox 是唯一水位事实源，不另维护双写 cursor。
 - Host 启动只恢复未转发及未达 3 次上限的 failed inbox，不恢复或发送历史 outbox。schema v12 会把旧 `completed` 原位迁移为 `forwarded` 并删除旧 decision 表；遗留 outbox 不进入新运行路径。
 - Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner、一个 bus，以及按群聊/私聊订阅范围启停的共享 consumer。
 - Host 仅在 `dws event status` 同时返回 `state=running` 和可用 live RPC 时认定 bus ready；只有存活 PID、没有 IPC 的状态会明确报告为 stale bus/PID 复用。DWS 子进程退出时保留经脱敏且有界的 stderr 根因，不再只显示 `code=5`。
