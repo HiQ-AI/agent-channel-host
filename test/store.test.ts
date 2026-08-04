@@ -298,6 +298,22 @@ test('lease 只允许一个存活 owner', () => {
   store.close();
 });
 
+test('已验证停止的外部 Host 可按原 owner PID 原子释放 lease 与 Channel owner', () => {
+  const store = new Store(':memory:');
+  store.acquireLease('host', 'external-owner', Date.now(), 30_000);
+  store.setChannelConnection({
+    channelId: 'dingtalk', profileId: 'default', label: 'DingTalk', state: 'ready', ownerPid: 4321,
+  });
+  assert.throws(() => store.releaseStoppedExternalHost(9999), /不再是当前 Instance/);
+  store.releaseStoppedExternalHost(4321);
+  const status = store.status();
+  assert.equal(status.hostState, 'stopped');
+  assert.equal((status.channels as Array<Record<string, unknown>>)[0]?.state, 'stopped');
+  assert.equal((status.channels as Array<Record<string, unknown>>)[0]?.pid, null);
+  assert.equal(store.acquireLease('host', 'view-owner', Date.now(), 30_000), true);
+  store.close();
+});
+
 test('删除 Conversation 级联清理业务状态、Worker lease 与外置 recovery', () => {
   const path = resolve('.test-delete-conversation', 'state.sqlite3');
   rmSync(dirname(path), { recursive: true, force: true });
