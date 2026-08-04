@@ -110,12 +110,12 @@ test('首次群历史不再把批次 turn 冒充为逐消息判断结果', () =>
   try {
     const snapshot = store.status();
     assert.equal(snapshot.received, 0);
-    assert.equal(snapshot.processed, 0);
+    assert.equal(snapshot.forwarded_messages, 0);
     assert.equal(snapshot.history_loaded, 2);
-    assert.equal(snapshot.history_judged, 0);
+    assert.equal(snapshot.history_forwarded, 0);
     const rendered = renderManagementView([instance], state, null, [], 140);
-    assert.match(rendered, /MESSAGES received=0 .*processed=0/);
-    assert.match(rendered, /HISTORY loaded=2 delivered=0/);
+    assert.match(rendered, /MESSAGES received=0 .*forwarded=0/);
+    assert.match(rendered, /HISTORY loaded=2 forwarded=0/);
     assert.match(rendered, /历史证据群.*0\/2.*delivery_unknown/);
   } finally {
     store.close();

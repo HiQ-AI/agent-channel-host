@@ -76,11 +76,6 @@ export interface AdmittedEvent extends NormalizedEvent {
   ingress: 'live' | 'history';
 }
 
-export interface Decision {
-  action: 'silent' | 'reply';
-  replyText: string;
-}
-
 export interface SessionRecord {
   conversationId: string;
   runtimeId: string;
@@ -133,7 +128,7 @@ export interface OutboxRecord {
 
 export interface GroupOnboardingRecord {
   conversationId: string;
-  state: 'pending' | 'prepared' | 'sending' | 'completed' | 'submitted' | 'delivered' | 'failed' | 'delivery_unknown';
+  state: 'pending' | 'prepared' | 'sending' | 'forwarded' | 'submitted' | 'delivered' | 'failed' | 'delivery_unknown';
   historyCount: number | null;
   historyLoadedAt: string | null;
   introTurnId: string | null;

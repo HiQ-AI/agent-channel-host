@@ -1182,13 +1182,13 @@ function renderGlobalOverview(
     received: result.received + number(snapshot.received),
     pending: result.pending + number(snapshot.pending_messages),
     claimed: result.claimed + number(snapshot.claimed_messages),
-    processed: result.processed + number(snapshot.processed),
+    forwarded: result.forwarded + number(snapshot.forwarded_messages),
     failed: result.failed + number(snapshot.failed_messages),
     outbox: result.outbox + number(snapshot.pending_outbox),
     submitted: result.submitted + number(snapshot.submitted),
     historyLoaded: result.historyLoaded + number(snapshot.history_loaded),
-    historyJudged: result.historyJudged + number(snapshot.history_judged),
-  }), { received: 0, pending: 0, claimed: 0, processed: 0, failed: 0, outbox: 0, submitted: 0, historyLoaded: 0, historyJudged: 0 });
+    historyForwarded: result.historyForwarded + number(snapshot.history_forwarded),
+  }), { received: 0, pending: 0, claimed: 0, forwarded: 0, failed: 0, outbox: 0, submitted: 0, historyLoaded: 0, historyForwarded: 0 });
   lines.push('', messageSummary(totals, color), historySummary(totals, color));
   const alerts = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.alerts));
   if (alerts.length > 0) {
@@ -1245,7 +1245,7 @@ function renderInstanceOverview(
     ['', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'HISTORY', 'DELIVERY', 'WORKER', 'SESSION', 'RUNTIME'],
     conversations.map((row, index) => [
       state.instanceFocus === 'conversations' && index === state.selectedConversation ? '>' : ' ', row.channelId, row.title, row.mode, row.pending,
-      `${row.historyJudged ?? 0}/${row.historyLoaded ?? 0}`, row.onboardingState ?? '-',
+      `${row.historyForwarded ?? 0}/${row.historyLoaded ?? 0}`, row.onboardingState ?? '-',
       row.workerState, row.sessionState, row.runtimeId,
     ]), width, semanticTable(color, state.instanceFocus === 'conversations' ? state.selectedConversation : -1, 2),
   ));
@@ -1253,18 +1253,18 @@ function renderInstanceOverview(
     received: number(snapshot.received),
     pending: number(snapshot.pending_messages),
     claimed: number(snapshot.claimed_messages),
-    processed: number(snapshot.processed),
+    forwarded: number(snapshot.forwarded_messages),
     failed: number(snapshot.failed_messages),
     outbox: number(snapshot.pending_outbox),
     submitted: number(snapshot.submitted),
   }, color), historySummary({
     historyLoaded: number(snapshot.history_loaded),
-    historyJudged: number(snapshot.history_judged),
+    historyForwarded: number(snapshot.history_forwarded),
   }, color), '', heading('RECENT MESSAGES', color));
-  const messageHeaders = ['CHANNEL', 'CONVERSATION', 'SEQ', 'SENDER', 'STATE', 'ACTION', 'AGE'];
+  const messageHeaders = ['CHANNEL', 'CONVERSATION', 'SEQ', 'SENDER', 'STATE', 'AGE'];
   if (messages.some((row) => row.preview !== undefined)) messageHeaders.push('PREVIEW');
   lines.push(...table(messageHeaders, messages.map((row) => {
-    const values: unknown[] = [row.channelId, row.title, row.sequence, row.sender ?? '-', row.state, row.action ?? '-', age(row.receivedAt)];
+    const values: unknown[] = [row.channelId, row.title, row.sequence, row.sender ?? '-', row.state, age(row.receivedAt)];
     if (messageHeaders.includes('PREVIEW')) values.push(row.preview ?? '-');
     return values;
   }), width, semanticTable(color)));
@@ -1703,29 +1703,29 @@ function heading(value: string, color: boolean): string {
 }
 
 function messageSummary(
-  values: { received: number; pending: number; claimed: number; processed: number; failed: number; outbox: number; submitted: number },
+  values: { received: number; pending: number; claimed: number; forwarded: number; failed: number; outbox: number; submitted: number },
   color: boolean,
 ): string {
   return `${heading('MESSAGES', color)} received=${values.received}`
     + ` pending=${ansi(String(values.pending), values.pending > 0 ? 'yellow-bold' : 'dim', color)}`
     + ` claimed=${ansi(String(values.claimed), values.claimed > 0 ? 'yellow' : 'dim', color)}`
-    + ` processed=${ansi(String(values.processed), values.processed > 0 ? 'green' : 'dim', color)}`
+    + ` forwarded=${ansi(String(values.forwarded), values.forwarded > 0 ? 'green' : 'dim', color)}`
     + ` failed=${ansi(String(values.failed), values.failed > 0 ? 'red-bold' : 'dim', color)}`
     + ` outbox=${ansi(`${values.outbox}/${values.submitted}`, values.outbox > 0 ? 'yellow-bold' : 'dim', color)}`;
 }
 
 function historySummary(
-  values: { historyLoaded: number; historyJudged: number },
+  values: { historyLoaded: number; historyForwarded: number },
   color: boolean,
 ): string {
   return `${heading('HISTORY', color)} loaded=${ansi(String(values.historyLoaded), values.historyLoaded > 0 ? 'green' : 'dim', color)}`
-    + ` delivered=${ansi(String(values.historyJudged), values.historyJudged > 0 ? 'green' : 'dim', color)}`;
+    + ` forwarded=${ansi(String(values.historyForwarded), values.historyForwarded > 0 ? 'green' : 'dim', color)}`;
 }
 
 function statusText(value: string, color: boolean): string {
   const token = value.trim().toLowerCase();
   if (/^(error|failed|fatal|unknown|delivery_unknown)$/.test(token)) return ansi(value, 'red-bold', color);
-  if (/^(running|ready|completed|submitted|delivered|success|reply|enabled|true)$/.test(token)) return ansi(value, 'green-bold', color);
+  if (/^(running|ready|forwarded|submitted|delivered|success|reply|enabled|true)$/.test(token)) return ansi(value, 'green-bold', color);
   if (/^(starting|pending|claimed|processing|warm|view|shadow|provisioning|held|interrupted)$/.test(token)) {
     return ansi(value, 'yellow', color);
   }

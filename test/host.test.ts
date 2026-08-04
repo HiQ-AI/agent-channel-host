@@ -139,7 +139,7 @@ test('会话级决策失败不升级为 Host fatal，后续消息仍由同一 Ch
 
     admit(store, conversation, 'decision-recovery-2');
     scheduler.signal(conversation.id);
-    await waitFor(() => store.status().processed === 1);
+    await waitFor(() => store.status().forwarded_messages === 1);
     assert.deepEqual(fatalErrors, []);
     assert.equal(runtime.sessions.length, 1);
     assert.equal(runtime.sessions[0]!.prompts.length, 2);
@@ -174,7 +174,7 @@ test('ready signal 将 quiet window 内 burst 合批投递到同一 session，wa
       admit(store, conversation, `burst-${index}`);
       scheduler.signal(conversation.id);
     }
-    await waitFor(() => store.status().processed === 3);
+    await waitFor(() => store.status().forwarded_messages === 3);
     assert.equal(runtime.sessions.length, 1);
     assert.equal(runtime.sessions[0]!.prompts.length, 1);
     assert.match(runtime.sessions[0]!.prompts[0]!, /消息 1/);
@@ -257,7 +257,7 @@ test('active turn 内新消息立即 steer 且不打断已传入 runtime 的消�
     assert.match(session.steered.join('\n'), /cancel-2/);
     assert.match(session.steered.join('\n'), /cancel-3/);
     session.completeActive();
-    await waitFor(() => store.status().processed === 3);
+    await waitFor(() => store.status().forwarded_messages === 3);
     assert.equal(session.interrupts, 0);
     assert.equal(session.prompts.length, 1);
     assert.match(session.prompts[0]!, /cancel-1/);
@@ -292,7 +292,7 @@ test('启动 reconciliation 释放旧 claim 并只唤醒有 pending work 的 con
   );
   try {
     assert.deepEqual(scheduler.reconcile(), [pending.id]);
-    await waitFor(() => store.status().processed === 1);
+    await waitFor(() => store.status().forwarded_messages === 1);
     assert.equal(runtime.sessions.length, 1);
   } finally {
     await scheduler.stop();
@@ -340,7 +340,7 @@ test('Host 重启后重新处理可恢复 failed message，并继续使用原 Co
   );
   try {
     assert.deepEqual(secondScheduler.reconcile(), [conversation.id]);
-    await waitFor(() => store.status().processed === 1);
+    await waitFor(() => store.status().forwarded_messages === 1);
     assert.equal(store.status().failed_messages, 0);
     assert.equal(secondRuntime.sessions.length, 1);
     assert.match(secondRuntime.sessions[0]!.prompts[0]!, /failed-before-restart/);

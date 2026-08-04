@@ -45,7 +45,7 @@ export class ConversationWorker {
       if (this.conversation.kind === 'group') {
         const onboarding = this.store.getGroupOnboarding(this.conversation.id);
         if (!onboarding) throw new Error(`群 onboarding 状态不存在：${this.conversation.id}`);
-        if (!['completed', 'submitted', 'delivered', 'delivery_unknown'].includes(onboarding.state)) {
+        if (!['forwarded', 'submitted', 'delivered', 'delivery_unknown'].includes(onboarding.state)) {
           history = await this.loadGroupHistory(this.conversation);
         }
       }
@@ -75,7 +75,7 @@ export class ConversationWorker {
   private async deliverRecentHistory(history: RecentGroupHistory | null): Promise<void> {
     const onboarding = this.store.getGroupOnboarding(this.conversation.id);
     if (!onboarding) throw new Error(`群 onboarding 状态不存在：${this.conversation.id}`);
-    if (['completed', 'submitted', 'delivered', 'delivery_unknown'].includes(onboarding.state)) return;
+    if (['forwarded', 'submitted', 'delivered', 'delivery_unknown'].includes(onboarding.state)) return;
     if (!history) throw new Error('群 onboarding 缺少最近消息上下文');
     this.store.markGroupHistoryLoaded(this.conversation.id, history.count);
     for (const message of history.messages) {
@@ -99,15 +99,15 @@ export class ConversationWorker {
           this.store.releaseClaimedEvents(deliveredEvents, this.workerId);
           throw new Error('群最近消息未成功传入 runtime');
         }
-        this.store.recordBatchDecision(deliveredEvents, this.workerId, result.turnId, 'completed', null, null);
+        this.store.markBatchForwarded(deliveredEvents, this.workerId, result.turnId);
         this.log({
-          type: 'GROUP_HISTORY_DELIVERED', conversationId: this.conversation.id,
+          type: 'GROUP_HISTORY_FORWARDED', conversationId: this.conversation.id,
           sequences: deliveredEvents.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
         });
       } catch (error) {
         const failedEvents = this.activeEvents ?? events;
         this.activeEvents = null;
-        this.store.recordBatchDecision(failedEvents, this.workerId, null, 'failed', null, null, (error as Error).message);
+        this.store.markBatchFailed(failedEvents, this.workerId, (error as Error).message);
         throw error;
       }
     }
@@ -168,15 +168,15 @@ export class ConversationWorker {
           });
           break;
         }
-        this.store.recordBatchDecision(deliveredEvents, this.workerId, result.turnId, 'completed', null, null);
+        this.store.markBatchForwarded(deliveredEvents, this.workerId, result.turnId);
         this.log({
-          type: 'MESSAGE_DELIVERED', conversationId: this.conversation.id,
+          type: 'MESSAGE_FORWARDED', conversationId: this.conversation.id,
           sequences: deliveredEvents.map((event) => event.sequence), turnIdPrefix: result.turnId.slice(0, 12),
         });
       } catch (error) {
         const failedEvents = this.activeEvents ?? events;
         this.activeEvents = null;
-        this.store.recordBatchDecision(failedEvents, this.workerId, null, 'failed', null, null, (error as Error).message);
+        this.store.markBatchFailed(failedEvents, this.workerId, (error as Error).message);
         this.onError(error as Error, failedEvents);
         break;
       }
