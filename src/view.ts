@@ -157,7 +157,7 @@ export function createManagementViewState(): ManagementViewState {
     detailInstanceName: null,
     detailChannel: null,
     detailConversationId: null,
-    conversationDetailFocus: 'messages',
+    conversationDetailFocus: 'settings',
     selectedMember: 0,
     selectedMessage: 0,
     selectedMessageSequence: null,
@@ -280,7 +280,6 @@ export async function runView(
         settingsInstance.configFile,
       )
       : [];
-    if (state.selectedSetting >= settings.length) state.selectedSetting = Math.max(0, settings.length - 1);
     return renderManagementView(
       instances,
       state,
@@ -752,7 +751,7 @@ export async function handleManagementViewInput(
           state.selectedChannelItem = 0;
         } else {
           state.detailConversationId = state.selectedConversationId;
-          state.conversationDetailFocus = 'messages';
+          state.conversationDetailFocus = 'settings';
           state.selectedMember = 0;
           state.selectedMessage = 0;
           state.selectedMessageSequence = null;
@@ -799,7 +798,7 @@ async function activateChannelItem(
   if (item.kind === 'conversation') {
     state.detailConversationId = item.conversation.id;
     state.selectedConversationId = item.conversation.id;
-    state.conversationDetailFocus = 'messages';
+    state.conversationDetailFocus = 'settings';
     state.selectedMember = 0;
     state.selectedMessage = 0;
     state.selectedMessageSequence = null;
@@ -898,7 +897,7 @@ async function handleGroupSearchInput(
   state.groupSearch = null;
   state.detailConversationId = conversation.id;
   state.selectedConversationId = conversation.id;
-  state.conversationDetailFocus = 'messages';
+  state.conversationDetailFocus = 'settings';
   state.selectedMember = 0;
   state.selectedMessage = 0;
   state.selectedMessageSequence = null;
@@ -1248,7 +1247,10 @@ export function renderManagementView(
   ];
   if (state.tab === 'settings') lines.push(...renderGlobalSettings(instances, width, color));
   else if (state.groupSearch && detailInstance) lines.push(...renderGroupSearch(detailInstance, state.groupSearch, width, color));
-  else if (settingsInstance) lines.push(...renderInstanceSettings(settingsInstance, detail, settings, state, width, color));
+  else if (settingsInstance) {
+    state.selectedSetting = clamp(state.selectedSetting, 0, Math.max(0, settings.length - 1));
+    lines.push(...renderInstanceSettings(settingsInstance, detail, settings, state, width, color));
+  }
   else if (state.detailConversationId) lines.push(...renderConversationDetail(detailInstance, detail, state, width, height, color));
   else if (state.detailChannel && detailInstance) lines.push(...renderChannelManagement(detailInstance, state.detailChannel, state, width, color));
   else if (detailInstance) lines.push(...renderInstanceOverview(detailInstance, detailInstance.store.status(showContent), state, width, height, color));
