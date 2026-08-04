@@ -20,6 +20,10 @@ export interface CodexAppServerIdentity {
 
 const DRIVER_PROTOCOL = 'app-server-v1-turn-steer';
 const RESPONSIBILITY_REMINDER_INTERVAL_TURNS = 5;
+const NON_INTERACTIVE_THREAD_OPTIONS = {
+  approvalPolicy: 'never',
+  sandbox: 'danger-full-access',
+} as const;
 
 export async function verifyCodexAppServer(config: HostConfig): Promise<CodexAppServerIdentity> {
   const command = await resolveCommand(config.runtime.command);
@@ -53,6 +57,7 @@ export class CodexAppServerSession implements AgentSession {
   private providerSessionId: string | null = null;
   private activeTurnId: string | null = null;
   private stopping = false;
+  private terminalError: Error | null = null;
   private stderrTail: string[] = [];
   private completedTurnsSinceResponsibilityReminder = RESPONSIBILITY_REMINDER_INTERVAL_TURNS;
   private lastCompletedResponsibility: string | null = null;
@@ -70,6 +75,7 @@ export class CodexAppServerSession implements AgentSession {
 
   async start(): Promise<void> {
     if (this.child) throw new Error('Codex App Server session 已启动');
+    this.terminalError = null;
     this.child = spawn(this.identity.command.file, commandArgs(this.identity.command, ['app-server', '--listen', 'stdio://']), {
       cwd: this.config.runtime.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: process.env,
     });
@@ -97,7 +103,10 @@ export class CodexAppServerSession implements AgentSession {
       existing = null;
     }
     if (existing) {
-      const result = await this.request('thread/resume', { threadId: existing.providerSessionId }) as JsonObject;
+      const result = await this.request('thread/resume', {
+        threadId: existing.providerSessionId,
+        ...NON_INTERACTIVE_THREAD_OPTIONS,
+      }) as JsonObject;
       this.providerSessionId = threadIdFrom(result);
       if (this.providerSessionId !== existing.providerSessionId) throw new Error('thread/resume 未精确恢复原 session');
       return;
@@ -106,6 +115,7 @@ export class CodexAppServerSession implements AgentSession {
       model: this.config.runtime.model,
       cwd: this.config.runtime.cwd,
       serviceName: 'agent-channel-host',
+      ...NON_INTERACTIVE_THREAD_OPTIONS,
     }) as JsonObject;
     this.providerSessionId = threadIdFrom(result);
     if (!this.providerSessionId) throw new Error('thread/start 未返回 thread id');
@@ -189,6 +199,7 @@ export class CodexAppServerSession implements AgentSession {
   }
 
   private request(method: string, params: JsonObject): Promise<unknown> {
+    if (this.terminalError) return Promise.reject(this.terminalError);
     const id = this.requestId++;
     const response = new Promise<unknown>((resolve, reject) => this.pending.set(id, { resolve, reject }));
     this.send({ id, method, params });
@@ -206,6 +217,7 @@ export class CodexAppServerSession implements AgentSession {
   }
 
   private waitForCompletion(turnId: string): Promise<JsonObject> {
+    if (this.terminalError) return Promise.reject(this.terminalError);
     const buffered = this.notifications.get(turnId);
     if (buffered) {
       this.notifications.delete(turnId);
@@ -229,6 +241,10 @@ export class CodexAppServerSession implements AgentSession {
     let message: JsonObject;
     try { message = JSON.parse(line) as JsonObject; }
     catch (error) { this.failAll(new Error(`Codex App Server 输出非法 JSON：${(error as Error).message}`)); return; }
+    if (typeof message.method === 'string' && message.id !== undefined) {
+      this.rejectUnexpectedServerRequest(message);
+      return;
+    }
     if (typeof message.id === 'number' && this.pending.has(message.id)) {
       const pending = this.pending.get(message.id)!;
       this.pending.delete(message.id);
@@ -260,7 +276,27 @@ export class CodexAppServerSession implements AgentSession {
     else this.notifications.set(turnId, params);
   }
 
+  private rejectUnexpectedServerRequest(message: JsonObject): void {
+    const method = String(message.method);
+    const error = new Error(`后台 Codex Runtime 禁止交互请求：${method}`);
+    try {
+      this.send({
+        id: message.id,
+        error: { code: -32000, message: error.message },
+      });
+    } catch {
+      // failAll below remains the authoritative local terminal state.
+    }
+    this.failAll(error);
+    this.stopping = true;
+    const child = this.child;
+    void stopChild(child).finally(() => {
+      if (this.child === child) this.child = null;
+    });
+  }
+
   private failAll(error: Error): void {
+    this.terminalError ??= error;
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     for (const waiter of this.waiters) waiter.reject(error);
