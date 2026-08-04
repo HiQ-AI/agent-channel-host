@@ -13,11 +13,11 @@ import {
 } from './service.js';
 import { MAX_WORKER_WARM_SECONDS } from './types.js';
 import {
-  assertInteractiveView, runView, shouldStartHostForView, type SettingEntry, type ViewInstance,
+  assertInteractiveView, bindHostToInteractiveView, runView, type SettingEntry, type ViewInstance,
 } from './view.js';
 import { CLI_NAME, PRODUCT_VERSION } from './product.js';
 import {
-  deleteConversationWithLifecycle, deleteInstanceWithLifecycle, initializeInstance,
+  deleteConversationWithLifecycle, deleteInstanceWithLifecycle, initializeInstance, stopExternalHost,
 } from './instance.js';
 
 const program = new Command();
@@ -296,10 +296,7 @@ program.command('view')
     };
     try {
       for (const instance of instances) {
-        const startHost = shouldStartHostForView(options.once, instance.store.status());
-        instance.hostOwnership = options.once ? 'readonly' : startHost ? 'view' : 'attached';
-        if (!startHost) continue;
-        startManagedHost(instance);
+        await bindHostToInteractiveView(options.once, instance, stopExternalHost, startManagedHost);
       }
       await runView(instances, viewOptions, {
         createInstance: async (input) => {

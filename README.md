@@ -199,7 +199,7 @@ channel:
     directs: shadow
 ```
 
-`none/selected/all` 是唯一共享事件流上的 Host 准入策略，`shadow/reply` 是新 Conversation 的默认发言权限，两者互不替代。DingTalk 始终只有一个 Channel owner 和一个 bus；群聊或私聊配置为 `none` 时不启动该类共享 consumer，两类都为 `none` 时 Channel 保持空闲且不启动 DWS 事件流。不会为每个群或私聊创建接收服务。交互式 `view` 可在 Instance 的 Channel 页面逐项选择。View-owned Host 会按新配置重启；attached Host 只保存配置并提示外部重启。
+`none/selected/all` 是唯一共享事件流上的 Host 准入策略，`shadow/reply` 是新 Conversation 的默认发言权限，两者互不替代。DingTalk 始终只有一个 Channel owner 和一个 bus；群聊或私聊配置为 `none` 时不启动该类共享 consumer，两类都为 `none` 时 Channel 保持空闲且不启动 DWS 事件流。不会为每个群或私聊创建接收服务。交互式 `view` 可在 Instance 的 Channel 页面逐项选择，并管理全部 Instance Host 的重启。
 
 ## 离线 runtime canary
 
@@ -246,7 +246,7 @@ agent-channel view
 - `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 
-每个 Instance 设置页可修改仅供本地展示的 Agent 名称、Runtime cwd、runtime model/effort 和合批参数，不再维护 Agent 默认角色或回复签名。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；View-owned Host 随配置重启，attached Host 提示外部重启。若已有 provider session 的 cwd 与新值不一致，Host 会提升 generation 后创建新 session。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、会话职责、mode、warm TTL 和已观察成员资料；会话职责按周期提醒进入对应 runtime session，成员资料仍只供本地查询。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
+每个 Instance 设置页可修改仅供本地展示的 Agent 名称、Runtime cwd、runtime model/effort 和合批参数，不再维护 Agent 默认角色或回复签名。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；交互式 View 管理的 Host 随配置重启。若已有 provider session 的 cwd 与新值不一致，Host 会提升 generation 后创建新 session。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、会话职责、mode、warm TTL 和已观察成员资料；会话职责按周期提醒进入对应 runtime session，成员资料仍只供本地查询。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
 
 ### 删除 Instance 与 Conversation
 
@@ -254,7 +254,7 @@ agent-channel view
 
 - 在总览或 Instance 详情删除 Instance：停止当前 View 启动的 Host，移除可能存在的同名 Windows 用户计划任务，关闭数据库，再精确删除该 Instance 的配置、SQLite/WAL、日志和本地 session 映射。
 - 在 Channel 的 GROUPS/DIRECTS 选中会话，或在 Conversation 详情删除：停止目标 View-owned Host，级联删除消息、decision、outbox、runtime session/worker、旧 checkpoint、成员、首次群历史状态和 Worker lease；随后恢复该 Instance Host。两处都使用同一个二次确认和生命周期 action。
-- attached Host 仍存活时两种删除都 fail closed。View 不会越权修改外部进程持有的内存态；先用原进程管理方式停止 Host，再重新进入 `view` 删除。
+- 交互式 `view` 不保留 attached/readonly Host：启动时发现历史外部 `agent-channel run --instance <name>`，会按新鲜心跳、PID 和命令行精确校验并停止其进程树，原子释放旧 owner 后由当前 View 重启接管；因此删除操作始终面对 View-owned Host。PID 心跳过期、命令行不匹配或不是 Windows 时 fail closed，不按旧 PID 猜测进程。`view --once` 仍是零副作用的一次性只读快照。
 - 删除动作执行期间暂停周期刷新，避免读取已关闭的 Store；成功后由当前输入动作立即重绘，顶部计数、实例/会话列表、消息汇总、告警、选中项和确认状态无需等待下一次定时刷新。
 - Windows 上计划任务不存在按原始字节识别本地代码页，不会因中文错误乱码阻断删除；权限错误或无法识别的查询失败仍然 fail closed。
 
@@ -271,9 +271,10 @@ $env:NO_COLOR = '1'
 agent-channel view
 ```
 
-- 某个 instance 的 Host 未运行：`view` 在当前进程内为该 instance 启动唯一 Host；退出时只停止由本次 view 启动的 Host。
-- 某个 instance 的 Host 已运行：`view` 只 attach 该 instance 状态，不创建第二个 Channel owner；退出不停止原有 Host。
-- Channel 页面切换开关后：由当前 View 启动的 Host 只重启目标 Instance；attach 的外部 Host 不会被 View 越权停止，只提示用户重启该 Host。
+- 某个 instance 的 Host 未运行：`view` 在当前进程内启动唯一 Host。
+- 某个 instance 的 Host 已运行：`view` 精确停止历史 Host 后在当前进程内重启接管，不保留 attached/readonly 管理模式。
+- 退出 View：二次确认后停止全部由该 View 管理的 Host；再次进入 View 会重新启动。需要退出界面后继续常驻，应使用 `agent-channel run` 或用户级 service，而不是交互式 View。
+- Channel 页面切换开关后：当前 View 只重启目标 Instance Host。
 - 尚无 instance：仍进入空总览，`INSTANCES` 表直接显示“新增 Instance”；按 `a` 或在该行按 `Enter` 创建，不要求退出执行外部命令。
 - `--once`：聚合输出全部 instance 的一次脱敏快照，绝不启动 Host。
 - 非交互式服务：继续使用单 instance 的 `agent-channel run --instance <name>`。

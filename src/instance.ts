@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { access, rm } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import {
   defaultConfig, loadConfig, writeInitialConfig, type HostConfig,
 } from './config.js';
 import { configPath, instanceDir, statePath } from './paths.js';
 import { Store } from './store.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface InitializeInstanceInput {
   instance: string;
@@ -28,6 +32,34 @@ export interface ManagedInstanceState {
   name: string;
   store: Store;
   hostOwnership: 'attached' | 'view' | 'readonly';
+}
+
+export async function stopExternalHost(instance: ManagedInstanceState): Promise<number> {
+  if (instance.hostOwnership !== 'attached') throw new Error(`Instance ${instance.name} 当前不是外部 Host`);
+  const host = instance.store.status().host as { state?: unknown; pid?: unknown; heartbeatAt?: unknown } | undefined;
+  const pid = Number(host?.pid);
+  if (host?.state !== 'running' || !Number.isInteger(pid) || pid <= 0) {
+    throw new Error(`Instance ${instance.name} 没有可停止的活动外部 Host PID`);
+  }
+  const heartbeatMs = Date.parse(String(host?.heartbeatAt ?? ''));
+  if (!Number.isFinite(heartbeatMs) || Date.now() - heartbeatMs > 30_000) {
+    throw new Error(`Instance ${instance.name} 的 Host 心跳已过期，拒绝按旧 PID 停止`);
+  }
+  if (process.platform !== 'win32') throw new Error('停止外部 Host 当前只支持 Windows');
+  const escapedInstance = instance.name.replace(/'/g, "''");
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    `$target=Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"`,
+    `if($null -eq $target){throw 'Host PID ${pid} 已不存在'}`,
+    `if($target.Name -ne 'node.exe' -or $target.CommandLine -notlike '*agent-channel*' -or $target.CommandLine -notlike '*run*--instance*${escapedInstance}*'){throw 'PID ${pid} 不是目标 agent-channel Host'}`,
+    `& taskkill.exe /PID ${pid} /T /F | Out-Null`,
+    `if($LASTEXITCODE -ne 0){throw '停止 Host PID ${pid} 失败'}`,
+  ].join(';');
+  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8', windowsHide: true,
+  });
+  instance.store.releaseStoppedExternalHost(pid);
+  return pid;
 }
 
 export async function initializeInstance(

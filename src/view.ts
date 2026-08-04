@@ -148,6 +148,24 @@ export function shouldStartHostForView(once: boolean, snapshot: Record<string, u
   return !once && snapshot.hostState !== 'running';
 }
 
+export async function bindHostToInteractiveView(
+  once: boolean,
+  instance: ViewInstance,
+  stopExternal: (instance: ViewInstance) => Promise<unknown>,
+  startManaged: (instance: ViewInstance) => void,
+): Promise<void> {
+  if (once) {
+    instance.hostOwnership = 'readonly';
+    return;
+  }
+  if (!shouldStartHostForView(false, instance.store.status())) {
+    instance.hostOwnership = 'attached';
+    await stopExternal(instance);
+  }
+  instance.hostOwnership = 'readonly';
+  startManaged(instance);
+}
+
 export function shouldUseColor(isTTY: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
   return isTTY && env.NO_COLOR === undefined && env.TERM !== 'dumb';
 }
@@ -1089,7 +1107,7 @@ export function renderManagementView(
     lines.push(
       '',
       heading('退出确认', color),
-      `退出 View 将停止 ${ansi(String(owned), owned > 0 ? 'yellow-bold' : 'dim', color)} 个由当前 View 启动的 Host；attached/readonly Host 保持运行。`,
+      `退出 View 将停止全部 ${ansi(String(owned), owned > 0 ? 'yellow-bold' : 'dim', color)} 个由当前 View 管理的 Host。`,
     );
   }
   if (state.destructiveConfirmation) {
@@ -1099,7 +1117,7 @@ export function renderManagementView(
     if (confirmation.kind === 'instance') {
       lines.push(
         ansi(`将删除 Instance ${confirmation.label} 的配置、SQLite/WAL、recovery、日志和本地 session 映射。`, 'red-bold', color),
-        `Host owner=${statusText(target?.hostOwnership ?? 'unknown', color)}；attached Host 存活时会拒绝删除。`,
+        `Host owner=${statusText(target?.hostOwnership ?? 'unknown', color)}；删除前会停止当前 View 管理的 Host。`,
       );
     } else {
       lines.push(
@@ -1428,7 +1446,6 @@ function renderConversationDetail(detail: Record<string, unknown> | null, width:
 
 function renderGlobalSettings(instances: ViewInstance[], width: number, color: boolean): string[] {
   const owned = instances.filter((instance) => instance.hostOwnership === 'view').length;
-  const attached = instances.filter((instance) => instance.hostOwnership === 'attached').length;
   return [
     heading('全局设置', color),
     ansi('作用域：当前 agent-channel-host View 及其管理的全部 Instances。', 'dim', color),
@@ -1438,7 +1455,6 @@ function renderGlobalSettings(instances: ViewInstance[], width: number, color: b
       [
         ['Instances', instances.length, '全局只读状态'],
         ['View-owned Hosts', owned, '由当前 View 管理'],
-        ['Attached Hosts', attached, '外部进程，仅观察'],
       ],
       width,
       {
@@ -1466,11 +1482,9 @@ function renderInstanceSettings(
   const lines = [
     `${heading(`Instance 设置 / ${instance.name}`, color)}  Agent=${instance.config.identity.name}`,
     `Runtime=${instance.config.runtime.id}  Channels=${channels.filter((channel) => channel.enabled).length}/${channels.length}`,
-    ansi(instance.hostOwnership === 'attached'
-      ? '当前连接到外部 Host；conversation/member 设置下一 turn 生效，config.yaml 设置建议重启 Host。'
-      : instance.hostOwnership === 'view'
+    ansi(instance.hostOwnership === 'view'
         ? '当前 Host 由 view 启动；配置在后续 turn/batch 生效。'
-        : '当前为只读快照；未启动或 attach Host。', instance.hostOwnership === 'view' ? 'yellow' : 'dim', color),
+        : '当前为一次性只读快照；未启动 Host。', instance.hostOwnership === 'view' ? 'yellow' : 'dim', color),
     `当前会话：${text(conversation.title) ?? '无（当前仅编辑 instance 配置）'}`,
   ];
   for (const section of ['instance', 'channels', 'conversation', 'members'] as const) {

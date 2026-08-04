@@ -7,7 +7,7 @@ import { anonymousConversationTitle } from '../src/conversation-title.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import {
-  createManagementViewState, createSettingEntries, handleManagementViewInput, renderManagementView,
+  bindHostToInteractiveView, createManagementViewState, createSettingEntries, handleManagementViewInput, renderManagementView,
   renderPendingOperation, renderStatusView,
   shouldStartHostForView, shouldUseColor, terminalDisplayWidth, VIEW_ALTERNATE_SCREEN_ENTER, VIEW_ALTERNATE_SCREEN_EXIT,
   type ViewInstance,
@@ -340,6 +340,28 @@ test('view 仅在交互模式且 Host 未运行时启动 owner', () => {
   assert.equal(shouldStartHostForView(true, { hostState: 'stopped' }), false);
 });
 
+test('交互式 View 对运行中的外部 Host 先停止再绑定为 View-owned，once 保持只读', async () => {
+  const runningStore = new Store(':memory:');
+  runningStore.acquireLease('host', 'external', Date.now(), 30_000);
+  const running = viewInstance('running', defaultConfig('running', '.', 'Agent'), runningStore);
+  const calls: string[] = [];
+  await bindHostToInteractiveView(false, running, async (instance) => {
+    calls.push(`stop:${instance.hostOwnership}`);
+    instance.store.releaseLease('host', 'external');
+  }, (instance) => {
+    calls.push(`start:${instance.hostOwnership}`);
+    instance.hostOwnership = 'view';
+  });
+  assert.deepEqual(calls, ['stop:attached', 'start:readonly']);
+  assert.equal(running.hostOwnership, 'view');
+
+  const once = viewInstance('once', defaultConfig('once', '.', 'Agent'), new Store(':memory:'));
+  await bindHostToInteractiveView(true, once, async () => { throw new Error('不应停止'); }, () => { throw new Error('不应启动'); });
+  assert.equal(once.hostOwnership, 'readonly');
+  runningStore.close();
+  once.store.close();
+});
+
 test('view 颜色遵循 TTY、NO_COLOR 与 dumb terminal', () => {
   assert.equal(shouldUseColor(true, {}), true);
   assert.equal(shouldUseColor(false, {}), false);
@@ -428,8 +450,9 @@ test('退出确认说明 Host 影响，取消后保留编辑现场且 Ctrl+C/Ent
   const firstStore = new Store(':memory:');
   const secondStore = new Store(':memory:');
   const first = viewInstance('exit-owned', defaultConfig('exit-owned', '.', '小小鹏'), firstStore);
-  const second = viewInstance('exit-attached', defaultConfig('exit-attached', '.', '翠丝'), secondStore);
+  const second = viewInstance('exit-owned-second', defaultConfig('exit-owned-second', '.', '翠丝'), secondStore);
   first.hostOwnership = 'view';
+  second.hostOwnership = 'view';
   const instances = [first, second];
   const state = createManagementViewState();
   state.detailInstanceName = first.name;
@@ -446,8 +469,7 @@ test('退出确认说明 Host 影响，取消后保留编辑现场且 Ctrl+C/Ent
       instances, state, null, createSettingEntries(first.config, first.store, null), 96,
     );
     assert.match(confirmation, /退出确认/);
-    assert.match(confirmation, /停止 1 个由当前 View 启动的 Host/);
-    assert.match(confirmation, /attached\/readonly Host 保持运行/);
+    assert.match(confirmation, /停止全部 2 个由当前 View 管理的 Host/);
 
     await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
     assert.equal(state.exitConfirmation, false);

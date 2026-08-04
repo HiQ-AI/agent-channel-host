@@ -1318,6 +1318,26 @@ export class Store {
     this.db.prepare('DELETE FROM host_lease WHERE lease_key=? AND owner_id=?').run(key, ownerId);
   }
 
+  releaseStoppedExternalHost(expectedPid: number): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const owned = this.db.prepare(`
+        SELECT COUNT(*) AS count FROM channel_connections
+        WHERE owner_pid=? AND state IN ('starting','ready','error')
+      `).get(expectedPid) as Row;
+      if (Number(owned.count) === 0) throw new Error(`PID ${expectedPid} 不再是当前 Instance 的 Channel owner`);
+      this.db.prepare(`
+        UPDATE channel_connections SET state='stopped',owner_pid=NULL,error=NULL,updated_at=?
+        WHERE owner_pid=?
+      `).run(new Date().toISOString(), expectedPid);
+      this.db.prepare('DELETE FROM host_lease WHERE lease_key=?').run('host');
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   setWorkerState(input: {
     conversationId: string;
     workerId: string | null;
