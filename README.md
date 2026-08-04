@@ -267,6 +267,8 @@ Conversation 删除后不会用原 provider session 恢复；如果以后重新�
 
 交互式终端会进入 alternate screen，以固定窗口刷新，不把历史帧留在主终端 scrollback；退出或收到 SIGINT/SIGTERM 时恢复原屏幕和光标。刷新采用逐行差量渲染，只覆写发生变化的行；终端尺寸变化时才执行一次完整重绘。需要稳定选择文字时按 `p` 暂停显示，再按 `p` 读取最新状态并恢复刷新；暂停只影响 View，Host 与消息处理继续在后台运行。界面用少量语义颜色突出当前选中项、正常/等待/异常状态和告警。`INSTANCES`、Channel 与 Instance 设置表格使用清晰分隔并按终端显示宽度左对齐；中文、全角字符、常见 emoji 和组合字符不会再按 JavaScript 字符长度误算列宽。`view --once` 和非交互输出不进入 alternate screen，也始终不带 ANSI；需要在交互终端禁用颜色时设置 `NO_COLOR`：
 
+`CONVERSATIONS`、Conversation 详情的 `MEMBERS` 和 `RECENT MESSAGES` 使用按终端高度计算的内部视口，内容不会继续向终端下方生长。`↑/↓` 逐行移动，`PgUp/PgDn` 翻页，`Home/End` 到首尾；会话详情用 Tab 在成员和消息间切换焦点。视口显示当前范围、总数及上下剩余条数；新消息到达时以 sequence 保持当前选中消息，不自动抢回最新一条。`RECENT MESSAGES` 固定包含 `CONTENT` 列；默认显示为隐藏提示，使用 `agent-channel view --show-content` 才显示截断正文。
+
 ```powershell
 $env:NO_COLOR = '1'
 agent-channel view

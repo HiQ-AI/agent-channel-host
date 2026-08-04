@@ -721,6 +721,70 @@ test('p 暂停 View 显示但不停止 Host，恢复后继续刷新', async () =
   }
 });
 
+test('大表格按终端高度建立内部视口，并以 sequence 保持消息选中位置', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('viewport', '.', 'Agent');
+  const conversations = Array.from({ length: 10 }, (_, index) => store.addConversation({
+    kind: 'group', externalId: `viewport-group-${index}`, title: `会话-${index}`,
+    responsibility: '', mode: 'shadow',
+  }));
+  const target = conversations[0]!;
+  for (let index = 0; index < 10; index += 1) {
+    store.updateConversationMember(target.id, `member-${index}`, { displayName: `成员-${index}` });
+    store.admitEvent(target, normalizeDwsEvent({
+      type: 'user_im_message_receive_group', event_id: `viewport-event-${index}`,
+      conversation_id: target.externalId, sender_open_dingtalk_id: `member-${index}`,
+      sender_name: `成员-${index}`, content: `这是第 ${index} 条用于视口验证的消息内容`,
+    })!);
+  }
+  const instance = viewInstance('viewport', config, store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.instanceFocus = 'conversations';
+  state.selectedConversation = 9;
+  state.selectedConversationId = conversations[9]!.id;
+  try {
+    const instanceView = renderManagementView([instance], state, null, [], 120, false, false, 24);
+    assert.ok(instanceView.split('\n').length <= 24);
+    assert.match(instanceView, /显示 7-10 \/ 共 10 条/);
+    assert.match(instanceView, />\s+dingtalk\s+会话-9/);
+    assert.doesNotMatch(instanceView, /会话-0/);
+    await handleManagementViewInput('\u001b[H', state, [instance], () => undefined);
+    assert.equal(state.selectedConversation, 0);
+    await handleManagementViewInput('\u001b[6~', state, [instance], () => undefined);
+    assert.equal(state.selectedConversation, 6);
+
+    state.detailConversationId = target.id;
+    state.selectedConversationId = target.id;
+    state.conversationDetailFocus = 'messages';
+    let detail = store.conversationDetail(target.id, true)!;
+    let detailView = renderManagementView([instance], state, detail, [], 120, true, false, 28);
+    assert.ok(detailView.split('\n').length <= 28);
+    assert.match(detailView, /CONTENT/);
+    assert.match(detailView, /用于视口验证的消息内容/);
+    assert.match(detailView, /显示 1-3 \/ 共 10 条/);
+    await handleManagementViewInput('\u001b[6~', state, [instance], () => undefined);
+    const selectedSequence = state.selectedMessageSequence;
+    assert.ok(selectedSequence !== null);
+    store.admitEvent(target, normalizeDwsEvent({
+      type: 'user_im_message_receive_group', event_id: 'viewport-event-new',
+      conversation_id: target.externalId, sender_open_dingtalk_id: 'member-new',
+      sender_name: '新成员', content: '新到达但不抢走当前消息焦点',
+    })!);
+    detail = store.conversationDetail(target.id, true)!;
+    detailView = renderManagementView([instance], state, detail, [], 120, true, false, 28);
+    assert.equal(state.selectedMessageSequence, selectedSequence);
+    assert.match(detailView, /↑ 还有/);
+    await handleManagementViewInput('\t', state, [instance], () => undefined);
+    assert.equal(state.conversationDetailFocus, 'members');
+    await handleManagementViewInput('\u001b[F', state, [instance], () => undefined);
+    assert.equal(state.selectedMember, 10);
+    assert.match(renderManagementView([instance], state, detail, [], 120, true, false, 28), /显示 9-11 \/ 共 11 条/);
+  } finally {
+    store.close();
+  }
+});
+
 test('设置、群搜索和 Instance 向导支持光标移动、Home End 及前后删除', async () => {
   const store = new Store(':memory:');
   const config = defaultConfig('cursor-edit', '.', 'Agent');
