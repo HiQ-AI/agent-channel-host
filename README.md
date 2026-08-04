@@ -4,7 +4,7 @@
 
 当前可运行组合是 DingTalk DWS + Codex App Server。DingTalk 不以 `@` 作为唯一入口；每条授权消息都会进入所属 conversation 的固定 Codex session，活动 turn 中的新消息通过 `turn/steer` 立即引导同一 turn。每个消息批次会携带一次 Channel 消息来源（渠道、群聊/私聊类型、可直接回复的外部目标 ID 和名称），不暴露 Host 内部 Conversation UUID。Host 不接收 Agent 的处理结果，不判断是否回复，也不代发回复；Agent 根据自己的工作目录、配置、工具和独立历史，自行决定是否处理、怎么处理、是否回复以及怎么回复。项目不提供第二套消息接收服务。
 
-首版发布 Node.js/TypeScript npm package，命令名为 `agent-channel`，不提供 Windows portable zip/exe。
+项目以公开 Node.js/TypeScript npm package `@zzusp/agent-channel-host` 发布，命令名为 `agent-channel`，不提供 Windows portable zip/exe。
 
 ## 运行机制
 
@@ -51,6 +51,13 @@ flowchart LR
 - 已安装并登录 Codex CLI；当前固定基线为 `codex-cli 0.145.0`。
 - DWS/Codex 凭据由各自 CLI 管理；Host 配置与数据库不复制 token、cookie 或 client secret。
 
+## 从 npm 安装
+
+```powershell
+npm install --global @zzusp/agent-channel-host
+agent-channel --help
+```
+
 ## 从源码安装
 
 ```powershell
@@ -81,11 +88,11 @@ git pull --ff-only origin main
 npm ci
 npm run verify
 
-npm unlink --global @hiq-ai/agent-channel-host
+npm unlink --global @zzusp/agent-channel-host
 npm link
 
 agent-channel --version
-(Get-Item "$(npm root --global)\@hiq-ai\agent-channel-host").Target
+(Get-Item "$(npm root --global)\@zzusp\agent-channel-host").Target
 ```
 
 版本应与仓库 `package.json` 一致，链接目标应为当前仓库目录。`npm unlink/link` 只替换命令安装链接，不删除 `%LOCALAPPDATA%\agent-channel-host` 下的 Instance 配置、SQLite 或 runtime session 映射。
