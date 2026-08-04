@@ -294,6 +294,14 @@ program.command('view')
       startManagedHost(instance);
       return `${entry.label} 已保存；Instance Host 已按新配置重启`;
     };
+    const refreshManagedHost = async (instance: ViewInstance, reason: string): Promise<string> => {
+      if (instance.hostOwnership !== 'view') {
+        return `${reason}；当前是 ${instance.hostOwnership} Host，请重启外部 Host 以加载最近 50 条消息`;
+      }
+      await stopManagedHost(instance);
+      startManagedHost(instance);
+      return `${reason}；Instance Host 已重启并开始加载最近 50 条消息`;
+    };
     try {
       for (const instance of instances) {
         await bindHostToInteractiveView(options.once, instance, stopExternalHost, startManagedHost);
@@ -314,6 +322,9 @@ program.command('view')
           if (!options.once) startManagedHost(instance);
         },
         afterSettingApplied: restartManagedHost,
+        afterConversationAdded: async (instance, conversation) => (
+          refreshManagedHost(instance, `已绑定群组“${conversation.title}”`)
+        ),
         searchGroups: async (instance, query) => (await searchDwsGroups(instance.config, query))
           .map((group) => ({ title: group.title, externalId: group.openConversationId })),
         deleteConversation: async (instance, conversationId) => {

@@ -6,6 +6,7 @@ import { defaultConfig, loadConfig } from '../src/config.js';
 import { anonymousConversationTitle } from '../src/conversation-title.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
+import type { Conversation } from '../src/types.js';
 import {
   bindHostToInteractiveView, createManagementViewState, createSettingEntries, handleManagementViewInput, inspectRequiredTools, renderFrameDiff, renderManagementView,
   renderPendingOperation, renderStatusView,
@@ -265,6 +266,23 @@ test('management view 在交互终端使用语义颜色，纯文本输出不带 
     assert.match(colored, /\u001b\[1;32mready/);
     assert.equal(stripAnsi(colored).replace(/refreshed=[^\n]+/, 'refreshed=<time>'), plain.replace(/refreshed=[^\n]+/, 'refreshed=<time>'));
     assert.doesNotMatch(renderStatusView(instances), /\u001b\[/);
+  } finally {
+    store.close();
+  }
+});
+
+test('重新启用群聊要求刷新 Host，私聊启用仍保持即时准入', () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('conversation-enable', '.', 'Agent');
+  const group = store.addConversation({ kind: 'group', externalId: 'group', title: '群聊', responsibility: '', mode: 'shadow' });
+  const direct = store.addConversation({ kind: 'direct', externalId: 'direct', title: '私聊', responsibility: '', mode: 'shadow' });
+  try {
+    store.setConversationEnabled(group.id, false);
+    store.setConversationEnabled(direct.id, false);
+    const groupEnabled = createSettingEntries(config, store, group.id).find((entry) => entry.key.endsWith(':enabled'))!;
+    const directEnabled = createSettingEntries(config, store, direct.id).find((entry) => entry.key.endsWith(':enabled'))!;
+    assert.equal(groupEnabled.restartHost, true);
+    assert.equal(directEnabled.restartHost, false);
   } finally {
     store.close();
   }
@@ -698,6 +716,7 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，职责未�
   config.channel.defaultModes.groups = 'reply';
   state.selectedChannelItem = 5;
   const searches: string[] = [];
+  const added: string[] = [];
   const actions = {
     searchGroups: async (_instance: ViewInstance, query: string) => {
       searches.push(query);
@@ -706,6 +725,10 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，职责未�
         { title: '重复候选', externalId: 'synthetic-open-conversation-id' },
         { title: '', externalId: 'invalid' },
       ];
+    },
+    afterConversationAdded: async (_instance: ViewInstance, conversation: Conversation) => {
+      added.push(conversation.id);
+      return 'Host 已重启并开始加载最近 50 条消息';
     },
   };
   try {
@@ -728,12 +751,15 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，职责未�
     assert.equal(bound[0]?.runtimeId, 'codex');
     assert.equal(state.detailConversationId, bound[0]?.id);
     assert.deepEqual(searches, ['编辑器']);
+    assert.deepEqual(added, [bound[0]!.id]);
+    assert.match(state.notice ?? '', /最近 50 条消息/);
 
     await handleManagementViewInput('\u001b[D', state, instances, () => undefined, actions);
     state.selectedChannelItem = 5;
     await handleManagementViewInput('\u001b[C', state, instances, () => undefined, actions);
     assert.equal(state.detailConversationId, bound[0]?.id);
     assert.equal(store.listConversations().length, 1);
+    assert.deepEqual(added, [bound[0]!.id]);
   } finally {
     store.close();
   }
