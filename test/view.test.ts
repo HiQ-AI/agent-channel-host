@@ -411,6 +411,7 @@ test('management view 从会话详情直接编辑内嵌 Conversation 设置', as
     assert.equal(state.instanceFocus, 'conversations');
     await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
     assert.equal(state.detailConversationId, conversation.id);
+    assert.equal(state.conversationDetailFocus, 'settings');
     await handleManagementViewInput('s', state, instances, () => { stopped = true; });
     assert.equal(state.tab, 'overview');
     assert.equal(state.settingsInstanceName, null);
@@ -418,6 +419,9 @@ test('management view 从会话详情直接编辑内嵌 Conversation 设置', as
     assert.equal(state.conversationDetailFocus, 'settings');
     await handleManagementViewInput('\u001b[B', state, instances, () => { stopped = true; });
     assert.equal(state.selectedSetting, 1);
+    renderManagementView(instances, state, store.conversationDetail(conversation.id), [], 120);
+    renderManagementView(instances, state, store.conversationDetail(conversation.id), [], 120);
+    assert.equal(state.selectedSetting, 1, '即时重绘和后续自动刷新不得把内嵌设置选择重置为首项');
     await handleManagementViewInput('\u001b[A', state, instances, () => { stopped = true; });
     assert.equal(state.selectedSetting, 0);
     await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
