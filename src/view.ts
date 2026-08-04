@@ -62,7 +62,7 @@ export interface ChannelGroupCandidate {
 
 export interface SettingEntry {
   key: string;
-  section: 'instance' | 'channels' | 'conversation' | 'members';
+  section: 'instance' | 'channels' | 'conversation';
   input: 'text' | 'toggle' | 'select';
   options?: readonly string[];
   label: string;
@@ -923,20 +923,6 @@ export function createSettingEntries(
       },
     ),
   );
-  for (const member of store.listConversationMembers(conversationId)) {
-    const label = redact(member.displayName ?? member.externalUserId);
-    entries.push(
-      storeSetting(`member:${member.externalUserId}:organizationRole`, `成员 ${label} · 组织角色`, member.organizationRole, '仅本地资料，不自动注入 runtime', async (value) => {
-        store.updateConversationMember(conversationId, member.externalUserId, { organizationRole: value });
-      }, 'members'),
-      storeSetting(`member:${member.externalUserId}:conversationRole`, `成员 ${label} · 会话角色`, member.conversationRole, '仅本地资料，不自动注入 runtime', async (value) => {
-        store.updateConversationMember(conversationId, member.externalUserId, { conversationRole: value });
-      }, 'members'),
-      storeSetting(`member:${member.externalUserId}:boundary`, `成员 ${label} · 职责边界`, member.responsibilityBoundary, '仅本地资料，不自动注入 runtime', async (value) => {
-        store.updateConversationMember(conversationId, member.externalUserId, { responsibilityBoundary: value });
-      }, 'members'),
-    );
-  }
   return entries;
 }
 
@@ -1268,8 +1254,6 @@ function renderInstanceOverview(
   });
   const conversations = array(snapshot.conversations);
   const runtimeAdapters = array(snapshot.runtimeAdapters);
-  const messages = array(snapshot.messages);
-  const alerts = array(snapshot.alerts);
   const host = object(snapshot.host);
   const lines = [
     `${heading(`实例详情 / ${instance.name}`, color)}  Agent=${instance.config.identity.name}  host=${statusText(text(host.state) ?? 'unknown', color)}  pid=${text(host.pid) ?? '-'}  ${statusText(instance.hostOwnership, color)}`,
@@ -1293,25 +1277,6 @@ function renderInstanceOverview(
       row.workerState, row.sessionState, row.runtimeId,
     ]), width, semanticTable(color, state.instanceFocus === 'conversations' ? state.selectedConversation : -1, 2),
   ));
-  lines.push('', messageSummary({
-    received: number(snapshot.received),
-    pending: number(snapshot.pending_messages),
-    claimed: number(snapshot.claimed_messages),
-    forwarded: number(snapshot.forwarded_messages),
-    failed: number(snapshot.failed_messages),
-    outbox: number(snapshot.pending_outbox),
-    submitted: number(snapshot.submitted),
-  }, color), historySummary({
-    historyLoaded: number(snapshot.history_loaded),
-    historyForwarded: number(snapshot.history_forwarded),
-  }, color), '', heading('RECENT MESSAGES', color));
-  const messageHeaders = ['CHANNEL', 'CONVERSATION', 'SEQ', 'SENDER', 'STATE', 'AGE'];
-  if (messages.some((row) => row.preview !== undefined)) messageHeaders.push('PREVIEW');
-  lines.push(...table(messageHeaders, messages.map((row) => {
-    const values: unknown[] = [row.channelId, row.title, row.sequence, row.sender ?? '-', row.state, age(row.receivedAt)];
-    if (messageHeaders.includes('PREVIEW')) values.push(row.preview ?? '-');
-    return values;
-  }), width, semanticTable(color)));
   lines.push('', heading('RUNTIMES', color));
   lines.push(...table(
     ['RUNTIME', 'LABEL', 'STATE', 'MODEL', 'RECOVERY', 'ERROR'],
@@ -1319,15 +1284,6 @@ function renderInstanceOverview(
     width,
     semanticTable(color),
   ));
-  if (alerts.length > 0) {
-    lines.push('', heading('ALERTS', color), ...alerts.map((row) => renderAlert(
-      `${text(row.scope)}/${text(row.target)}`,
-      row.error,
-      row.at,
-      width,
-      color,
-    )));
-  }
   return lines;
 }
 
@@ -1531,7 +1487,7 @@ function renderInstanceSettings(
         : '当前为一次性只读快照；未启动 Host。', instance.hostOwnership === 'view' ? 'yellow' : 'dim', color),
     `当前会话：${text(conversation.title) ?? '无（当前仅编辑 instance 配置）'}`,
   ];
-  for (const section of ['instance', 'channels', 'conversation', 'members'] as const) {
+  for (const section of ['instance', 'channels', 'conversation'] as const) {
     const sectionEntries = settings
       .map((entry, index) => ({ entry, index }))
       .filter(({ entry }) => entry.section === section);
@@ -1966,8 +1922,4 @@ function textLength(value: string): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
-}
-
-function redact(value: string): string {
-  return value.length <= 1 ? `${value}*` : `${value.slice(0, 1)}***${value.slice(-1)}`;
 }

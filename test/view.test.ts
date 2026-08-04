@@ -85,7 +85,6 @@ test('ALERTS 将遗留 DWS 长错误压缩为单行脱敏摘要', () => {
   const config = defaultConfig('alert-summary', '.', 'Agent');
   const instance = viewInstance('alert-summary', config, store);
   const state = createManagementViewState();
-  state.detailInstanceName = instance.name;
   try {
     const rendered = renderManagementView([instance], state, null, [], 72);
     assert.match(rendered, /onboarding\/测试群: delivery_unknown: duplicate_uuid/);
@@ -114,9 +113,8 @@ test('首次群历史不再把批次 turn 冒充为逐消息判断结果', () =>
     assert.equal(snapshot.history_loaded, 2);
     assert.equal(snapshot.history_forwarded, 0);
     const rendered = renderManagementView([instance], state, null, [], 140);
-    assert.match(rendered, /MESSAGES received=0 .*forwarded=0/);
-    assert.match(rendered, /HISTORY loaded=2 forwarded=0/);
     assert.match(rendered, /历史证据群.*0\/2.*delivery_unknown/);
+    assert.doesNotMatch(rendered, /MESSAGES received=|HISTORY loaded=|RECENT MESSAGES|ALERTS/);
   } finally {
     store.close();
   }
@@ -186,14 +184,15 @@ test('management view 明确分离总览内 INSTANCES 与全局设置', () => {
     assert.match(instanceView, /CHANNELS/);
     assert.match(instanceView, /CONVERSATIONS/);
     assert.match(instanceView, /RUNTIMES/);
-    assert.match(instanceView, /RECENT MESSAGES/);
     assert.match(instanceView, /私聊 A/);
-    assert.ok(instanceView.indexOf('CONVERSATIONS') < instanceView.indexOf('MESSAGES received='));
-    assert.ok(instanceView.indexOf('CONVERSATIONS') < instanceView.indexOf('RECENT MESSAGES'));
+    assert.doesNotMatch(instanceView, /MESSAGES received=|HISTORY loaded=|RECENT MESSAGES|ALERTS/);
+    assert.ok(instanceView.indexOf('CHANNELS') < instanceView.indexOf('CONVERSATIONS'));
+    assert.ok(instanceView.indexOf('CONVERSATIONS') < instanceView.indexOf('RUNTIMES'));
 
     state.detailConversationId = first.id;
     const detailView = renderManagementView(instances, state, detail, settings, 140);
     assert.match(detailView, /会话详情 \/ 私聊 A/);
+    assert.match(detailView, /RECENT MESSAGES/);
     assert.doesNotMatch(detailView, /member-a/);
 
     state.detailInstanceName = null;
@@ -272,7 +271,7 @@ test('instance 设置使用清晰的列分隔符并保持左对齐', () => {
   }
 });
 
-test('settings 使用同一 schema 原子保存 config，并更新 conversation 与成员资料', async () => {
+test('settings 使用同一 schema 原子保存 config 和 conversation，但不提供成员资料编辑', async () => {
   const root = resolve('.test-view-settings');
   const configFile = resolve(root, 'config.yaml');
   await rm(root, { recursive: true, force: true });
@@ -305,6 +304,7 @@ test('settings 使用同一 schema 原子保存 config，并更新 conversation 
     assert.deepEqual(entries.find((entry) => entry.key.endsWith(':mode'))?.options, ['shadow', 'reply']);
     assert.equal(entries.some((entry) => entry.key === 'identity.role'), false);
     assert.equal(entries.some((entry) => entry.key === 'identity.signature'), false);
+    assert.equal(entries.some((entry) => entry.key.startsWith('member:')), false);
     assert.doesNotMatch(await readFile(configFile, 'utf8'), /\n\s+(role|signature):/);
     await assert.rejects(entries.find((entry) => entry.key === 'runtime.effort')!.apply('light'), /Invalid option/);
 
@@ -321,13 +321,16 @@ test('settings 使用同一 schema 原子保存 config，并更新 conversation 
     await handleManagementViewInput('\r', state, [instance], () => undefined);
     assert.equal(state.editing, null);
     assert.equal(state.notice, '会话模式 · 更新后的私聊 已选择 reply');
-    await entries.find((entry) => entry.key.endsWith(':organizationRole'))!.apply('产品经理');
     assert.equal(store.getConversation(conversation.id)?.responsibility, '新职责边界');
     assert.equal(store.getConversation(conversation.id)?.mode, 'reply');
     assert.equal(store.getConversation(conversation.id)?.title, '更新后的私聊');
     assert.equal(store.getConversation(conversation.id)?.enabled, false);
     assert.equal(store.getConversation(conversation.id)?.policyVersion, 5);
-    assert.equal(store.listConversationMembers(conversation.id)[0]?.organizationRole, '产品经理');
+    assert.equal(store.listConversationMembers(conversation.id)[0]?.organizationRole, '');
+    assert.doesNotMatch(
+      renderManagementView([instance], state, store.conversationDetail(conversation.id), entries, 140),
+      /MEMBERS|成员甲/,
+    );
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
