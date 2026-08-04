@@ -6,7 +6,7 @@ Host 只负责把已授权 Channel 消息可靠、逐条地投递到对应 runti
 
 Channel 的 `subscriptions.groups/directs=all` 会把该 DWS 账号可见的未知会话自动登记并持久化首条消息；默认 `selected` 才是最小范围。扩大为 `all` 前应核对账号可见范围和数据保留要求。既有 `defaultModes`/Conversation mode 仅为兼容配置与本地展示，不构成 Agent 工具权限或 Host 出站门禁。
 
-每条实时消息和首次群历史消息先写入 SQLite WAL，再按 conversation 固定 session 串行投递。Host 只以 runtime 的 `turn.completed` 作为本次投递完成凭据；这不证明 Agent 已处理、已回复或业务已完成。Host 启动时恢复被中断的 claim，并重试未达上限的 failed inbox。旧数据库中的 decision、outbox 和 onboarding 发送字段仅作迁移遗留数据保留，不会被新运行路径执行。
+每条实时消息和首次群历史消息先写入 SQLite WAL，再按 conversation 固定 session 串行投递。Host 只以 runtime 的 `turn.completed` 生成 `forwarded` 转发凭据；不记录 `completed/processed`，不创建或保留 decision 表，也不证明 Agent 已处理、已回复或业务已完成。Host 启动时恢复被中断的 claim，并重试未达上限的 failed inbox。旧 outbox 仅作迁移遗留数据保留，不会被新运行路径执行。
 
 Host 不设置 turn 超时。活动 claim 不按时间自动释放；新消息在 runtime 确认 turn 已开始后通过原生 steer 引导当前 turn，不抢占也不并发 resume。steer 拒绝或失败时 Worker fail closed，不静默排队到新 turn；Host 停止或 runtime 异常退出时显式收口，异常进程退出后的 claim 由下次启动 reconciliation 释放。
 

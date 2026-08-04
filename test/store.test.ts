@@ -119,7 +119,7 @@ test('启动 reconciliation 只恢复可重试 inbox，不执行遗留 outbox', 
     .run(inbox.id);
   store.db.prepare("UPDATE inbound_events SET processing_state='failed',failure_count=3,last_error='terminal' WHERE conversation_id=? AND sequence=4")
     .run(inbox.id);
-  store.db.prepare("UPDATE inbound_events SET processing_state='completed' WHERE conversation_id=? AND sequence=5").run(inbox.id);
+  store.db.prepare("UPDATE inbound_events SET processing_state='forwarded' WHERE conversation_id=? AND sequence=5").run(inbox.id);
 
   const send = store.addConversation({
     kind: 'direct', externalId: 'recover-outbox', title: '恢复发送', responsibility: '回答问题', mode: 'reply',
@@ -127,7 +127,7 @@ test('启动 reconciliation 只恢复可重试 inbox，不执行遗留 outbox', 
   const outboundEvent = store.admitEvent(send, makeEvent(send.externalId, 'recover-outbox-event')).event!;
   const original = store.enqueueOutbox(outboundEvent, '恢复回复', '00000000-0000-4000-8000-000000000777')!;
   store.db.prepare("UPDATE outbox SET state='failed',attempt_count=1,error='temporary-send' WHERE id=?").run(original.id);
-  store.db.prepare("UPDATE inbound_events SET processing_state='completed' WHERE id=?").run(outboundEvent.id);
+  store.db.prepare("UPDATE inbound_events SET processing_state='forwarded' WHERE id=?").run(outboundEvent.id);
 
   const exhaustedSend = store.addConversation({
     kind: 'direct', externalId: 'exhausted-outbox', title: '达到重试上限', responsibility: '回答问题', mode: 'reply',
@@ -137,7 +137,7 @@ test('启动 reconciliation 只恢复可重试 inbox，不执行遗留 outbox', 
     makeEvent(exhaustedSend.externalId, 'exhausted-outbox-event'),
   ).event!;
   const exhausted = store.enqueueOutbox(exhaustedEvent, '不应继续发送', '00000000-0000-4000-8000-000000000779')!;
-  store.db.prepare("UPDATE inbound_events SET processing_state='completed' WHERE id=?").run(exhaustedEvent.id);
+  store.db.prepare("UPDATE inbound_events SET processing_state='forwarded' WHERE id=?").run(exhaustedEvent.id);
   store.db.prepare("UPDATE outbox SET state='sending',attempt_count=3 WHERE id=?").run(exhausted.id);
 
   const completedSend = store.addConversation({
@@ -145,7 +145,7 @@ test('启动 reconciliation 只恢复可重试 inbox，不执行遗留 outbox', 
   });
   const completedEvent = store.admitEvent(completedSend, makeEvent(completedSend.externalId, 'completed-outbox-event')).event!;
   const submitted = store.enqueueOutbox(completedEvent, '已发送回复', '00000000-0000-4000-8000-000000000778')!;
-  store.db.prepare("UPDATE inbound_events SET processing_state='completed' WHERE id=?").run(completedEvent.id);
+  store.db.prepare("UPDATE inbound_events SET processing_state='forwarded' WHERE id=?").run(completedEvent.id);
   store.db.prepare("UPDATE outbox SET state='submitted',attempt_count=1 WHERE id=?").run(submitted.id);
 
   assert.deepEqual(store.recoverPendingWork(), [inbox.id]);
@@ -154,7 +154,7 @@ test('启动 reconciliation 只恢复可重试 inbox，不执行遗留 outbox', 
     WHERE conversation_id=? ORDER BY sequence
   `).all(inbox.id) as Array<{ sequence: number; processing_state: string; failure_count: number }>;
   assert.deepEqual(states.map((row) => [row.sequence, row.processing_state, row.failure_count]), [
-    [1, 'admitted', 0], [2, 'admitted', 0], [3, 'admitted', 1], [4, 'failed', 3], [5, 'completed', 0],
+    [1, 'admitted', 0], [2, 'admitted', 0], [3, 'admitted', 1], [4, 'failed', 3], [5, 'forwarded', 0],
   ]);
   assert.equal(store.listPendingOutbox(send.id).length, 0);
   assert.equal(store.getOutbox(original.id)?.state, 'failed');
@@ -179,7 +179,7 @@ test('delivery_unknown 是需关注但不自动重试的发送终态', () => {
     sender_open_dingtalk_id: direct.externalId, content: '需要回复',
   })!).event!;
   const outbox = store.enqueueOutbox(event, '本轮回复', 'unknown-outbox-uuid')!;
-  store.db.prepare("UPDATE inbound_events SET processing_state='completed' WHERE id=?").run(event.id);
+  store.db.prepare("UPDATE inbound_events SET processing_state='forwarded' WHERE id=?").run(event.id);
   assert.ok(store.claimOutboxIfFresh(outbox.id));
   store.finishOutbox(outbox.id, 'delivery_unknown', 'delivery_unknown:duplicate_uuid');
 
@@ -209,7 +209,7 @@ test('outbox 在有更新消息时拒绝旧决定，发送前再次检查 freshn
   store.close();
 });
 
-test('批次决定、inbox 完成与可选 outbox 在同一事务提交', () => {
+test('批次成功只记录 Runtime 转发凭据，不创建 Host decision 或业务完成标记', () => {
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'direct', externalId: 'atomic-user', title: '原子私聊', responsibility: '本地备注', mode: 'reply',
@@ -222,30 +222,19 @@ test('批次决定、inbox 完成与可选 outbox 在同一事务提交', () => 
   })!;
   store.admitEvent(conversation, normalized);
   const claimed = store.claimPendingEvents(conversation, 'atomic-worker', 20);
-  const outbox = store.recordBatchDecision(
-    claimed,
-    'atomic-worker',
-    'atomic-turn',
-    'completed',
-    { action: 'reply', replyText: '处理结果' },
-    { text: '处理结果', uuid: '00000000-0000-4000-8000-000000000088' },
-  );
-  assert.equal(store.status().processed, 1);
-  assert.equal(outbox?.state, 'pending');
-  assert.equal(outbox?.text, '处理结果');
-  const decision = store.db.prepare(`
-    SELECT action,reply_text,responsibility_match,category,reason_code,work_type,delegation
-    FROM decisions WHERE inbound_event_id=?
+  store.markBatchForwarded(claimed, 'atomic-worker', 'atomic-turn');
+  assert.equal(store.status().forwarded_messages, 1);
+  assert.equal(store.status().processed, undefined);
+  const receipt = store.db.prepare(`
+    SELECT processing_state,forwarded_turn_id,forwarded_at FROM inbound_events WHERE id=?
   `).get(claimed[0]!.id) as Record<string, unknown>;
-  assert.deepEqual({ ...decision }, {
-    action: 'reply',
-    reply_text: '处理结果',
-    responsibility_match: null,
-    category: null,
-    reason_code: null,
-    work_type: null,
-    delegation: null,
-  });
+  assert.equal(receipt.processing_state, 'forwarded');
+  assert.equal(receipt.forwarded_turn_id, 'atomic-turn');
+  assert.ok(receipt.forwarded_at);
+  assert.equal(store.db.prepare(
+    "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='decisions'",
+  ).get()!.count, 0);
+  assert.equal(store.status().pending_outbox, 0);
   store.close();
 });
 
@@ -531,7 +520,7 @@ test('v1 会话迁移后补 onboarding 和每类生命周期默认值', () => {
     assert.equal(migrated.getConversation('group-v1')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v1')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
     assert.equal(migrated.getConversation('group-v1')?.policyVersion, 1);
     migrated.close();
   } finally {
@@ -565,7 +554,7 @@ test('v2 会话迁移到当前 schema 时得到固定逻辑 session 和按需 Wo
     assert.equal(migrated.getConversation('group-v2')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v2')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -630,7 +619,7 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
     assert.equal(onboarding?.introUuid, null);
     assert.equal(migrated.getGroupOnboarding('group-v3-submitted')?.state, 'submitted');
     assert.deepEqual(migrated.db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -672,7 +661,71 @@ test('v5 Channel 状态表迁移后保留旧记录并允许 disabled', () => {
       `).get() as { state: string; label: string };
       assert.equal(row.state, 'disabled');
       assert.equal(row.label, 'DingTalk DWS');
-      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
+    } finally {
+      migrated.close();
+    }
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
+test('v11 completed 与空 decision 迁移为纯 forwarded 凭据', () => {
+  const path = resolve('.test-v11-forwarding-state', 'state.sqlite3');
+  rmSync(dirname(path), { recursive: true, force: true });
+  mkdirSync(dirname(path), { recursive: true });
+  const old = new DatabaseSync(path);
+  old.exec(`
+    CREATE TABLE conversations (
+      id TEXT PRIMARY KEY,kind TEXT NOT NULL,external_id TEXT NOT NULL,title TEXT NOT NULL,
+      responsibility TEXT NOT NULL,mode TEXT NOT NULL,enabled INTEGER NOT NULL,
+      created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+    );
+    CREATE TABLE inbound_events (
+      id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,sequence INTEGER NOT NULL,fingerprint TEXT NOT NULL UNIQUE,
+      event_id TEXT,message_id TEXT,sender_id TEXT,sender_name TEXT,body_json TEXT NOT NULL,occurred_at TEXT,
+      received_at TEXT NOT NULL,processing_state TEXT NOT NULL,claim_owner TEXT,claim_expires_at_ms INTEGER,
+      claimed_at TEXT,failure_count INTEGER NOT NULL DEFAULT 0,last_error TEXT,ingress TEXT NOT NULL DEFAULT 'live'
+    );
+    CREATE TABLE decisions (
+      inbound_event_id TEXT PRIMARY KEY,turn_id TEXT,turn_status TEXT NOT NULL,action TEXT,
+      responsibility_match INTEGER,category TEXT,reply_text TEXT,reason_code TEXT,
+      work_type TEXT,delegation TEXT,subagent_thread_id TEXT,created_at TEXT NOT NULL
+    );
+    CREATE TABLE group_onboarding (
+      conversation_id TEXT PRIMARY KEY,state TEXT NOT NULL,history_count INTEGER,history_loaded_at TEXT,
+      intro_turn_id TEXT,intro_text TEXT,intro_uuid TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+    );
+    INSERT INTO conversations VALUES(
+      'v11-group','group','cid-v11','旧完成群','职责','reply',1,'2026-01-01','2026-01-01'
+    );
+    INSERT INTO inbound_events VALUES(
+      'v11-event','v11-group',1,'v11-fingerprint','event',NULL,'sender','同事','{}',NULL,
+      '2026-01-02','completed',NULL,NULL,NULL,0,NULL,'history'
+    );
+    INSERT INTO decisions VALUES(
+      'v11-event','turn-v11','completed',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'2026-01-03'
+    );
+    INSERT INTO group_onboarding VALUES(
+      'v11-group','completed',1,'2026-01-02','turn-v11',NULL,NULL,NULL,'2026-01-01','2026-01-03'
+    );
+    PRAGMA user_version=11;
+  `);
+  old.close();
+  try {
+    const migrated = new Store(path);
+    try {
+      const event = migrated.db.prepare(`
+        SELECT processing_state,forwarded_turn_id,forwarded_at FROM inbound_events WHERE id='v11-event'
+      `).get() as Record<string, unknown>;
+      assert.deepEqual({ ...event }, {
+        processing_state: 'forwarded', forwarded_turn_id: 'turn-v11', forwarded_at: '2026-01-03',
+      });
+      assert.equal(migrated.getGroupOnboarding('v11-group')?.state, 'forwarded');
+      assert.equal(migrated.db.prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='decisions'",
+      ).get()!.count, 0);
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
     } finally {
       migrated.close();
     }

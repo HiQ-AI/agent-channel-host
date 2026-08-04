@@ -10,7 +10,6 @@ import type {
   ConversationKind,
   ConversationMember,
   ConversationMode,
-  Decision,
   GroupOnboardingRecord,
   NormalizedEvent,
   OutboxRecord,
@@ -478,6 +477,56 @@ export class Store {
         PRAGMA user_version=11;
       `);
     }
+    const forwardingStateVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (forwardingStateVersion < 12) {
+      this.db.exec('PRAGMA foreign_keys=OFF');
+      try {
+        this.db.exec(`
+          BEGIN IMMEDIATE;
+          ALTER TABLE inbound_events ADD COLUMN forwarded_turn_id TEXT;
+          ALTER TABLE inbound_events ADD COLUMN forwarded_at TEXT;
+          UPDATE inbound_events SET
+            forwarded_turn_id=(SELECT d.turn_id FROM decisions d WHERE d.inbound_event_id=inbound_events.id),
+            forwarded_at=COALESCE(
+              (SELECT d.created_at FROM decisions d WHERE d.inbound_event_id=inbound_events.id),
+              received_at
+            ),
+            processing_state='forwarded'
+          WHERE processing_state='completed';
+          DROP TABLE decisions;
+
+          CREATE TABLE group_onboarding_v12 (
+            conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+            state TEXT NOT NULL CHECK(state IN (
+              'pending','prepared','sending','forwarded','submitted','delivered','failed','delivery_unknown'
+            )),
+            history_count INTEGER,
+            history_loaded_at TEXT,
+            intro_turn_id TEXT,
+            intro_text TEXT,
+            intro_uuid TEXT UNIQUE,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO group_onboarding_v12(
+            conversation_id,state,history_count,history_loaded_at,intro_turn_id,intro_text,intro_uuid,error,created_at,updated_at
+          ) SELECT
+            conversation_id,CASE WHEN state='completed' THEN 'forwarded' ELSE state END,
+            history_count,history_loaded_at,intro_turn_id,intro_text,intro_uuid,error,created_at,updated_at
+          FROM group_onboarding;
+          DROP TABLE group_onboarding;
+          ALTER TABLE group_onboarding_v12 RENAME TO group_onboarding;
+          PRAGMA user_version=12;
+          COMMIT;
+        `);
+      } catch (error) {
+        try { this.db.exec('ROLLBACK'); } catch { /* transaction was not active */ }
+        throw error;
+      } finally {
+        this.db.exec('PRAGMA foreign_keys=ON');
+      }
+    }
   }
 
   addConversation(input: {
@@ -844,78 +893,40 @@ export class Store {
     }
   }
 
-  recordBatchDecision(
-    events: AdmittedEvent[],
-    workerId: string,
-    turnId: string | null,
-    turnStatus: 'completed' | 'failed',
-    decision: Decision | null,
-    outbound: { text: string; uuid: string } | null = null,
-    error: string | null = null,
-  ): OutboxRecord | null {
-    if (events.length === 0) return null;
-    let outboxId: string | null = null;
+  markBatchForwarded(events: AdmittedEvent[], workerId: string, turnId: string): void {
+    if (events.length === 0) return;
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const statement = this.db.prepare(`
-        INSERT INTO decisions(
-          inbound_event_id,turn_id,turn_status,action,responsibility_match,category,reply_text,reason_code,
-          work_type,delegation,subagent_thread_id,created_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(inbound_event_id) DO UPDATE SET
-          turn_id=excluded.turn_id,turn_status=excluded.turn_status,action=excluded.action,
-          responsibility_match=excluded.responsibility_match,category=excluded.category,
-          reply_text=excluded.reply_text,reason_code=excluded.reason_code,work_type=excluded.work_type,
-          delegation=excluded.delegation,subagent_thread_id=excluded.subagent_thread_id,created_at=excluded.created_at
-      `);
-      const complete = this.db.prepare(`
-        UPDATE inbound_events SET processing_state=?,
-          failure_count=failure_count+?,last_error=?,
+      const forward = this.db.prepare(`
+        UPDATE inbound_events SET processing_state='forwarded',
+          forwarded_turn_id=?,forwarded_at=?,last_error=NULL,
           claim_owner=NULL,claim_expires_at_ms=NULL,claimed_at=NULL
         WHERE id=? AND processing_state='claimed' AND claim_owner=?
       `);
       const now = new Date().toISOString();
-      for (let index = 0; index < events.length; index += 1) {
-        const event = events[index]!;
-        const isTail = index === events.length - 1;
-        const itemDecision = isTail ? decision : null;
-        statement.run(
-          event.id, turnId, turnStatus, itemDecision?.action ?? null,
-          null,
-          null,
-          itemDecision?.replyText ?? null,
-          null,
-          null,
-          null,
-          null,
-          now,
-        );
-        complete.run(turnStatus, turnStatus === 'failed' ? 1 : 0, turnStatus === 'failed' ? error : null, event.id, workerId);
-      }
-      if (turnStatus === 'completed' && decision?.action === 'reply' && outbound) {
-        const tail = events.at(-1)!;
-        const conversation = this.db.prepare(
-          'SELECT enabled,mode FROM conversations WHERE id=?',
-        ).get(tail.conversationId) as Row | undefined;
-        if (conversation && Boolean(conversation.enabled)
-          && (conversation.mode === 'reply' || tail.ingress === 'history')
-          && this.isOutboxInputFresh(tail.conversationId, tail.sequence, tail.ingress)) {
-          outboxId = randomUUID();
-          this.db.prepare(`
-            INSERT INTO outbox(
-              id,conversation_id,inbound_event_id,input_sequence,uuid,text,state,error,created_at,updated_at
-            ) VALUES(?,?,?,?,?,?,'pending',NULL,?,?)
-          `).run(
-            outboxId, tail.conversationId, tail.id, tail.sequence,
-            outbound.uuid, outbound.text, now, now,
-          );
-        }
-      }
+      for (const event of events) forward.run(turnId, now, event.id, workerId);
       this.db.exec('COMMIT');
-      return outboxId ? this.getOutbox(outboxId) : null;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
+    }
+  }
+
+  markBatchFailed(events: AdmittedEvent[], workerId: string, error: string): void {
+    if (events.length === 0) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const fail = this.db.prepare(`
+        UPDATE inbound_events SET processing_state='failed',
+          failure_count=failure_count+1,last_error=?,
+          claim_owner=NULL,claim_expires_at_ms=NULL,claimed_at=NULL
+        WHERE id=? AND processing_state='claimed' AND claim_owner=?
+      `);
+      for (const event of events) fail.run(error, event.id, workerId);
+      this.db.exec('COMMIT');
+    } catch (caught) {
+      this.db.exec('ROLLBACK');
+      throw caught;
     }
   }
 
@@ -941,7 +952,7 @@ export class Store {
       const pendingGroupHistory = this.db.prepare(`
         SELECT g.conversation_id FROM group_onboarding g
         JOIN runtime_sessions s ON s.conversation_id=g.conversation_id
-        WHERE g.state NOT IN ('completed','submitted','delivered','delivery_unknown') AND g.intro_text IS NULL
+        WHERE g.state NOT IN ('forwarded','submitted','delivered','delivery_unknown') AND g.intro_text IS NULL
       `).all() as Row[];
       for (const row of pendingGroupHistory) {
         const conversationId = String(row.conversation_id);
@@ -973,7 +984,7 @@ export class Store {
         LEFT JOIN group_onboarding g ON g.conversation_id=c.id
         WHERE c.enabled=1 AND (
           e.id IS NOT NULL OR
-          (c.kind='group' AND g.state NOT IN ('completed','submitted','delivered','delivery_unknown')
+          (c.kind='group' AND g.state NOT IN ('forwarded','submitted','delivered','delivery_unknown')
             AND g.intro_text IS NULL)
         )
         ORDER BY c.id
@@ -992,36 +1003,6 @@ export class Store {
       WHERE conversation_id=? AND processing_state IN ('admitted','claimed')
     `).get(conversationId) as Row;
     return Number(row.count);
-  }
-
-  recordDecision(
-    eventId: string,
-    turnId: string | null,
-    turnStatus: string,
-    decision: Decision | null,
-  ): void {
-    this.db.prepare(`
-      INSERT INTO decisions(
-        inbound_event_id,turn_id,turn_status,action,responsibility_match,category,reply_text,reason_code,
-        work_type,delegation,subagent_thread_id,created_at
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(inbound_event_id) DO UPDATE SET
-        turn_id=excluded.turn_id,turn_status=excluded.turn_status,action=excluded.action,
-        responsibility_match=excluded.responsibility_match,category=excluded.category,
-        reply_text=excluded.reply_text,reason_code=excluded.reason_code,work_type=excluded.work_type,
-        delegation=excluded.delegation,subagent_thread_id=excluded.subagent_thread_id,created_at=excluded.created_at
-    `).run(
-      eventId, turnId, turnStatus, decision?.action ?? null,
-      null,
-      null, decision?.replyText ?? null, null,
-      null, null, null,
-      new Date().toISOString(),
-    );
-    this.db.prepare(`
-      UPDATE inbound_events SET processing_state=?,
-        failure_count=failure_count+?,last_error=?
-      WHERE id=?
-    `).run(turnStatus, turnStatus === 'failed' ? 1 : 0, null, eventId);
   }
 
   enqueueOutbox(event: AdmittedEvent, text: string, uuid: string): OutboxRecord | null {
@@ -1161,30 +1142,29 @@ export class Store {
     const stats = this.db.prepare(`
       SELECT
         COUNT(*) AS total,
-        SUM(CASE WHEN e.processing_state='completed' THEN 1 ELSE 0 END) AS completed,
+        SUM(CASE WHEN e.processing_state='forwarded' THEN 1 ELSE 0 END) AS forwarded,
         SUM(CASE WHEN e.processing_state='failed' THEN 1 ELSE 0 END) AS failed,
         SUM(CASE WHEN o.state='pending' THEN 1 ELSE 0 END) AS pending,
         SUM(CASE WHEN o.state='sending' THEN 1 ELSE 0 END) AS sending,
         SUM(CASE WHEN o.state='submitted' THEN 1 ELSE 0 END) AS submitted,
         SUM(CASE WHEN o.state='failed' THEN 1 ELSE 0 END) AS outbox_failed,
         SUM(CASE WHEN o.state='delivery_unknown' THEN 1 ELSE 0 END) AS delivery_unknown,
-        MAX(d.turn_id) AS last_turn_id,
+        MAX(e.forwarded_turn_id) AS last_turn_id,
         MAX(COALESCE(e.last_error,o.error)) AS error
       FROM inbound_events e
-      LEFT JOIN decisions d ON d.inbound_event_id=e.id
       LEFT JOIN outbox o ON o.inbound_event_id=e.id
       WHERE e.conversation_id=? AND e.ingress='history'
     `).get(conversationId) as Row;
     const total = Number(stats.total ?? 0);
-    const completed = Number(stats.completed ?? 0);
+    const forwarded = Number(stats.forwarded ?? 0);
     let state: GroupOnboardingRecord['state'];
     if (Number(stats.delivery_unknown ?? 0) > 0) state = 'delivery_unknown';
     else if (Number(stats.failed ?? 0) > 0 || Number(stats.outbox_failed ?? 0) > 0) state = 'failed';
-    else if (completed < total) state = 'pending';
+    else if (forwarded < total) state = 'pending';
     else if (Number(stats.sending ?? 0) > 0) state = 'sending';
     else if (Number(stats.pending ?? 0) > 0) state = 'prepared';
     else if (Number(stats.submitted ?? 0) > 0) state = 'submitted';
-    else state = 'completed';
+    else state = 'forwarded';
     const now = new Date().toISOString();
     this.db.prepare(`
       UPDATE group_onboarding SET state=?,history_count=?,history_loaded_at=COALESCE(history_loaded_at,?),
@@ -1211,7 +1191,7 @@ export class Store {
       UPDATE group_onboarding SET
         state='prepared',history_count=?,history_loaded_at=?,intro_turn_id=?,intro_text=?,intro_uuid=?,
         error=NULL,updated_at=?
-      WHERE conversation_id=? AND state NOT IN ('completed','submitted','delivered','delivery_unknown')
+      WHERE conversation_id=? AND state NOT IN ('forwarded','submitted','delivered','delivery_unknown')
     `).run(historyCount, now, introTurnId, introText, introUuid, now, conversationId);
     const record = this.getGroupOnboarding(conversationId);
     if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
@@ -1226,9 +1206,9 @@ export class Store {
     const now = new Date().toISOString();
     this.db.prepare(`
       UPDATE group_onboarding SET
-        state='completed',history_count=?,history_loaded_at=?,intro_turn_id=?,
+        state='forwarded',history_count=?,history_loaded_at=?,intro_turn_id=?,
         intro_text=NULL,intro_uuid=NULL,error=NULL,updated_at=?
-      WHERE conversation_id=? AND state NOT IN ('completed','submitted','delivered','delivery_unknown')
+      WHERE conversation_id=? AND state NOT IN ('forwarded','submitted','delivered','delivery_unknown')
     `).run(historyCount, now, turnId, now, conversationId);
     const record = this.getGroupOnboarding(conversationId);
     if (!record) throw new Error(`群 onboarding 不存在：${conversationId}`);
@@ -1239,7 +1219,7 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const current = this.getGroupOnboarding(conversationId);
-      if (!current || ['completed', 'submitted', 'delivered', 'delivery_unknown'].includes(current.state)
+      if (!current || ['forwarded', 'submitted', 'delivered', 'delivery_unknown'].includes(current.state)
         || !current.introText || !current.introUuid) {
         this.db.exec('COMMIT');
         return null;
@@ -1539,7 +1519,7 @@ export class Store {
         (SELECT COUNT(*) FROM inbound_events) AS received,
         (SELECT COUNT(*) FROM inbound_events WHERE processing_state='admitted') AS pending_messages,
         (SELECT COUNT(*) FROM inbound_events WHERE processing_state='claimed') AS claimed_messages,
-        (SELECT COUNT(*) FROM inbound_events WHERE processing_state='completed') AS processed,
+        (SELECT COUNT(*) FROM inbound_events WHERE processing_state='forwarded') AS forwarded_messages,
         (SELECT COUNT(*) FROM inbound_events WHERE processing_state='failed') AS failed_messages,
         (SELECT COUNT(*) FROM outbox WHERE state='submitted') AS submitted,
         (SELECT COUNT(*) FROM outbox WHERE state IN ('pending','sending')) AS pending_outbox,
@@ -1549,7 +1529,7 @@ export class Store {
              WHERE g.history_loaded_at IS NOT NULL AND NOT EXISTS (
                SELECT 1 FROM inbound_events e WHERE e.conversation_id=g.conversation_id AND e.ingress='history'
              )) AS history_loaded,
-        (SELECT COUNT(*) FROM inbound_events WHERE ingress='history' AND processing_state='completed') AS history_judged
+        (SELECT COUNT(*) FROM inbound_events WHERE ingress='history' AND processing_state='forwarded') AS history_forwarded
     `).get() as Row;
     const channels = this.db.prepare(`
       SELECT channel_id,profile_id,label,state,owner_pid,connected_at,last_event_at,error,updated_at
@@ -1569,7 +1549,7 @@ export class Store {
         (SELECT COUNT(*) FROM inbound_events he
           WHERE he.conversation_id=c.id AND he.ingress='history') AS history_event_count,
         (SELECT COUNT(*) FROM inbound_events he
-          WHERE he.conversation_id=c.id AND he.ingress='history' AND he.processing_state='completed') AS history_judged_count,
+          WHERE he.conversation_id=c.id AND he.ingress='history' AND he.processing_state='forwarded') AS history_forwarded_count,
         (SELECT COUNT(*) FROM inbound_events e
           WHERE e.conversation_id=c.id AND e.processing_state IN ('admitted','claimed')) AS pending_count,
         (SELECT COALESCE(MAX(sequence),0) FROM inbound_events e WHERE e.conversation_id=c.id) AS latest_sequence,
@@ -1586,12 +1566,11 @@ export class Store {
     `).all() as Row[];
     const messages = this.db.prepare(`
       SELECT e.conversation_id,e.sequence,e.received_at,e.processing_state,e.sender_name,e.sender_id,e.body_json,
-        c.title,c.kind,c.external_id,c.channel_id,c.runtime_id,d.action,o.state AS outbox_state,
+        c.title,c.kind,c.external_id,c.channel_id,c.runtime_id,o.state AS outbox_state,
         (SELECT m.display_name FROM conversation_members m
           WHERE m.conversation_id=c.id AND m.external_user_id=c.external_id LIMIT 1) AS direct_display_name
       FROM inbound_events e
       JOIN conversations c ON c.id=e.conversation_id
-      LEFT JOIN decisions d ON d.inbound_event_id=e.id
       LEFT JOIN outbox o ON o.inbound_event_id=e.id
       ORDER BY e.received_at DESC,e.sequence DESC LIMIT 12
     `).all() as Row[];
@@ -1678,7 +1657,7 @@ export class Store {
         memberCount: Number(row.member_count),
         historyLoaded: Number(row.history_event_count) > 0
           ? Number(row.history_event_count) : row.history_loaded_at ? Number(row.history_count ?? 0) : 0,
-        historyJudged: Number(row.history_judged_count ?? 0),
+        historyForwarded: Number(row.history_forwarded_count ?? 0),
         onboardingState: row.onboarding_state ? String(row.onboarding_state) : null,
       })),
       messages: messages.map((row) => ({
@@ -1690,7 +1669,6 @@ export class Store {
         sequence: Number(row.sequence),
         sender: redactSender(row.sender_name ?? row.sender_id),
         state: row.processing_state,
-        action: row.action ?? null,
         outboxState: row.outbox_state ?? null,
         receivedAt: row.received_at,
         ...(includeContent ? { preview: bodyPreview(row.body_json) } : {}),

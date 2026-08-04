@@ -65,7 +65,7 @@ test('实时消息按可用批次传入固定 runtime session，Host 不调用 C
     admit('第一条');
     admit('第二条');
     worker.signal();
-    await waitFor(() => store.status().processed === 2);
+    await waitFor(() => store.status().forwarded_messages === 2);
     assert.equal(session.prompts.length, 1);
     assert.match(session.prompts[0]!, /内容：第一条/);
     assert.match(session.prompts[0]!, /内容：第二条/);
@@ -98,7 +98,7 @@ test('首次群历史合成一次引导传入 runtime，不接收决定也不发
     assert.equal(session.prompts.length, 1);
     assert.match(session.prompts[0]!, /历史一/);
     assert.match(session.prompts[0]!, /历史二/);
-    assert.equal(store.getGroupOnboarding(conversation.id)?.state, 'completed');
+    assert.equal(store.getGroupOnboarding(conversation.id)?.state, 'forwarded');
   } finally {
     await worker.stop();
     store.close();
@@ -134,7 +134,7 @@ test('runtime 投递失败保留 failed inbox，重启 reconciliation 后可再�
   try {
     await second.start();
     second.signal();
-    await waitFor(() => store.status().processed === 1);
+    await waitFor(() => store.status().forwarded_messages === 1);
     assert.equal(recovered.prompts.length, 1);
   } finally {
     await second.stop();
@@ -164,9 +164,9 @@ test('活动 turn 中的新消息立即 steer，不等待当前 Agent 处理完�
     worker.signal();
     await waitFor(() => session.steered.length === 1);
     assert.match(session.steered[0]!, /内容：追问/);
-    assert.equal(store.status().processed, 0);
+    assert.equal(store.status().forwarded_messages, 0);
     session.finish();
-    await waitFor(() => store.status().processed === 2);
+    await waitFor(() => store.status().forwarded_messages === 2);
   } finally {
     await worker.stop();
     store.close();

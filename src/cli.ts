@@ -373,7 +373,7 @@ program.command('verify')
         startupMode,
         providerSessionIdPrefix: session.currentSessionId?.slice(0, 12) ?? null,
         hostRunIdPrefix: canary.turnId.slice(0, 12),
-        delivery: 'completed',
+        delivery: 'forwarded',
         model: config.runtime.model,
         effort: config.runtime.effort,
       });
