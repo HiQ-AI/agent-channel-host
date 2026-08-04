@@ -5,7 +5,7 @@ import { normalizeDwsEvent } from '../src/dws.js';
 import { batchPrompt, conversationResponsibilityReminder, prependResponsibilityReminder, recentMessagesPrompt } from '../src/prompts.js';
 import { Store } from '../src/store.js';
 
-test('普通 turn 只转发发送者、时间、内容，不注入 Host 会话资料', () => {
+test('普通群聊 turn 每批注入一次外部回复目标，消息仍只含发送者、时间、内容', () => {
   const config = defaultConfig('message-proxy', '.', '身份标记');
   const store = new Store(':memory:');
   const conversation = store.addConversation({
@@ -31,7 +31,9 @@ test('普通 turn 只转发发送者、时间、内容，不注入 Host 会话�
     forward_messages: [{ content: '转发内容' }],
   })!).event!;
 
-  const prompt = batchPrompt([event]);
+  const prompt = batchPrompt(conversation, [event]);
+  assert.match(prompt, /^# 消息来源\n渠道：dingtalk\n类型：group\n目标ID：conversation-id-marker\n群名称：会话标题标记/m);
+  assert.equal(prompt.match(/# 消息来源/g)?.length, 1);
   assert.match(prompt, /发送者：发送者甲/);
   assert.match(prompt, /时间：2026-08-03 12:00:00/);
   assert.match(prompt, /内容：正文内容/);
@@ -39,15 +41,12 @@ test('普通 turn 只转发发送者、时间、内容，不注入 Host 会话�
   assert.match(prompt, /转发内容/);
   for (const forbidden of [
     config.identity.name,
-    conversation.externalId,
-    conversation.title,
     conversation.responsibility,
     '成员资料标记',
     '组织角色标记',
     'sequence',
     'checkpoint',
     '会话：',
-    '群聊',
     '私聊',
   ]) {
     assert.equal(prompt.includes(forbidden), false, `不应注入：${forbidden}`);
@@ -65,17 +64,39 @@ test('会话职责使用独立短提醒，空值不改变普通消息', () => {
   assert.equal(prependResponsibilityReminder('本轮新增消息', '  '), '本轮新增消息');
 });
 
-test('首次群聊最近消息只使用相同的最小信封，不附加返回约定', () => {
-  const prompt = recentMessagesPrompt([
+test('首次群聊最近消息使用同一来源头且同批只注入一次', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'cid-history', title: '历史群', responsibility: '', mode: 'shadow',
+  });
+  const prompt = recentMessagesPrompt(conversation, [
     { sender: '同事甲', time: '2026-08-03 11:00:00', content: '历史问题' },
     { sender: '同事乙', time: '2026-08-03 11:02:00', content: '历史补充' },
   ]);
   assert.match(prompt, /发送者：同事甲/);
   assert.match(prompt, /时间：2026-08-03 11:02:00/);
   assert.match(prompt, /内容：历史补充/);
+  assert.match(prompt, /^# 消息来源\n渠道：dingtalk\n类型：group\n目标ID：cid-history\n群名称：历史群/m);
+  assert.equal(prompt.match(/# 消息来源/g)?.length, 1);
   assert.equal(prompt.includes('action'), false);
   assert.equal(prompt.includes('replyText'), false);
   assert.equal(prompt.includes('自我介绍'), false);
   assert.equal(prompt.includes('职责'), false);
-  assert.equal(prompt.includes('会话'), false);
+  store.close();
+});
+
+test('私聊消息来源使用对方 openDingTalkId 和名称，不暴露 Host Conversation UUID', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'open-dingtalk-user', title: '同事甲', responsibility: '', mode: 'reply',
+  });
+  const event = store.admitEvent(conversation, normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: 'direct-event',
+    sender_open_dingtalk_id: conversation.externalId, sender_name: '同事甲',
+    event_time: '2026-08-04 10:00:00', content: '私聊内容',
+  })!).event!;
+  const prompt = batchPrompt(conversation, [event]);
+  assert.match(prompt, /^# 消息来源\n渠道：dingtalk\n类型：direct\n目标ID：open-dingtalk-user\n对方名称：同事甲/m);
+  assert.equal(prompt.includes(conversation.id), false);
+  store.close();
 });

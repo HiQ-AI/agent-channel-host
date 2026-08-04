@@ -91,7 +91,7 @@ export class ConversationWorker {
       try {
         this.activeEvents = [...events];
         this.steeringError = null;
-        const result = await this.session.deliver(batchPrompt(events));
+        const result = await this.session.deliver(batchPrompt(this.conversation, events));
         await this.awaitSteeringIdle();
         const deliveredEvents = this.activeEvents;
         this.activeEvents = null;
@@ -156,7 +156,7 @@ export class ConversationWorker {
       try {
         this.activeEvents = [...events];
         this.steeringError = null;
-        const result = await this.session.deliver(batchPrompt(events));
+        const result = await this.session.deliver(batchPrompt(this.conversation, events));
         await this.awaitSteeringIdle();
         const deliveredEvents = this.activeEvents;
         this.activeEvents = null;
@@ -216,7 +216,7 @@ export class ConversationWorker {
     );
     if (events.length === 0) return;
     try {
-      const accepted = await this.session.steer(batchPrompt(events));
+      const accepted = await this.session.steer(batchPrompt(this.conversation, events));
       this.activeEvents.push(...events);
       this.log({
         type: 'MESSAGE_STEERED', conversationId: this.conversation.id,
