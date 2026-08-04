@@ -7,6 +7,7 @@ import { CLI_NAME } from './product.js';
 import { CONVERSATION_MODES, MAX_WORKER_WARM_SECONDS } from './types.js';
 import { safeName } from './paths.js';
 import { displayConversationTitle } from './conversation-title.js';
+import { execResolved, resolveCommand } from './command.js';
 
 type Json = Record<string, unknown>;
 type TaggedJson = Json & { instance: string };
@@ -24,6 +25,14 @@ export interface ViewInstance {
   store: Store;
   hostOwnership: 'attached' | 'view' | 'readonly';
   notices: string[];
+}
+
+export interface RequiredToolStatus {
+  tool: 'Node.js' | 'DWS' | 'Codex CLI';
+  state: 'ready' | 'error';
+  version: string;
+  command: string;
+  error: string | null;
 }
 
 export interface ManagementViewState {
@@ -225,8 +234,9 @@ export async function runView(
   actions: ManagementViewActions = {},
 ): Promise<void> {
   assertInteractiveView(options);
+  const requiredTools = await inspectRequiredTools(instances);
   if (options.once) {
-    process.stdout.write(`${renderStatusView(instances, options.showContent, process.stdout.columns ?? 120)}\n`);
+    process.stdout.write(`${renderStatusView(instances, options.showContent, process.stdout.columns ?? 120, requiredTools)}\n`);
     return;
   }
 
@@ -280,6 +290,7 @@ export async function runView(
       options.showContent,
       color,
       process.stdout.rows ?? 30,
+      requiredTools,
     );
   };
   const writeFrame = (frame: string) => {
@@ -355,6 +366,45 @@ export async function runView(
     if (rawMode) process.stdin.setRawMode?.(false);
     process.stdin.pause();
     if (alternateScreen) process.stdout.write(VIEW_ALTERNATE_SCREEN_EXIT);
+  }
+}
+
+export async function inspectRequiredTools(instances: ViewInstance[]): Promise<RequiredToolStatus[]> {
+  const dwsCommands = uniqueCommands(instances.map((instance) => instance.config.channel.command), 'dws');
+  const codexCommands = uniqueCommands(instances.map((instance) => instance.config.runtime.command), 'codex');
+  const [dws, codex] = await Promise.all([
+    inspectExternalTool('DWS', dwsCommands),
+    inspectExternalTool('Codex CLI', codexCommands),
+  ]);
+  return [
+    { tool: 'Node.js', state: 'ready', version: process.version, command: process.execPath, error: null },
+    dws,
+    codex,
+  ];
+}
+
+function uniqueCommands(commands: string[], fallback: string): string[] {
+  return [...new Set(commands.length > 0 ? commands : [fallback])];
+}
+
+async function inspectExternalTool(
+  tool: 'DWS' | 'Codex CLI',
+  commands: string[],
+): Promise<RequiredToolStatus> {
+  try {
+    const versions = await Promise.all(commands.map(async (command) => {
+      const resolved = await resolveCommand(command);
+      const result = await execResolved(resolved, ['--version'], {
+        cwd: process.cwd(), encoding: 'utf8', timeout: 5_000, windowsHide: true,
+      });
+      return result.stdout.trim().split(/\r?\n/, 1)[0] || 'unknown';
+    }));
+    return { tool, state: 'ready', version: [...new Set(versions)].join(' / '), command: commands.join(' / '), error: null };
+  } catch (error) {
+    return {
+      tool, state: 'error', version: '-', command: commands.join(' / '),
+      error: truncate(error instanceof Error ? error.message.replace(/\s+/g, ' ') : String(error), 100),
+    };
   }
 }
 
@@ -1173,6 +1223,7 @@ export function renderManagementView(
   showContent = false,
   color = false,
   height = 30,
+  requiredTools: RequiredToolStatus[] = [],
 ): string {
   normalizeSelection(state, instances);
   const selectedInstance = instances[state.selectedInstance] ?? null;
@@ -1201,7 +1252,7 @@ export function renderManagementView(
   else if (state.detailConversationId) lines.push(...renderConversationDetail(detailInstance, detail, state, width, height, color));
   else if (state.detailChannel && detailInstance) lines.push(...renderChannelManagement(detailInstance, state.detailChannel, state, width, color));
   else if (detailInstance) lines.push(...renderInstanceOverview(detailInstance, detailInstance.store.status(showContent), state, width, height, color));
-  else lines.push(...renderGlobalOverview(snapshots, state, width, color));
+  else lines.push(...renderGlobalOverview(snapshots, state, width, color, requiredTools));
   const notice = state.notice ?? (settingsInstance ?? selectedInstance)?.notices.at(-1) ?? null;
   if (notice) lines.push('', ansi(`提示：${notice}`, 'yellow-bold', color));
   if (state.exitConfirmation) {
@@ -1261,6 +1312,7 @@ function renderGlobalOverview(
   state: ManagementViewState,
   width: number,
   color: boolean,
+  requiredTools: RequiredToolStatus[],
 ): string[] {
   const lines = [heading('INSTANCES', color)];
   lines.push(...table(
@@ -1282,6 +1334,8 @@ function renderGlobalOverview(
     lines.push('', ansi('尚未初始化 instance。交互模式可按 a 创建；也可运行 agent-channel init --instance <name> --cwd <path>。', 'yellow-bold', color));
   }
 
+  if (requiredTools.length > 0) lines.push('', ...renderRequiredTools(requiredTools, width, color));
+
   const alerts = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.alerts));
   if (alerts.length > 0) {
     lines.push('', heading('ALERTS', color), ...alerts.map((row) => renderAlert(
@@ -1293,6 +1347,18 @@ function renderGlobalOverview(
     )));
   }
   return lines;
+}
+
+function renderRequiredTools(tools: RequiredToolStatus[], width: number, color: boolean): string[] {
+  return [
+    heading('TOOLS', color),
+    ...table(
+      ['TOOL', 'STATE', 'VERSION', 'COMMAND', 'ERROR'],
+      tools.map((tool) => [tool.tool, tool.state, tool.version, tool.command, tool.error ?? '-']),
+      width,
+      semanticTable(color),
+    ),
+  ];
 }
 
 function renderInstanceOverview(
@@ -1639,12 +1705,17 @@ function renderInstanceSettings(
   return lines;
 }
 
-export function renderStatusView(instances: ViewInstance[], showContent = false, width = 120): string {
+export function renderStatusView(
+  instances: ViewInstance[],
+  showContent = false,
+  width = 120,
+  requiredTools: RequiredToolStatus[] = [],
+): string {
   const state = createManagementViewState();
   const snapshots = instances.map((instance) => ({ instance, snapshot: instance.store.status(showContent) }));
   const lines = [
     `${CLI_NAME} view  instances=${instances.length}  refreshed=${new Date().toISOString()}`,
-    ...renderGlobalOverview(snapshots, state, width, false),
+    ...renderGlobalOverview(snapshots, state, width, false, requiredTools),
     '',
     '只读聚合快照；交互模式会逐 instance 启动或 attach Host，并从总览下钻详情与 Instance 设置',
   ];

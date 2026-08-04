@@ -7,11 +7,32 @@ import { anonymousConversationTitle } from '../src/conversation-title.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import {
-  bindHostToInteractiveView, createManagementViewState, createSettingEntries, handleManagementViewInput, renderFrameDiff, renderManagementView,
+  bindHostToInteractiveView, createManagementViewState, createSettingEntries, handleManagementViewInput, inspectRequiredTools, renderFrameDiff, renderManagementView,
   renderPendingOperation, renderStatusView,
   shouldStartHostForView, shouldUseColor, terminalDisplayWidth, VIEW_ALTERNATE_SCREEN_ENTER, VIEW_ALTERNATE_SCREEN_EXIT,
   type ViewInstance,
 } from '../src/view.js';
+
+test('View 总览展示 Node.js、DWS、Codex CLI 三项启动时工具探测', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('tool-status', '.', 'Agent');
+  config.channel.command = process.execPath;
+  config.runtime.command = process.execPath;
+  try {
+    const tools = await inspectRequiredTools([viewInstance('tool-status', config, store)]);
+    assert.deepEqual(tools.map((tool) => tool.tool), ['Node.js', 'DWS', 'Codex CLI']);
+    assert.ok(tools.every((tool) => tool.state === 'ready'));
+    const rendered = renderManagementView(
+      [viewInstance('tool-status', config, store)], createManagementViewState(), null, [], 120, false, false, 30, tools,
+    );
+    assert.match(rendered, /TOOLS/);
+    assert.match(rendered, /Node\.js\s+ready\s+v\d+/);
+    assert.match(rendered, /DWS\s+ready\s+v\d+/);
+    assert.match(rendered, /Codex CLI\s+ready\s+v\d+/);
+  } finally {
+    store.close();
+  }
+});
 
 test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完整 provider session ID', () => {
   const store = new Store(':memory:');
