@@ -52,7 +52,14 @@ export interface ManagementViewState {
   selectedMessage: number;
   selectedMessageSequence: number | null;
   settingsInstanceName: string | null;
-  editing: { key: string; label: string; value: string; cursor: number } | null;
+  editing: {
+    key: string;
+    label: string;
+    value: string;
+    cursor: number;
+    wrapWidth?: number;
+    preferredColumn?: number | null;
+  } | null;
   creatingInstance: InstanceCreationDraft | null;
   groupSearch: GroupSearchDraft | null;
   destructiveConfirmation: DestructiveConfirmation | null;
@@ -1331,7 +1338,7 @@ export function renderManagementView(
       : state.groupSearch?.phase === 'results'
         ? ansi('↑/↓ 选择  →/Enter 绑定或打开  ←/Esc 修改关键词  q 退出', 'dim', color)
     : state.editing
-      ? ansi(`编辑 ${state.editing.label}  ←/→ 移动  Home/End 首尾  Backspace/Delete 删除  Enter 保存  Esc 取消`, 'cyan-bold', color)
+      ? ansi(`编辑 ${state.editing.label}  方向键移动  Home/End 行首尾  Ctrl+Home/End 全文首尾  Backspace/Delete 删除  Enter 保存  Esc 取消`, 'cyan-bold', color)
       : state.tab === 'settings'
         ? ansi('Tab 切换总览  ←/Esc 返回总览  q 退出', 'dim', color)
         : state.settingsInstanceName
@@ -2201,20 +2208,43 @@ function integer(value: string, min: number, max: number, label: string): number
 function editSingleLine(line: { value: string; cursor: number }, key: string): void {
   const characters = Array.from(line.value);
   line.cursor = clamp(line.cursor, 0, characters.length);
+  const visual = line as typeof line & { wrapWidth?: number; preferredColumn?: number | null };
+  if (key === '\u001b[A' || key === '\u001b[B') {
+    const layout = visualLineLayout(line.value, Math.max(1, visual.wrapWidth ?? Number.MAX_SAFE_INTEGER));
+    const currentLine = visualLineAtCursor(layout, line.cursor);
+    const currentColumn = visualColumnAtCursor(characters, layout[currentLine]!.start, line.cursor);
+    const targetLine = clamp(currentLine + (key === '\u001b[A' ? -1 : 1), 0, layout.length - 1);
+    const preferredColumn = visual.preferredColumn ?? currentColumn;
+    line.cursor = cursorAtVisualColumn(characters, layout[targetLine]!, preferredColumn);
+    visual.preferredColumn = preferredColumn;
+    return;
+  }
+  if (key === '\u001b[H' || key === '\u001b[1~' || key === '\u001b[F' || key === '\u001b[4~') {
+    const layout = visualLineLayout(line.value, Math.max(1, visual.wrapWidth ?? Number.MAX_SAFE_INTEGER));
+    const currentLine = visualLineAtCursor(layout, line.cursor);
+    line.cursor = key === '\u001b[H' || key === '\u001b[1~'
+      ? layout[currentLine]!.start
+      : layout[currentLine]!.end;
+    visual.preferredColumn = null;
+    return;
+  }
+  if (key === '\u001b[1;5H' || key === '\u001b[7;5~') {
+    line.cursor = 0;
+    visual.preferredColumn = null;
+    return;
+  }
+  if (key === '\u001b[1;5F' || key === '\u001b[8;5~') {
+    line.cursor = characters.length;
+    visual.preferredColumn = null;
+    return;
+  }
+  visual.preferredColumn = null;
   if (key === '\u001b[D') {
     line.cursor = Math.max(0, line.cursor - 1);
     return;
   }
   if (key === '\u001b[C') {
     line.cursor = Math.min(characters.length, line.cursor + 1);
-    return;
-  }
-  if (key === '\u001b[H' || key === '\u001b[1~') {
-    line.cursor = 0;
-    return;
-  }
-  if (key === '\u001b[F' || key === '\u001b[4~') {
-    line.cursor = characters.length;
     return;
   }
   if (key === '\u007f' || key === '\b') {
@@ -2240,6 +2270,52 @@ function editSingleLine(line: { value: string; cursor: number }, key: string): v
   line.value = characters.join('');
 }
 
+interface VisualLine {
+  start: number;
+  end: number;
+  width: number;
+}
+
+function visualLineLayout(value: string, width: number): VisualLine[] {
+  const characters = Array.from(value);
+  if (characters.length === 0) return [{ start: 0, end: 0, width: 0 }];
+  const lines: VisualLine[] = [];
+  let start = 0;
+  let used = 0;
+  for (let index = 0; index < characters.length; index += 1) {
+    const characterWidth = graphemeDisplayWidth(characters[index]!);
+    if (index > start && used + characterWidth > width) {
+      lines.push({ start, end: index, width: used });
+      start = index;
+      used = 0;
+    }
+    used += characterWidth;
+  }
+  lines.push({ start, end: characters.length, width: used });
+  return lines;
+}
+
+function visualLineAtCursor(lines: VisualLine[], cursor: number): number {
+  const index = lines.findIndex((line, lineIndex) => (
+    cursor < line.end || (cursor === line.end && lineIndex === lines.length - 1)
+  ));
+  return index < 0 ? lines.length - 1 : index;
+}
+
+function visualColumnAtCursor(characters: string[], start: number, cursor: number): number {
+  return characters.slice(start, cursor).reduce((width, character) => width + graphemeDisplayWidth(character), 0);
+}
+
+function cursorAtVisualColumn(characters: string[], line: VisualLine, column: number): number {
+  let used = 0;
+  for (let index = line.start; index < line.end; index += 1) {
+    const characterWidth = graphemeDisplayWidth(characters[index]!);
+    if (used + characterWidth > column) return index;
+    used += characterWidth;
+  }
+  return line.end;
+}
+
 function renderTextCursor(value: string, cursor: number): string {
   const characters = Array.from(value);
   const index = clamp(cursor, 0, characters.length);
@@ -2252,7 +2328,9 @@ function renderEditingPanel(
   color: boolean,
 ): string[] {
   const innerWidth = Math.max(10, width - 4);
-  const wrapped = wrapAnsiLine(renderTextCursor(editing.value, editing.cursor), innerWidth);
+  const contentWidth = Math.max(1, innerWidth - 1);
+  editing.wrapWidth = contentWidth;
+  const wrapped = wrapAnsiLine(renderTextCursor(editing.value, editing.cursor), contentWidth);
   return [
     heading(`编辑 / ${editing.label}`, color),
     ansi('完整内容按终端宽度自动换行；编辑期间暂停展示背后的详情，保存或取消后返回原位置。', 'dim', color),

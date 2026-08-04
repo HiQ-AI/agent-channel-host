@@ -915,6 +915,42 @@ test('设置、群搜索和 Instance 向导支持光标移动、Home End 及前�
   }
 });
 
+test('多行文本编辑按视觉行上下移动并保持显示列', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('multiline-cursor', '.', 'Agent');
+  const instance = viewInstance('multiline-cursor', config, store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.editing = {
+    key: 'conversation:responsibility',
+    label: '会话职责',
+    value: '甲乙丙丁戊己庚辛壬癸',
+    cursor: 10,
+  };
+  try {
+    renderManagementView([instance], state, null, [], 11);
+    assert.equal(state.editing.wrapWidth, 9);
+
+    await handleManagementViewInput('\u001b[A', state, [instance], () => undefined);
+    assert.equal(state.editing.cursor, 6);
+    await handleManagementViewInput('\u001b[A', state, [instance], () => undefined);
+    assert.equal(state.editing.cursor, 2);
+    await handleManagementViewInput('\u001b[B', state, [instance], () => undefined);
+    assert.equal(state.editing.cursor, 6);
+
+    await handleManagementViewInput('\u001b[H', state, [instance], () => undefined);
+    assert.equal(state.editing.cursor, 4);
+    await handleManagementViewInput('\u001b[F', state, [instance], () => undefined);
+    assert.equal(state.editing.cursor, 8);
+    await handleManagementViewInput('\u001b[1;5H', state, [instance], () => undefined);
+    assert.equal(state.editing.cursor, 0);
+    await handleManagementViewInput('\u001b[1;5F', state, [instance], () => undefined);
+    assert.equal(state.editing.cursor, 10);
+  } finally {
+    store.close();
+  }
+});
+
 test('Channel 页面分别选择群聊/私聊订阅与默认模式，并展示两类指定绑定', async () => {
   const root = resolve('.test-view-channel-subscriptions');
   const configFile = resolve(root, 'config.yaml');
