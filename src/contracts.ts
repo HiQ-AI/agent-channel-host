@@ -14,6 +14,11 @@ export interface ChannelHandlers {
 export interface ChannelAdapter {
   readonly descriptor: ChannelDescriptor;
   start(handlers: ChannelHandlers): Promise<void>;
+  backfill?(
+    targets: Array<{ conversation: Conversation; start: Date }>,
+    until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<number>;
   stop(): Promise<void>;
 }
 

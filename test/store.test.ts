@@ -9,6 +9,7 @@ import {
   GROUP_EVENT,
   consumerArgs,
   dwsProcessExitError,
+  fetchConversationBackfill,
   fetchRecentGroupHistory,
   inspectDwsBusStatus,
   normalizeDwsEvent,
@@ -38,6 +39,82 @@ test('授权会话才可持久化，事件按会话单调编号并去重', () =>
   })!;
   assert.equal(store.admitEvent(conversation, secondEvent).event?.sequence, 2);
   assert.equal(store.latestSequence(conversation.id), 2);
+  store.close();
+});
+
+test('离线补拉起点取 durable inbox 最新消息并回退两秒，无消息时从 Conversation 创建时间开始', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'watermark-user', title: '水位私聊', responsibility: '', mode: 'shadow',
+  });
+  assert.equal(
+    store.conversationBackfillStart(conversation).getTime(),
+    new Date(conversation.createdAt).getTime() - 2_000,
+  );
+  store.admitEvent(conversation, normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: 'watermark-1', message_id: 'watermark-msg-1',
+    sender_open_dingtalk_id: conversation.externalId, create_time: '2030-08-04 09:00:00', content: '较早',
+  })!);
+  store.admitEvent(conversation, normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: 'watermark-2', message_id: 'watermark-msg-2',
+    sender_open_dingtalk_id: conversation.externalId, timestamp: 1912035660000, content: '较晚',
+  })!);
+  assert.equal(store.conversationBackfillStart(conversation).toISOString(), '2030-08-04T01:00:58.000Z');
+  store.close();
+});
+
+test('历史与实时使用同一 message ID 时只准入一次，不误伤其他 Conversation', () => {
+  const store = new Store(':memory:');
+  const first = store.addConversation({ kind: 'direct', externalId: 'dedupe-a', title: 'A', responsibility: '', mode: 'shadow' });
+  const second = store.addConversation({ kind: 'direct', externalId: 'dedupe-b', title: 'B', responsibility: '', mode: 'shadow' });
+  const event = (conversation: typeof first, eventId: string) => normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', event_id: eventId, message_id: 'shared-message-id',
+    sender_open_dingtalk_id: conversation.externalId, create_time: '2026-08-04 09:00:00', content: '交叠消息',
+  })!;
+  assert.equal(store.admitEvent(first, event(first, 'live-event')).admitted, true);
+  assert.equal(store.admitEvent(first, event(first, 'history-event'), 'history').admitted, false);
+  assert.equal(store.admitEvent(second, event(second, 'other-conversation'), 'history').admitted, true);
+  store.close();
+});
+
+test('离线补拉按群聊和私聊生成真实 DWS 参数，分页推进、排序并过滤启动截止时刻', async () => {
+  const config = defaultConfig('backfill', '.', 'Agent');
+  const store = new Store(':memory:');
+  const direct = store.addConversation({
+    kind: 'direct', externalId: 'direct-open-id', title: '私聊', responsibility: '', mode: 'shadow',
+  });
+  const calls: string[][] = [];
+  const events = await fetchConversationBackfill(
+    config,
+    direct,
+    new Date('2026-08-04T00:00:00+08:00'),
+    new Date('2026-08-04T00:03:00+08:00'),
+    async (_config, args) => {
+      calls.push(args);
+      return calls.length === 1
+        ? { success: true, result: { hasMore: true, messages: [
+          { openMessageId: 'm2', senderName: '乙', createTime: '2026-08-04 00:02:00', content: '二' },
+          { openMessageId: 'm1', senderName: '甲', createTime: '2026-08-04 00:01:00', content: '一' },
+        ] } }
+        : { success: true, result: { hasMore: false, messages: [
+          { openMessageId: 'm4', senderName: '丁', createTime: '2026-08-04 00:04:00', content: '截止后' },
+          { openMessageId: 'm3', senderName: '丙', createTime: '2026-08-04 00:03:00', content: '三' },
+        ] } };
+    },
+  );
+  assert.deepEqual(events.map((event) => event.messageId), ['m1', 'm2', 'm3']);
+  assert.deepEqual(calls[0]?.slice(0, 7), [
+    'chat', 'message', 'list', '--open-dingtalk-id', 'direct-open-id', '--time', '2026-08-04 00:00:00',
+  ]);
+  assert.equal(calls[1]?.[6], '2026-08-04 00:02:00');
+
+  const group = store.addConversation({ kind: 'group', externalId: 'group-id', title: '群', responsibility: '', mode: 'shadow' });
+  let groupArgs: string[] = [];
+  await fetchConversationBackfill(config, group, new Date(), new Date(), async (_config, args) => {
+    groupArgs = args;
+    return { success: true, result: [] };
+  });
+  assert.deepEqual(groupArgs.slice(0, 5), ['chat', 'message', 'list', '--group', 'group-id']);
   store.close();
 });
 
@@ -462,7 +539,7 @@ test('首次群历史固定从当前本地时间向前拉 50 条，并按时间�
   const history = await fetchRecentGroupHistory(
     config,
     conversation,
-    new Date(2026, 7, 1, 1, 2, 3),
+    new Date('2026-08-01T01:02:03+08:00'),
     async (_config, args) => {
       captured = args;
       return {

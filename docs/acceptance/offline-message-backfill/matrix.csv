@@ -1,0 +1,9 @@
+case_id,scope,assertion,round_1,round_2
+OMB-001,store,无消息从Conversation创建时间开始且已有消息取最大发生时间并回退2秒,PASS,PASS
+OMB-002,store,同Conversation相同messageId跨历史与实时去重且不同Conversation不误伤,PASS,PASS
+OMB-003,dws,群聊使用group且私聊使用open-dingtalk-id并固定direction newer,PASS,PASS
+OMB-004,dws,hasMore分页按createTime推进并按启动截止时刻过滤,PASS,PASS
+OMB-005,host,实时consumer先建立且补拉完成前Worker不启动,PASS,PASS
+OMB-006,host,补拉完成后历史与启动期间实时消息统一恢复,PASS,PASS
+OMB-007,regression,npm run verify完整测试与npm pack dry-run通过,PASS,PASS
+OMB-008,quality,git diff --check通过,PASS,PASS
