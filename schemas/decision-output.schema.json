@@ -1,9 +1,0 @@
-{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["action", "replyText"],
-  "properties": {
-    "action": { "type": "string", "enum": ["silent", "reply"] },
-    "replyText": { "type": "string" }
-  }
-}

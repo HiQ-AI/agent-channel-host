@@ -1168,11 +1168,19 @@ function renderGlobalOverview(
     failed: result.failed + number(snapshot.failed_messages),
     outbox: result.outbox + number(snapshot.pending_outbox),
     submitted: result.submitted + number(snapshot.submitted),
-  }), { received: 0, pending: 0, claimed: 0, processed: 0, failed: 0, outbox: 0, submitted: 0 });
-  lines.push('', messageSummary(totals, color));
+    historyLoaded: result.historyLoaded + number(snapshot.history_loaded),
+    historyJudged: result.historyJudged + number(snapshot.history_judged),
+  }), { received: 0, pending: 0, claimed: 0, processed: 0, failed: 0, outbox: 0, submitted: 0, historyLoaded: 0, historyJudged: 0 });
+  lines.push('', messageSummary(totals, color), historySummary(totals, color));
   const alerts = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.alerts));
   if (alerts.length > 0) {
-    lines.push('', heading('ALERTS', color), ...alerts.map((row) => ansi(`- ${row.instance}/${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`, 'red-bold', color)));
+    lines.push('', heading('ALERTS', color), ...alerts.map((row) => renderAlert(
+      `${row.instance}/${text(row.scope)}/${text(row.target)}`,
+      row.error,
+      row.at,
+      width,
+      color,
+    )));
   }
   return lines;
 }
@@ -1216,11 +1224,11 @@ function renderInstanceOverview(
   ));
   lines.push('', heading('CONVERSATIONS', color));
   lines.push(...table(
-    ['', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'WORKER', 'SESSION', 'CONTEXT', 'MEMBERS', 'RUNTIME'],
+    ['', 'CHANNEL', 'TITLE', 'MODE', 'PENDING', 'HISTORY', 'DELIVERY', 'WORKER', 'SESSION', 'RUNTIME'],
     conversations.map((row, index) => [
       state.instanceFocus === 'conversations' && index === state.selectedConversation ? '>' : ' ', row.channelId, row.title, row.mode, row.pending,
-      row.workerState, row.sessionState, `v${row.contextVersion ?? 0}@${row.contextThroughSequence ?? 0}`,
-      row.memberCount ?? 0, row.runtimeId,
+      `${row.historyJudged ?? 0}/${row.historyLoaded ?? 0}`, row.onboardingState ?? '-',
+      row.workerState, row.sessionState, row.runtimeId,
     ]), width, semanticTable(color, state.instanceFocus === 'conversations' ? state.selectedConversation : -1, 2),
   ));
   lines.push('', messageSummary({
@@ -1231,6 +1239,9 @@ function renderInstanceOverview(
     failed: number(snapshot.failed_messages),
     outbox: number(snapshot.pending_outbox),
     submitted: number(snapshot.submitted),
+  }, color), historySummary({
+    historyLoaded: number(snapshot.history_loaded),
+    historyJudged: number(snapshot.history_judged),
   }, color), '', heading('RECENT MESSAGES', color));
   const messageHeaders = ['CHANNEL', 'CONVERSATION', 'SEQ', 'SENDER', 'STATE', 'ACTION', 'AGE'];
   if (messages.some((row) => row.preview !== undefined)) messageHeaders.push('PREVIEW');
@@ -1247,9 +1258,25 @@ function renderInstanceOverview(
     semanticTable(color),
   ));
   if (alerts.length > 0) {
-    lines.push('', heading('ALERTS', color), ...alerts.map((row) => ansi(`- ${text(row.scope)}/${text(row.target)}: ${text(row.error)} (${age(row.at)})`, 'red-bold', color)));
+    lines.push('', heading('ALERTS', color), ...alerts.map((row) => renderAlert(
+      `${text(row.scope)}/${text(row.target)}`,
+      row.error,
+      row.at,
+      width,
+      color,
+    )));
   }
   return lines;
+}
+
+function renderAlert(target: string, error: unknown, at: unknown, width: number, color: boolean): string {
+  const raw = text(error) ?? 'unknown';
+  const summary = /Request is repeated with uuid\b/i.test(raw)
+    ? 'delivery_unknown: duplicate_uuid'
+    : /^Command failed:/i.test(raw)
+      ? 'command_failed'
+      : raw.replace(/\s+/g, ' ').trim();
+  return ansi(truncate(`- ${target}: ${summary} (${age(at)})`, Math.max(20, width)), 'red-bold', color);
 }
 
 function renderChannelManagement(
@@ -1673,10 +1700,18 @@ function messageSummary(
     + ` outbox=${ansi(`${values.outbox}/${values.submitted}`, values.outbox > 0 ? 'yellow-bold' : 'dim', color)}`;
 }
 
+function historySummary(
+  values: { historyLoaded: number; historyJudged: number },
+  color: boolean,
+): string {
+  return `${heading('HISTORY', color)} loaded=${ansi(String(values.historyLoaded), values.historyLoaded > 0 ? 'green' : 'dim', color)}`
+    + ` delivered=${ansi(String(values.historyJudged), values.historyJudged > 0 ? 'green' : 'dim', color)}`;
+}
+
 function statusText(value: string, color: boolean): string {
   const token = value.trim().toLowerCase();
-  if (/^(error|failed|fatal|unknown)$/.test(token)) return ansi(value, 'red-bold', color);
-  if (/^(running|ready|completed|success|reply|enabled|true)$/.test(token)) return ansi(value, 'green-bold', color);
+  if (/^(error|failed|fatal|unknown|delivery_unknown)$/.test(token)) return ansi(value, 'red-bold', color);
+  if (/^(running|ready|completed|submitted|delivered|success|reply|enabled|true)$/.test(token)) return ansi(value, 'green-bold', color);
   if (/^(starting|pending|claimed|processing|warm|view|shadow|provisioning|held|interrupted)$/.test(token)) {
     return ansi(value, 'yellow', color);
   }

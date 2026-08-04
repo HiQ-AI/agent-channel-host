@@ -7,18 +7,14 @@ import type { AgentSession, ChannelAdapter, ChannelHandlers, RuntimeAdapter } fr
 import { EventDrivenScheduler, resolveEventConversation, runHost } from '../src/host.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
-import type { Conversation, DecisionRun, OutboxRecord } from '../src/types.js';
+import type { Conversation, DeliveryRun } from '../src/types.js';
 
 class FakeChannel implements ChannelAdapter {
   readonly descriptor = { channelId: 'dingtalk', profileId: 'default', label: 'Fake Channel' };
   started = 0;
-  sent = 0;
   stopped = 0;
   async start(_handlers: ChannelHandlers): Promise<void> { this.started += 1; }
   async stop(): Promise<void> { this.stopped += 1; }
-  async send(_conversation: Conversation, _record: Pick<OutboxRecord, 'text' | 'uuid'>): Promise<void> {
-    this.sent += 1;
-  }
 }
 
 class FailingChannel extends FakeChannel {
@@ -45,8 +41,9 @@ class FakeSession implements AgentSession {
   blockFirst = false;
   blockStart = false;
   failFirst = false;
-  private resolveActive: ((result: DecisionRun) => void) | null = null;
+  private resolveActive: ((result: DeliveryRun) => void) | null = null;
   private resolveStart: (() => void) | null = null;
+  steered: string[] = [];
 
   async start(): Promise<void> {
     if (this.blockStart) await new Promise<void>((resolve) => { this.resolveStart = resolve; });
@@ -57,7 +54,13 @@ class FakeSession implements AgentSession {
     this.resolveStart = null;
   }
 
-  runDecision(prompt: string): Promise<DecisionRun> {
+  completeActive(): void {
+    const resolve = this.resolveActive;
+    this.resolveActive = null;
+    resolve?.({ turnId: 'turn-completed', status: 'completed' });
+  }
+
+  deliver(prompt: string): Promise<DeliveryRun> {
     this.prompts.push(prompt);
     if (this.failFirst && this.prompts.length === 1) {
       return Promise.reject(new Error('模拟会话级决策失败'));
@@ -68,12 +71,18 @@ class FakeSession implements AgentSession {
     return Promise.resolve(silentRun(`turn-${this.prompts.length}`));
   }
 
+  async steer(prompt: string): Promise<{ turnId: string }> {
+    if (!this.resolveActive) throw new Error('没有活动 turn');
+    this.steered.push(prompt);
+    return { turnId: 'turn-active' };
+  }
+
   async interruptActive(): Promise<boolean> {
     if (!this.resolveActive) return false;
     this.interrupts += 1;
     const resolve = this.resolveActive;
     this.resolveActive = null;
-    resolve({ turnId: 'turn-interrupted', status: 'interrupted', decision: null });
+    resolve({ turnId: 'turn-interrupted', status: 'interrupted' });
     return true;
   }
 
@@ -140,7 +149,7 @@ test('会话级决策失败不升级为 Host fatal，后续消息仍由同一 Ch
   }
 });
 
-test('ready signal 将 burst 聚合为一次 turn，warm TTL 后释放 Worker', async () => {
+test('ready signal 将 quiet window 内 burst 合批投递到同一 session，warm TTL 后释放 Worker', async () => {
   const config = defaultConfig('scheduler-burst', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 20;
   config.scheduling.maxBatchMessages = 20;
@@ -214,7 +223,7 @@ test('Host 在 Worker 启动中停止时只关闭一次且不再投递 signal', 
   }
 });
 
-test('active turn 内多条新消息只 cancel 一次，并把原 claim 与新消息重新合并', async () => {
+test('active turn 内新消息立即 steer 且不打断已传入 runtime 的消息', async () => {
   const config = defaultConfig('scheduler-cancel', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
@@ -242,12 +251,16 @@ test('active turn 内多条新消息只 cancel 一次，并把原 claim 与新�
     scheduler.signal(conversation.id);
     admit(store, conversation, 'cancel-3');
     scheduler.signal(conversation.id);
-    await waitFor(() => store.status().processed === 3);
     const session = runtime.sessions[0]!;
-    assert.equal(session.interrupts, 1);
-    assert.equal(session.prompts.length, 2);
-    assert.match(session.prompts[1]!, /消息 1/);
-    assert.match(session.prompts[1]!, /消息 3/);
+    await waitFor(() => session.steered.length > 0);
+    assert.equal(session.interrupts, 0);
+    assert.match(session.steered.join('\n'), /cancel-2/);
+    assert.match(session.steered.join('\n'), /cancel-3/);
+    session.completeActive();
+    await waitFor(() => store.status().processed === 3);
+    assert.equal(session.interrupts, 0);
+    assert.equal(session.prompts.length, 1);
+    assert.match(session.prompts[0]!, /cancel-1/);
   } finally {
     await scheduler.stop();
     store.close();
@@ -531,11 +544,10 @@ function admit(store: Store, conversation: Conversation, id: string): void {
   assert.equal(store.admitEvent(conversation, event).admitted, true);
 }
 
-function silentRun(turnId: string): DecisionRun {
+function silentRun(turnId: string): DeliveryRun {
   return {
     turnId,
     status: 'completed',
-    decision: { action: 'silent', replyText: '' },
   };
 }
 

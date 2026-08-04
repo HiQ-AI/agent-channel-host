@@ -65,7 +65,7 @@ test('会话职责使用独立短提醒，空值不改变普通消息', () => {
   assert.equal(prependResponsibilityReminder('本轮新增消息', '  '), '本轮新增消息');
 });
 
-test('首次群聊最近消息使用相同的最小信封与返回约定', () => {
+test('首次群聊最近消息只使用相同的最小信封，不附加返回约定', () => {
   const prompt = recentMessagesPrompt([
     { sender: '同事甲', time: '2026-08-03 11:00:00', content: '历史问题' },
     { sender: '同事乙', time: '2026-08-03 11:02:00', content: '历史补充' },
@@ -73,8 +73,8 @@ test('首次群聊最近消息使用相同的最小信封与返回约定', () =>
   assert.match(prompt, /发送者：同事甲/);
   assert.match(prompt, /时间：2026-08-03 11:02:00/);
   assert.match(prompt, /内容：历史补充/);
-  assert.match(prompt, /"action":"silent"/);
-  assert.match(prompt, /"action":"reply"/);
+  assert.equal(prompt.includes('action'), false);
+  assert.equal(prompt.includes('replyText'), false);
   assert.equal(prompt.includes('自我介绍'), false);
   assert.equal(prompt.includes('职责'), false);
   assert.equal(prompt.includes('会话'), false);

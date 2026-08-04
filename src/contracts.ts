@@ -1,4 +1,4 @@
-import type { Conversation, DecisionRun, NormalizedEvent, OutboxRecord } from './types.js';
+import type { Conversation, DeliveryRun, NormalizedEvent } from './types.js';
 
 export interface ChannelDescriptor {
   channelId: string;
@@ -15,7 +15,6 @@ export interface ChannelAdapter {
   readonly descriptor: ChannelDescriptor;
   start(handlers: ChannelHandlers): Promise<void>;
   stop(): Promise<void>;
-  send(conversation: Conversation, record: Pick<OutboxRecord, 'text' | 'uuid'>): Promise<void>;
 }
 
 export interface RuntimeDescriptor {
@@ -28,7 +27,8 @@ export interface RuntimeDescriptor {
 
 export interface AgentSession {
   start(): Promise<unknown>;
-  runDecision(prompt: string, shouldInterrupt?: () => boolean): Promise<DecisionRun>;
+  deliver(prompt: string): Promise<DeliveryRun>;
+  steer(prompt: string): Promise<{ turnId: string }>;
   interruptActive(): Promise<boolean>;
   stop(): Promise<void>;
   readonly currentSessionId: string | null;

@@ -1,0 +1,9 @@
+case_id,scope,expectation,round_1
+OWD-001,runtime,Codex start/resume 不使用 output schema 且保持固定 session,PASS
+OWD-002,realtime,两条实时消息产生两个顺序 runtime turn,PASS
+OWD-003,history,两条首次群历史先持久准入再产生两个顺序 runtime turn,PASS
+OWD-004,outbound,Host 不解析 Agent final text且不调用 Channel send,PASS
+OWD-005,concurrency,active turn 期间新消息排队且不触发 cancel,PASS
+OWD-006,recovery,runtime 失败保留 failed inbox并在 reconciliation 后重新投递,PASS
+OWD-007,observability,HISTORY 使用 loaded/delivered且不宣称 judged/replied,PASS
+OWD-008,regression,npm run verify 全绿且 npm pack 不包含 decision schema或发送协调实现,PASS

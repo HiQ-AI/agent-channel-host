@@ -70,6 +70,58 @@ test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完�
   }
 });
 
+test('ALERTS 将遗留 DWS 长错误压缩为单行脱敏摘要', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'cid-sensitive', title: '测试群', responsibility: '', mode: 'reply',
+  });
+  store.prepareGroupOnboarding(conversation.id, 1, 'turn-alert', '敏感回复正文', 'stable-alert-uuid');
+  store.finishGroupOnboardingIntro(
+    conversation.id,
+    'failed',
+    "Command failed: dws chat message send --group cid-sensitive --text 敏感回复正文 --uuid stable-alert-uuid\n"
+      + "Request is repeated with uuid 'stable-alert-uuid'",
+  );
+  const config = defaultConfig('alert-summary', '.', 'Agent');
+  const instance = viewInstance('alert-summary', config, store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  try {
+    const rendered = renderManagementView([instance], state, null, [], 72);
+    assert.match(rendered, /onboarding\/测试群: delivery_unknown: duplicate_uuid/);
+    assert.doesNotMatch(rendered, /敏感回复正文|cid-sensitive|stable-alert-uuid|Command failed:/);
+    const alertLine = rendered.split('\n').find((line) => line.includes('onboarding/测试群'))!;
+    assert.ok(terminalDisplayWidth(alertLine) <= 72);
+  } finally {
+    store.close();
+  }
+});
+
+test('首次群历史不再把批次 turn 冒充为逐消息判断结果', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'cid-history-evidence', title: '历史证据群', responsibility: '答疑', mode: 'reply',
+  });
+  store.prepareGroupOnboarding(conversation.id, 2, 'history-turn', '回复', 'history-uuid');
+  store.finishGroupOnboardingIntro(conversation.id, 'delivery_unknown', 'duplicate_uuid');
+  const instance = viewInstance('history-evidence', defaultConfig('history-evidence', '.', 'Agent'), store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  try {
+    const snapshot = store.status();
+    assert.equal(snapshot.received, 0);
+    assert.equal(snapshot.processed, 0);
+    assert.equal(snapshot.history_loaded, 2);
+    assert.equal(snapshot.history_judged, 0);
+    const rendered = renderManagementView([instance], state, null, [], 140);
+    assert.match(rendered, /MESSAGES received=0 .*processed=0/);
+    assert.match(rendered, /HISTORY loaded=2 delivered=0/);
+    assert.match(rendered, /历史证据群.*0\/2.*delivery_unknown/);
+  } finally {
+    store.close();
+  }
+});
+
 test('既有匿名私聊只读展示已持久化人员姓名且不改写原始会话标题', () => {
   const store = new Store(':memory:');
   const externalId = 'member-with-known-name';

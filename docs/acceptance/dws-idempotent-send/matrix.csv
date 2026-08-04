@@ -1,0 +1,14 @@
+case_id,layer,assertion,round_1,round_2
+DIS-001,dws,命令层保留非零退出stdout和stderr且DWS结构化JSON转换为不含消息正文命令参数和UUID的脱敏错误,PASS,PASS
+DIS-002,sender,明确的同UUID重复错误记为delivery_unknown且不换UUID不自动重试,PASS,PASS
+DIS-003,sender,非重复业务错误继续fail-closed,PASS,PASS
+DIS-004,view,遗留长错误在ALERTS中显示单行摘要且不泄露正文目标ID或UUID,PASS,PASS
+DIS-005,view,ALERTS摘要不超过终端显示宽度,PASS,PASS
+DIS-006,docs,README和SECURITY区分submitted与delivery_unknown并说明重复UUID语义,PASS,PASS
+DIS-007,regression,全量测试与npm打包dry-run通过,PASS,PASS
+DIS-008,e2e,真实误记状态精确纠正为delivery_unknown且唯一Host重启后不自动重试并保留告警,PASS,PASS
+DIS-009,view,首次历史以loaded和judged独立计数且会话展示delivery状态,,PASS
+DIS-010,reconcile,check只读回查且不修改delivery_unknown,,PASS
+DIS-011,reconcile,apply先备份且仅在精确回读零命中时使用新UUID单次发送,,PASS
+DIS-012,reconcile,发送后精确回读命中才标记delivered,,PASS
+DIS-013,e2e,真实群两条历史已判断回复经显式协调后可见且唯一Host恢复ready,,PASS

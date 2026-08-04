@@ -73,6 +73,7 @@ export interface AdmittedEvent extends NormalizedEvent {
   id: string;
   conversationId: string;
   sequence: number;
+  ingress: 'live' | 'history';
 }
 
 export interface Decision {
@@ -93,10 +94,9 @@ export interface SessionRecord {
   updatedAt: string;
 }
 
-export interface DecisionRun {
+export interface DeliveryRun {
   turnId: string;
   status: 'completed' | 'interrupted';
-  decision: Decision | null;
 }
 
 export type WorkerState = 'starting' | 'running' | 'warm' | 'stopped' | 'error';
@@ -124,7 +124,7 @@ export interface OutboxRecord {
   inputSequence: number;
   uuid: string;
   text: string;
-  state: 'pending' | 'sending' | 'submitted' | 'failed' | 'suppressed';
+  state: 'pending' | 'sending' | 'submitted' | 'failed' | 'suppressed' | 'delivery_unknown';
   attemptCount: number;
   error: string | null;
   createdAt: string;
@@ -133,7 +133,7 @@ export interface OutboxRecord {
 
 export interface GroupOnboardingRecord {
   conversationId: string;
-  state: 'pending' | 'prepared' | 'sending' | 'submitted' | 'failed';
+  state: 'pending' | 'prepared' | 'sending' | 'completed' | 'submitted' | 'delivered' | 'failed' | 'delivery_unknown';
   historyCount: number | null;
   historyLoadedAt: string | null;
   introTurnId: string | null;

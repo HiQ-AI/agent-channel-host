@@ -95,7 +95,7 @@ export function execResolved(
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = execFile(command.file, commandArgs(command, args), options, (error, stdout, stderr) => {
-      if (error) reject(error);
+      if (error) reject(Object.assign(error, { stdout, stderr }));
       else resolve({ stdout, stderr });
     });
     // PowerShell/npm shims can keep waiting while their inherited stdin pipe is open.

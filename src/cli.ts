@@ -6,7 +6,7 @@ import {
 import { configPath, discoverInstances, statePath } from './paths.js';
 import { Store } from './store.js';
 import { dwsDoctor, resolveExactGroup, searchDwsGroups } from './dws.js';
-import { CodexCommandSession, verifyCodexCommand } from './codex-command.js';
+import { CodexAppServerSession, verifyCodexAppServer } from './codex-app-server.js';
 import { runHost } from './host.js';
 import {
   installUserService, removeUserService, removeUserServiceIfInstalled, windowsServicePlan,
@@ -83,7 +83,7 @@ configCommand.command('model')
   });
 
 program.command('doctor')
-  .description('只读验证配置、DWS 状态和 Codex CLI command/resume 能力')
+  .description('只读验证配置、DWS 状态和 Codex App Server steer 能力')
   .requiredOption('--instance <name>', 'instance 名称')
   .action(async (options) => {
     const config = await loadConfig(options.instance);
@@ -91,7 +91,7 @@ program.command('doctor')
       config.channel.enabled
         ? dwsDoctor(config)
         : Promise.resolve({ version: 'disabled', eventStatus: { bus: { entry: { state: 'disabled' } }, subscriptions: [] } }),
-      verifyCodexCommand(config),
+      verifyCodexAppServer(config),
     ]);
     const eventStatus = dws.eventStatus as Record<string, unknown>;
     const bus = eventStatus?.bus as Record<string, unknown> | undefined;
@@ -343,41 +343,40 @@ program.command('run')
   .action(async (options) => runHost(await loadConfig(options.instance)));
 
 program.command('verify')
-  .description('不连接 DWS、不发送消息；验证指定会话的 runtime CLI start/resume/结构化 silent turn')
+  .description('不连接 DWS、不发送消息；验证指定会话的 App Server start/resume 与完成回执')
   .requiredOption('--instance <name>', 'instance 名称')
   .requiredOption('--id <id>', 'conversation UUID')
   .action(async (options) => {
     const config = await loadConfig(options.instance);
     const store = new Store(statePath(options.instance));
-    let session: CodexCommandSession | null = null;
+    let session: CodexAppServerSession | null = null;
     try {
       const target = store.getConversation(options.id);
       if (!target) throw new Error(`conversation 不存在：${options.id}`);
-      const runtime = await verifyCodexCommand(config);
+      const runtime = await verifyCodexAppServer(config);
+      const startupMode = store.getSession(target.id) ? 'resumed' : 'new';
       store.setRuntimeAdapter({
         runtimeId: config.runtime.id,
-        label: 'Codex CLI',
+        label: 'Codex App Server',
         state: 'stopped',
         model: config.runtime.model,
         protocolFingerprint: runtime.fingerprint,
         contextRecovery: 'runtime-native',
       });
-      session = new CodexCommandSession(config, target, runtime, store);
-      const startup = await session.start();
-      const canary = await session.runDecision(`
+      session = new CodexAppServerSession(config, target, runtime, store);
+      await session.start();
+      const canary = await session.deliver(`
 [宿主离线验证事件；不是钉钉消息]
-当前没有待处理消息。只返回 {"action":"silent","replyText":""}。
+当前没有待处理消息。请确认 runtime session 能正常接收本事件。
 `.trim());
-      if (canary.status !== 'completed' || canary.decision?.action !== 'silent' || canary.decision.replyText !== '') {
-        throw new Error('离线 canary 未返回严格 silent 决策');
-      }
+      if (canary.status !== 'completed') throw new Error('离线 canary 未成功传入 runtime');
       print({
         ok: true,
         conversationId: target.id,
-        startupMode: startup.mode,
+        startupMode,
         providerSessionIdPrefix: session.currentSessionId?.slice(0, 12) ?? null,
         hostRunIdPrefix: canary.turnId.slice(0, 12),
-        action: canary.decision.action,
+        delivery: 'completed',
         model: config.runtime.model,
         effort: config.runtime.effort,
       });

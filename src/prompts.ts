@@ -33,7 +33,7 @@ function messagePrompt(messages: MessageEnvelope[]): string {
   const rendered = messages
     .map((message, index) => `消息 ${index + 1}\n发送者：${message.sender}\n时间：${message.time}\n内容：${message.content}`)
     .join('\n\n');
-  return `以下是收到的消息：\n\n${rendered}\n\n处理完成后只返回一个 JSON：\n- 不需要回复：{"action":"silent","replyText":""}\n- 需要回复：{"action":"reply","replyText":"回复内容"}`;
+  return `以下是收到的消息：\n\n${rendered}`;
 }
 
 export function messageContent(content: unknown, quoted: unknown, forwarded: unknown): string {
