@@ -7,6 +7,7 @@ import { CLI_NAME } from './product.js';
 import { CONVERSATION_MODES, MAX_WORKER_WARM_SECONDS } from './types.js';
 import { safeName } from './paths.js';
 import { displayConversationTitle } from './conversation-title.js';
+import { execResolved, resolveCommand } from './command.js';
 
 type Json = Record<string, unknown>;
 type TaggedJson = Json & { instance: string };
@@ -26,6 +27,14 @@ export interface ViewInstance {
   notices: string[];
 }
 
+export interface RequiredToolStatus {
+  tool: 'Node.js' | 'DWS' | 'Codex CLI';
+  state: 'ready' | 'error';
+  version: string;
+  command: string;
+  error: string | null;
+}
+
 export interface ManagementViewState {
   tab: 'overview' | 'settings';
   selectedInstance: number;
@@ -38,7 +47,7 @@ export interface ManagementViewState {
   detailInstanceName: string | null;
   detailChannel: ChannelTarget | null;
   detailConversationId: string | null;
-  conversationDetailFocus: 'members' | 'messages';
+  conversationDetailFocus: 'settings' | 'members' | 'messages';
   selectedMember: number;
   selectedMessage: number;
   selectedMessageSequence: number | null;
@@ -225,8 +234,9 @@ export async function runView(
   actions: ManagementViewActions = {},
 ): Promise<void> {
   assertInteractiveView(options);
+  const requiredTools = await inspectRequiredTools(instances);
   if (options.once) {
-    process.stdout.write(`${renderStatusView(instances, options.showContent, process.stdout.columns ?? 120)}\n`);
+    process.stdout.write(`${renderStatusView(instances, options.showContent, process.stdout.columns ?? 120, requiredTools)}\n`);
     return;
   }
 
@@ -266,7 +276,7 @@ export async function runView(
       ? createSettingEntries(
         settingsInstance.config,
         settingsInstance.store,
-        selectedIdForSettings(state, settingsInstance),
+        null,
         settingsInstance.configFile,
       )
       : [];
@@ -280,6 +290,7 @@ export async function runView(
       options.showContent,
       color,
       process.stdout.rows ?? 30,
+      requiredTools,
     );
   };
   const writeFrame = (frame: string) => {
@@ -355,6 +366,45 @@ export async function runView(
     if (rawMode) process.stdin.setRawMode?.(false);
     process.stdin.pause();
     if (alternateScreen) process.stdout.write(VIEW_ALTERNATE_SCREEN_EXIT);
+  }
+}
+
+export async function inspectRequiredTools(instances: ViewInstance[]): Promise<RequiredToolStatus[]> {
+  const dwsCommands = uniqueCommands(instances.map((instance) => instance.config.channel.command), 'dws');
+  const codexCommands = uniqueCommands(instances.map((instance) => instance.config.runtime.command), 'codex');
+  const [dws, codex] = await Promise.all([
+    inspectExternalTool('DWS', dwsCommands),
+    inspectExternalTool('Codex CLI', codexCommands),
+  ]);
+  return [
+    { tool: 'Node.js', state: 'ready', version: process.version, command: process.execPath, error: null },
+    dws,
+    codex,
+  ];
+}
+
+function uniqueCommands(commands: string[], fallback: string): string[] {
+  return [...new Set(commands.length > 0 ? commands : [fallback])];
+}
+
+async function inspectExternalTool(
+  tool: 'DWS' | 'Codex CLI',
+  commands: string[],
+): Promise<RequiredToolStatus> {
+  try {
+    const versions = await Promise.all(commands.map(async (command) => {
+      const resolved = await resolveCommand(command);
+      const result = await execResolved(resolved, ['--version'], {
+        cwd: process.cwd(), encoding: 'utf8', timeout: 5_000, windowsHide: true,
+      });
+      return result.stdout.trim().split(/\r?\n/, 1)[0] || 'unknown';
+    }));
+    return { tool, state: 'ready', version: [...new Set(versions)].join(' / '), command: commands.join(' / '), error: null };
+  } catch (error) {
+    return {
+      tool, state: 'error', version: '-', command: commands.join(' / '),
+      error: truncate(error instanceof Error ? error.message.replace(/\s+/g, ' ') : String(error), 100),
+    };
   }
 }
 
@@ -461,19 +511,20 @@ export async function handleManagementViewInput(
       return;
     }
     if (key === '\r' || key === '\n') {
-      if (!settingsInstance) throw new Error('没有可配置的 instance');
-      const selectedId = selectedIdForSettings(state, settingsInstance);
+      const editingInstance = settingsInstance ?? (state.detailConversationId ? detailInstance : null);
+      if (!editingInstance) throw new Error('没有可配置的 instance');
+      const selectedId = settingsInstance ? null : state.detailConversationId;
       const entry = createSettingEntries(
-        settingsInstance.config,
-        settingsInstance.store,
+        editingInstance.config,
+        editingInstance.store,
         selectedId,
-        settingsInstance.configFile,
+        editingInstance.configFile,
       )
         .find((item) => item.key === state.editing!.key);
       if (!entry) throw new Error('设置项已变化，请重新选择');
       const editingValue = state.editing.value;
       const actionNotice = await applySettingWithProgress(
-        state, settingsInstance, entry, editingValue, actions,
+        state, editingInstance, entry, editingValue, actions,
       );
       state.notice = actionNotice ?? `${entry.label} 已保存`;
       state.editing = null;
@@ -502,13 +553,15 @@ export async function handleManagementViewInput(
     state.exitConfirmation = true;
     return;
   }
-  if (state.detailConversationId && detailInstance) {
+  if (state.detailConversationId && detailInstance && !state.settingsInstanceName) {
     if (key === '\t') {
-      state.conversationDetailFocus = state.conversationDetailFocus === 'members' ? 'messages' : 'members';
+      state.conversationDetailFocus = state.conversationDetailFocus === 'settings'
+        ? 'messages'
+        : state.conversationDetailFocus === 'messages' ? 'members' : 'settings';
       return;
     }
     const detailSnapshot = detailInstance.store.conversationDetail(state.detailConversationId);
-    if (detailSnapshot && moveConversationDetailSelection(state, detailSnapshot, key)) return;
+    if (detailSnapshot && moveConversationDetailSelection(state, detailInstance, detailSnapshot, key)) return;
   }
   if (key === '\t' && !state.detailInstanceName && !state.settingsInstanceName) {
     state.tab = state.tab === 'overview' ? 'settings' : 'overview';
@@ -538,13 +591,19 @@ export async function handleManagementViewInput(
   }
   if (state.tab === 'overview' && state.detailInstanceName
     && (!state.detailChannel || state.detailConversationId) && key.toLowerCase() === 's') {
+    if (state.detailConversationId) {
+      state.conversationDetailFocus = 'settings';
+      state.selectedSetting = 0;
+      state.notice = null;
+      return;
+    }
     state.settingsInstanceName = state.detailInstanceName;
     state.selectedSetting = 0;
     state.notice = null;
     return;
   }
   if (state.tab === 'overview' && state.detailConversationId && detailInstance && key.toLowerCase() === 'e') {
-    state.settingsInstanceName = detailInstance.name;
+    state.conversationDetailFocus = 'settings';
     state.selectedSetting = 0;
     state.notice = null;
     return;
@@ -597,12 +656,11 @@ export async function handleManagementViewInput(
   if (direction !== 0) {
     if (state.tab === 'overview') {
       if (state.settingsInstanceName) {
-        const selectedId = settingsInstance ? selectedIdForSettings(state, settingsInstance) : null;
         const total = settingsInstance
           ? createSettingEntries(
             settingsInstance.config,
             settingsInstance.store,
-            selectedId,
+            null,
             settingsInstance.configFile,
           ).length
           : 0;
@@ -624,13 +682,31 @@ export async function handleManagementViewInput(
   }
   if (forward) {
     if (state.tab === 'overview') {
+      if (state.detailConversationId && detailInstance && state.conversationDetailFocus === 'settings') {
+        const entries = conversationSettingEntries(detailInstance, state.detailConversationId);
+        const entry = entries[state.selectedSetting];
+        if (!entry) return;
+        if (entry.input === 'toggle') {
+          const next = entry.value === 'enabled' ? 'disabled' : 'enabled';
+          const actionNotice = await applySettingWithProgress(state, detailInstance, entry, next, actions);
+          state.notice = actionNotice ?? `${entry.label} 已切换为 ${next}`;
+          return;
+        }
+        if (entry.input === 'select') {
+          const next = nextOption(entry);
+          const actionNotice = await applySettingWithProgress(state, detailInstance, entry, next, actions);
+          state.notice = actionNotice ?? `${entry.label} 已选择 ${next}`;
+          return;
+        }
+        state.editing = { key: entry.key, label: entry.label, value: entry.value, cursor: textLength(entry.value) };
+        return;
+      }
       if (state.settingsInstanceName) {
         if (!settingsInstance) return;
-        const selectedId = selectedIdForSettings(state, settingsInstance);
         const entry = createSettingEntries(
           settingsInstance.config,
           settingsInstance.store,
-          selectedId,
+          null,
           settingsInstance.configFile,
         )[state.selectedSetting];
         if (!entry) return;
@@ -968,6 +1044,11 @@ export function createSettingEntries(
   return entries;
 }
 
+function conversationSettingEntries(instance: ViewInstance, conversationId: string): SettingEntry[] {
+  return createSettingEntries(instance.config, instance.store, conversationId, instance.configFile)
+    .filter((entry) => entry.section === 'conversation');
+}
+
 export function createChannelSettingEntry(
   config: HostConfig,
   store: Store,
@@ -1142,6 +1223,7 @@ export function renderManagementView(
   showContent = false,
   color = false,
   height = 30,
+  requiredTools: RequiredToolStatus[] = [],
 ): string {
   normalizeSelection(state, instances);
   const selectedInstance = instances[state.selectedInstance] ?? null;
@@ -1167,10 +1249,10 @@ export function renderManagementView(
   if (state.tab === 'settings') lines.push(...renderGlobalSettings(instances, width, color));
   else if (state.groupSearch && detailInstance) lines.push(...renderGroupSearch(detailInstance, state.groupSearch, width, color));
   else if (settingsInstance) lines.push(...renderInstanceSettings(settingsInstance, detail, settings, state, width, color));
-  else if (state.detailConversationId) lines.push(...renderConversationDetail(detail, state, width, height, color));
+  else if (state.detailConversationId) lines.push(...renderConversationDetail(detailInstance, detail, state, width, height, color));
   else if (state.detailChannel && detailInstance) lines.push(...renderChannelManagement(detailInstance, state.detailChannel, state, width, color));
   else if (detailInstance) lines.push(...renderInstanceOverview(detailInstance, detailInstance.store.status(showContent), state, width, height, color));
-  else lines.push(...renderGlobalOverview(snapshots, state, width, color));
+  else lines.push(...renderGlobalOverview(snapshots, state, width, color, requiredTools));
   const notice = state.notice ?? (settingsInstance ?? selectedInstance)?.notices.at(-1) ?? null;
   if (notice) lines.push('', ansi(`提示：${notice}`, 'yellow-bold', color));
   if (state.exitConfirmation) {
@@ -1216,7 +1298,7 @@ export function renderManagementView(
         : state.settingsInstanceName
           ? ansi('↑/↓ 选择  →/Enter 编辑或选择下一项  ←/Esc 返回  q 退出', 'dim', color)
           : state.detailConversationId
-            ? ansi('Tab 切换 MEMBERS/MESSAGES  ↑/↓ 滚动  PgUp/PgDn 翻页  Home/End 首尾  e/s 修改  d 删除  ←/Esc 返回  q 退出', 'dim', color)
+            ? ansi('Tab 切换 CONVERSATION/MESSAGES/MEMBERS  ↑/↓ 选择或滚动  →/Enter 编辑设置  e/s 定位设置  d 删除  ←/Esc 返回  q 退出', 'dim', color)
             : state.detailChannel
               ? ansi('↑/↓ 选择  →/Enter 操作、选择下一项或下钻  d 删除会话  ←/Esc 返回 Instance  q 退出', 'dim', color)
           : state.detailInstanceName
@@ -1230,6 +1312,7 @@ function renderGlobalOverview(
   state: ManagementViewState,
   width: number,
   color: boolean,
+  requiredTools: RequiredToolStatus[],
 ): string[] {
   const lines = [heading('INSTANCES', color)];
   lines.push(...table(
@@ -1251,6 +1334,8 @@ function renderGlobalOverview(
     lines.push('', ansi('尚未初始化 instance。交互模式可按 a 创建；也可运行 agent-channel init --instance <name> --cwd <path>。', 'yellow-bold', color));
   }
 
+  if (requiredTools.length > 0) lines.push('', ...renderRequiredTools(requiredTools, width, color));
+
   const alerts = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.alerts));
   if (alerts.length > 0) {
     lines.push('', heading('ALERTS', color), ...alerts.map((row) => renderAlert(
@@ -1262,6 +1347,18 @@ function renderGlobalOverview(
     )));
   }
   return lines;
+}
+
+function renderRequiredTools(tools: RequiredToolStatus[], width: number, color: boolean): string[] {
+  return [
+    heading('TOOLS', color),
+    ...table(
+      ['TOOL', 'STATE', 'VERSION', 'COMMAND', 'ERROR'],
+      tools.map((tool) => [tool.tool, tool.state, tool.version, tool.command, tool.error ?? '-']),
+      width,
+      semanticTable(color),
+    ),
+  ];
 }
 
 function renderInstanceOverview(
@@ -1451,13 +1548,14 @@ function renderGroupSearch(
 }
 
 function renderConversationDetail(
+  instance: ViewInstance | null,
   detail: Record<string, unknown> | null,
   state: ManagementViewState,
   width: number,
   height: number,
   color: boolean,
 ): string[] {
-  if (!detail) return [ansi('会话不存在或已删除', 'red-bold', color)];
+  if (!detail || !instance) return [ansi('会话不存在或已删除', 'red-bold', color)];
   const conversation = object(detail.conversation);
   const session = object(detail.session);
   const worker = object(detail.worker);
@@ -1472,7 +1570,10 @@ function renderConversationDetail(
     ? stableMessageIndex
     : clamp(state.selectedMessage, 0, Math.max(0, messages.length - 1));
   state.selectedMessageSequence = messages.length > 0 ? number(messages[state.selectedMessage]?.sequence) : null;
-  const pageSize = sectionPageSize(height, 2);
+  const conversationId = text(conversation.id);
+  const conversationSettings = conversationId ? conversationSettingEntries(instance, conversationId) : [];
+  state.selectedSetting = clamp(state.selectedSetting, 0, Math.max(0, conversationSettings.length - 1));
+  const pageSize = clamp(height - 26, 1, 8);
   const memberWindow = viewportRows(members, state.selectedMember, pageSize);
   const messageWindow = viewportRows(messages, state.selectedMessage, pageSize);
   const lines = [
@@ -1483,30 +1584,50 @@ function renderConversationDetail(
     `Session ${statusText(text(session.lifecycle) ?? 'unprovisioned', color)}  id=${text(session.providerSessionPrefix) ?? '-'}  generation=${text(session.generation) ?? '-'}`,
     `Worker ${statusText(text(worker.state) ?? 'stopped', color)}  pid=${text(worker.processId) ?? '-'}  error=${errorText(text(worker.error) ?? '-', color)}`,
     ansi(`Checkpoint v${text(context.version) ?? '0'} @ seq ${text(context.throughSequence) ?? '0'}  facts=${text(context.facts) ?? '0'} decisions=${text(context.decisions) ?? '0'} commitments=${text(context.commitments) ?? '0'} open=${text(context.openQuestions) ?? '0'}`, 'cyan', color),
-    '', state.conversationDetailFocus === 'members' ? ansi('[ MEMBERS ]', 'cyan-bold', color) : heading('MEMBERS', color),
+    '', state.conversationDetailFocus === 'settings' ? ansi('[ CONVERSATION ]', 'cyan-bold', color) : heading('CONVERSATION', color),
   ];
   lines.push(...table(
-    ['', 'NAME', 'ORG ROLE', 'CHANNEL ROLE', 'BOUNDARY', 'SOURCE', 'VER'],
-    memberWindow.rows.map((row, index) => [
-      state.conversationDetailFocus === 'members' && memberWindow.start + index === state.selectedMember ? '>' : ' ',
-      row.displayName, row.organizationRole || '-', row.conversationRole || '-', row.responsibilityBoundary || '-', row.source, row.version,
+    ['', 'SETTING', 'VALUE', 'EFFECT'],
+    conversationSettings.map((entry, index) => [
+      state.conversationDetailFocus === 'settings' && index === state.selectedSetting ? '>' : ' ',
+      entry.label.replace(` · ${text(conversation.title)}`, ''), entry.value || '(空)', entry.hint,
     ]),
     width,
-    semanticTable(color, state.conversationDetailFocus === 'members' ? state.selectedMember - memberWindow.start : -1, 2),
+    {
+      separator: ' │ ', dividerSeparator: '─┼─', dividerFill: '─',
+      decorate: tableDecorator(color, state.conversationDetailFocus === 'settings' ? state.selectedSetting : -1, 1),
+    },
   ));
-  if (memberWindow.overflow) lines.push(ansi(viewportStatus(memberWindow), 'dim', color));
-  lines.push('', state.conversationDetailFocus === 'messages'
+  const messagesHeading = state.conversationDetailFocus === 'messages'
     ? ansi('[ RECENT MESSAGES ]', 'cyan-bold', color)
-    : heading('RECENT MESSAGES', color));
+    : heading('RECENT MESSAGES', color);
+  const membersHeading = state.conversationDetailFocus === 'members'
+    ? ansi('[ MEMBERS ]', 'cyan-bold', color)
+    : heading('MEMBERS', color);
+  const gap = 3;
+  const panelWidth = Math.max(30, width - gap);
+  const membersWidth = Math.max(12, Math.floor(panelWidth * 0.36));
+  const messagesWidth = Math.max(18, panelWidth - membersWidth);
   const headers = ['', 'SEQ', 'SENDER', 'STATE', 'AGE', 'CONTENT'];
-  lines.push(...table(headers, messageWindow.rows.map((row, index) => {
+  const messageLines = [messagesHeading, ...table(headers, messageWindow.rows.map((row, index) => {
     const values: unknown[] = [
       state.conversationDetailFocus === 'messages' && messageWindow.start + index === state.selectedMessage ? '>' : ' ',
       row.sequence, row.sender, row.state, age(row.receivedAt), row.preview ?? '隐藏（--show-content）',
     ];
     return values;
-  }), width, semanticTable(color, state.conversationDetailFocus === 'messages' ? state.selectedMessage - messageWindow.start : -1, 2)));
-  if (messageWindow.overflow) lines.push(ansi(viewportStatus(messageWindow), 'dim', color));
+  }), messagesWidth, { ...semanticTable(color, state.conversationDetailFocus === 'messages' ? state.selectedMessage - messageWindow.start : -1, 2), minimumWidth: 20 })];
+  if (messageWindow.overflow) messageLines.push(ansi(viewportStatus(messageWindow), 'dim', color));
+  const memberLines = [membersHeading, ...table(
+    ['', 'NAME', 'ORG ROLE', 'CHANNEL ROLE', 'BOUNDARY'],
+    memberWindow.rows.map((row, index) => [
+      state.conversationDetailFocus === 'members' && memberWindow.start + index === state.selectedMember ? '>' : ' ',
+      row.displayName, row.organizationRole || '-', row.conversationRole || '-', row.responsibilityBoundary || '-',
+    ]),
+    membersWidth,
+    { ...semanticTable(color, state.conversationDetailFocus === 'members' ? state.selectedMember - memberWindow.start : -1, 2), minimumWidth: 20 },
+  )];
+  if (memberWindow.overflow) memberLines.push(ansi(viewportStatus(memberWindow), 'dim', color));
+  lines.push('', ...sideBySide(messageLines, messagesWidth, memberLines, membersWidth, gap));
   if (context.currentTopic !== undefined) {
     lines.push('', ansi(`当前主题：${text(context.currentTopic) || '无'}`, 'cyan-bold', color));
     for (const [label, key] of [['事实', 'factItems'], ['决定', 'decisionItems'], ['承诺', 'commitmentItems'], ['未决', 'openQuestionItems']] as const) {
@@ -1584,12 +1705,17 @@ function renderInstanceSettings(
   return lines;
 }
 
-export function renderStatusView(instances: ViewInstance[], showContent = false, width = 120): string {
+export function renderStatusView(
+  instances: ViewInstance[],
+  showContent = false,
+  width = 120,
+  requiredTools: RequiredToolStatus[] = [],
+): string {
   const state = createManagementViewState();
   const snapshots = instances.map((instance) => ({ instance, snapshot: instance.store.status(showContent) }));
   const lines = [
     `${CLI_NAME} view  instances=${instances.length}  refreshed=${new Date().toISOString()}`,
-    ...renderGlobalOverview(snapshots, state, width, false),
+    ...renderGlobalOverview(snapshots, state, width, false, requiredTools),
     '',
     '只读聚合快照；交互模式会逐 instance 启动或 attach Host，并从总览下钻详情与 Instance 设置',
   ];
@@ -1656,6 +1782,7 @@ function findChannelGroup(
 
 function moveConversationDetailSelection(
   state: ManagementViewState,
+  instance: ViewInstance,
   detail: Record<string, unknown>,
   key: string,
 ): boolean {
@@ -1665,16 +1792,23 @@ function moveConversationDetailSelection(
         : key === '\u001b[6~' ? 6 : 0;
   const boundary = key === '\u001b[H' ? 'first' : key === '\u001b[F' ? 'last' : null;
   if (direction === 0 && boundary === null) return false;
-  const rows = state.conversationDetailFocus === 'members' ? array(detail.members) : array(detail.messages);
-  const current = state.conversationDetailFocus === 'members' ? state.selectedMember : state.selectedMessage;
+  const conversationId = text(object(detail.conversation).id);
+  const rows = state.conversationDetailFocus === 'settings'
+    ? conversationId ? conversationSettingEntries(instance, conversationId) : []
+    : state.conversationDetailFocus === 'members' ? array(detail.members) : array(detail.messages);
+  const current = state.conversationDetailFocus === 'settings'
+    ? state.selectedSetting
+    : state.conversationDetailFocus === 'members' ? state.selectedMember : state.selectedMessage;
   const next = boundary === 'first' ? 0
     : boundary === 'last' ? Math.max(0, rows.length - 1)
       : clamp(current + direction, 0, Math.max(0, rows.length - 1));
-  if (state.conversationDetailFocus === 'members') {
+  if (state.conversationDetailFocus === 'settings') {
+    state.selectedSetting = next;
+  } else if (state.conversationDetailFocus === 'members') {
     state.selectedMember = next;
   } else {
     state.selectedMessage = next;
-    state.selectedMessageSequence = rows.length > 0 ? number(rows[next]?.sequence) : null;
+    state.selectedMessageSequence = rows.length > 0 ? number(object(rows[next]).sequence) : null;
   }
   return true;
 }
@@ -1697,11 +1831,6 @@ function moveInstanceSelection(state: ManagementViewState, instance: ViewInstanc
     state.selectedConversation = next - channelCount;
     state.selectedConversationId = instance.store.listConversations()[state.selectedConversation]?.id ?? null;
   }
-}
-
-function selectedIdForSettings(state: ManagementViewState, instance: ViewInstance): string | null {
-  if (state.detailInstanceName !== instance.name) return null;
-  return state.detailConversationId;
 }
 
 function normalizeSelection(state: ManagementViewState, instances: ViewInstance[]): void {
@@ -1754,12 +1883,13 @@ interface TableOptions {
   dividerSeparator?: string;
   dividerFill?: string;
   decorate?: (value: string, rowIndex: number, columnIndex: number, header: boolean) => string;
+  minimumWidth?: number;
 }
 
 function table(headers: string[], rows: unknown[][], width: number, options: TableOptions = {}): string[] {
   if (rows.length === 0) return ['  (none)'];
   const separator = options.separator ?? '  ';
-  const usable = Math.max(60, width - 2);
+  const usable = Math.max(options.minimumWidth ?? 60, width - 2);
   const natural = headers.map((header, index) => Math.max(
     terminalDisplayWidth(header),
     ...rows.map((row) => terminalDisplayWidth(cell(row[index]))),
@@ -1782,6 +1912,32 @@ function table(headers: string[], rows: unknown[][], width: number, options: Tab
     .map((value) => (options.dividerFill ?? '-').repeat(value))
     .join(options.dividerSeparator ?? separator);
   return [render(headers, -1, true), divider, ...rows.map((row, index) => render(row, index))];
+}
+
+function sideBySide(left: string[], leftWidth: number, right: string[], rightWidth: number, gap: number): string[] {
+  const rows = Math.max(left.length, right.length);
+  return Array.from({ length: rows }, (_, index) => {
+    const leftCell = left[index] ?? '';
+    const rightCell = right[index] ?? '';
+    return `${padAnsi(truncateAnsi(leftCell, leftWidth), leftWidth)}${' '.repeat(gap)}${truncateAnsi(rightCell, rightWidth)}`;
+  });
+}
+
+function truncateAnsi(value: string, width: number): string {
+  if (ansiDisplayWidth(value) <= width) return value;
+  return truncate(stripAnsi(value), width);
+}
+
+function padAnsi(value: string, width: number): string {
+  return `${value}${' '.repeat(Math.max(0, width - ansiDisplayWidth(value)))}`;
+}
+
+function ansiDisplayWidth(value: string): number {
+  return terminalDisplayWidth(stripAnsi(value));
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-9;]*m/g, '');
 }
 
 function semanticTable(color: boolean, selectedRow = -1, selectedThroughColumn = -1): TableOptions {

@@ -7,11 +7,32 @@ import { anonymousConversationTitle } from '../src/conversation-title.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import {
-  bindHostToInteractiveView, createManagementViewState, createSettingEntries, handleManagementViewInput, renderFrameDiff, renderManagementView,
+  bindHostToInteractiveView, createManagementViewState, createSettingEntries, handleManagementViewInput, inspectRequiredTools, renderFrameDiff, renderManagementView,
   renderPendingOperation, renderStatusView,
   shouldStartHostForView, shouldUseColor, terminalDisplayWidth, VIEW_ALTERNATE_SCREEN_ENTER, VIEW_ALTERNATE_SCREEN_EXIT,
   type ViewInstance,
 } from '../src/view.js';
+
+test('View 总览展示 Node.js、DWS、Codex CLI 三项启动时工具探测', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('tool-status', '.', 'Agent');
+  config.channel.command = process.execPath;
+  config.runtime.command = process.execPath;
+  try {
+    const tools = await inspectRequiredTools([viewInstance('tool-status', config, store)]);
+    assert.deepEqual(tools.map((tool) => tool.tool), ['Node.js', 'DWS', 'Codex CLI']);
+    assert.ok(tools.every((tool) => tool.state === 'ready'));
+    const rendered = renderManagementView(
+      [viewInstance('tool-status', config, store)], createManagementViewState(), null, [], 120, false, false, 30, tools,
+    );
+    assert.match(rendered, /TOOLS/);
+    assert.match(rendered, /Node\.js\s+ready\s+v\d+/);
+    assert.match(rendered, /DWS\s+ready\s+v\d+/);
+    assert.match(rendered, /Codex CLI\s+ready\s+v\d+/);
+  } finally {
+    store.close();
+  }
+});
 
 test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完整 provider session ID', () => {
   const store = new Store(':memory:');
@@ -272,7 +293,7 @@ test('instance 设置使用清晰的列分隔符并保持左对齐', () => {
   }
 });
 
-test('settings 使用同一 schema 原子保存 config 和 conversation，但不提供成员资料编辑', async () => {
+test('Instance 与内嵌 Conversation 设置共用 schema，但不提供成员资料编辑', async () => {
   const root = resolve('.test-view-settings');
   const configFile = resolve(root, 'config.yaml');
   await rm(root, { recursive: true, force: true });
@@ -317,8 +338,9 @@ test('settings 使用同一 schema 原子保存 config 和 conversation，但不
     const instance = { ...viewInstance('view-settings', config, store), configFile };
     state.detailInstanceName = instance.name;
     state.detailConversationId = conversation.id;
-    state.settingsInstanceName = instance.name;
-    state.selectedSetting = entries.findIndex((entry) => entry.key.endsWith(':mode'));
+    state.conversationDetailFocus = 'settings';
+    state.selectedSetting = entries.filter((entry) => entry.section === 'conversation')
+      .findIndex((entry) => entry.key.endsWith(':mode'));
     await handleManagementViewInput('\r', state, [instance], () => undefined);
     assert.equal(state.editing, null);
     assert.equal(state.notice, '会话模式 · 更新后的私聊 已选择 reply');
@@ -328,10 +350,9 @@ test('settings 使用同一 schema 原子保存 config 和 conversation，但不
     assert.equal(store.getConversation(conversation.id)?.enabled, false);
     assert.equal(store.getConversation(conversation.id)?.policyVersion, 5);
     assert.equal(store.listConversationMembers(conversation.id)[0]?.organizationRole, '');
-    assert.doesNotMatch(
-      renderManagementView([instance], state, store.conversationDetail(conversation.id), entries, 140),
-      /MEMBERS|成员甲/,
-    );
+    const detailView = renderManagementView([instance], state, store.conversationDetail(conversation.id), entries, 140);
+    assert.match(detailView, /RECENT MESSAGES.*MEMBERS/);
+    assert.match(detailView, /成\*\*\*甲/);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -373,7 +394,7 @@ test('view 颜色遵循 TTY、NO_COLOR 与 dumb terminal', () => {
   assert.equal(shouldUseColor(true, { TERM: 'dumb' }), false);
 });
 
-test('management view 使用右键下钻、左键返回并可进入 instance 设置编辑', async () => {
+test('management view 从会话详情直接编辑内嵌 Conversation 设置', async () => {
   const store = new Store(':memory:');
   const config = defaultConfig('view-input', '.', 'Agent');
   const conversation = store.addConversation({
@@ -390,13 +411,17 @@ test('management view 使用右键下钻、左键返回并可进入 instance 设
     assert.equal(state.instanceFocus, 'conversations');
     await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
     assert.equal(state.detailConversationId, conversation.id);
-    await handleManagementViewInput('\u001b[D', state, instances, () => { stopped = true; });
-    assert.equal(state.detailConversationId, null);
     await handleManagementViewInput('s', state, instances, () => { stopped = true; });
     assert.equal(state.tab, 'overview');
-    assert.equal(state.settingsInstanceName, 'view-input');
+    assert.equal(state.settingsInstanceName, null);
+    assert.equal(state.detailConversationId, conversation.id);
+    assert.equal(state.conversationDetailFocus, 'settings');
+    await handleManagementViewInput('\u001b[B', state, instances, () => { stopped = true; });
+    assert.equal(state.selectedSetting, 1);
+    await handleManagementViewInput('\u001b[A', state, instances, () => { stopped = true; });
+    assert.equal(state.selectedSetting, 0);
     await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
-    assert.equal(state.editing?.key, 'identity.name');
+    assert.equal(state.editing?.key, `conversation:${conversation.id}:title`);
     await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
     assert.equal(state.editing, null);
     await handleManagementViewInput('q', state, instances, () => { stopped = true; });
@@ -761,9 +786,11 @@ test('大表格按终端高度建立内部视口，并以 sequence 保持消息�
     let detail = store.conversationDetail(target.id, true)!;
     let detailView = renderManagementView([instance], state, detail, [], 120, true, false, 28);
     assert.ok(detailView.split('\n').length <= 28);
+    assert.ok(detailView.split('\n').every((line) => terminalDisplayWidth(line) <= 120));
     assert.match(detailView, /CONTENT/);
     assert.match(detailView, /用于视口验证的消息内容/);
-    assert.match(detailView, /显示 1-3 \/ 共 10 条/);
+    assert.match(detailView, /RECENT MESSAGES.*MEMBERS/);
+    assert.match(detailView, /显示 1-2 \/ 共 10 条/);
     await handleManagementViewInput('\u001b[6~', state, [instance], () => undefined);
     const selectedSequence = state.selectedMessageSequence;
     assert.ok(selectedSequence !== null);
@@ -780,7 +807,9 @@ test('大表格按终端高度建立内部视口，并以 sequence 保持消息�
     assert.equal(state.conversationDetailFocus, 'members');
     await handleManagementViewInput('\u001b[F', state, [instance], () => undefined);
     assert.equal(state.selectedMember, 10);
-    assert.match(renderManagementView([instance], state, detail, [], 120, true, false, 28), /显示 9-11 \/ 共 11 条/);
+    assert.match(renderManagementView([instance], state, detail, [], 120, true, false, 28), /显示 10-11 \/ 共 11 条/);
+    await handleManagementViewInput('\t', state, [instance], () => undefined);
+    assert.equal(state.conversationDetailFocus, 'settings');
   } finally {
     store.close();
   }
