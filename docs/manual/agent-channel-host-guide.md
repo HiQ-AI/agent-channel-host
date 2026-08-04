@@ -90,112 +90,100 @@ agent-channel --version
 
 ## 从零接入一个钉钉群
 
-### Step 1：创建 Agent 工作目录
-
-该目录是 Codex session 的工作目录，应包含 Agent 的身份、职责、安全边界和所需 skills。不要把不可信项目与高权限 Agent 共用同一目录。
-
-```powershell
-New-Item -ItemType Directory -Path 'D:\agent-workspaces\triss' -Force
-```
-
-### Step 2：初始化 Instance
-
-```powershell
-agent-channel init `
-  --instance triss `
-  --cwd 'D:\agent-workspaces\triss' `
-  --name '翠丝' `
-  --model gpt-5.6-sol `
-  --effort low
-```
-
-`init` 只创建配置和空数据库，不启动 DWS 订阅，也不发送消息。Windows 默认状态目录为：
-
-```text
-%LOCALAPPDATA%\agent-channel-host\instances\triss\
-├── config.yaml
-├── state.sqlite3
-├── run-host.cmd
-└── service.log
-```
-
-需要使用指定 DWS 组织身份时，在初始化命令中增加 `--dws-profile <corpId:userId>`。
-
-### Step 3：执行启动前检查
-
-```powershell
-agent-channel doctor --instance triss
-```
-
-只有命令退出码为 `0`，且输出中的 DWS bus、Runtime 版本和配置都符合预期，才进入下一步。`doctor` 是只读检查，不代表 Host 已经常驻运行。
-
-### Step 4：添加群聊
-
-群聊标题会交给 DWS 精确搜索，必须唯一匹配：
-
-```powershell
-agent-channel conversation add `
-  --instance triss `
-  --kind group `
-  --title '广场＆编辑器迭代中...' `
-  --responsibility '回答编辑器相关问题、需求、方案和 bug 排查' `
-  --mode shadow `
-  --warm-seconds 30
-```
-
-首次接入建议使用 `shadow`。观察处理结果并确认 Agent 的回复边界后，再显式切换为 `reply`。
-
-私聊不按姓名猜 ID，必须提供 DWS 返回的 `openDingTalkId`：
-
-```powershell
-agent-channel conversation add `
-  --instance triss `
-  --kind direct `
-  --title '同事私聊' `
-  --open-dingtalk-id '<openDingTalkId>' `
-  --responsibility '回答职责范围内问题' `
-  --mode shadow
-```
-
-查看登记结果并保存返回的 Conversation UUID：
-
-```powershell
-agent-channel conversation list --instance triss
-```
-
-### Step 5：离线验证 Session
-
-连续执行两次，不连接 DWS、不发送钉钉消息：
-
-```powershell
-$conversationId = '<conversation UUID>'
-agent-channel verify --instance triss --id $conversationId
-agent-channel verify --instance triss --id $conversationId
-```
-
-第一次应为新建 Session，第二次应恢复同一 Session；两次 `providerSessionIdPrefix` 应一致。验证失败时不要启动真实订阅。
-
-### Step 6：启动 Host
-
-交互使用优先启动总览：
+本节只使用交互式管理界面。先打开 View：
 
 ```powershell
 agent-channel view
 ```
 
-`view` 会发现并管理当前用户的全部 Instance。退出 View 会停止由该 View 管理的 Host；如果关闭界面后仍需常驻，请使用 Windows 用户计划任务：
+界面底部会持续显示当前可用操作。通用导航为：`↑/↓` 选择，`Enter/→` 进入或修改，`Esc/←` 返回。
 
-```powershell
-agent-channel service plan --instance triss
-agent-channel service install --instance triss
-agent-channel status --instance triss
-```
+### Step 1：检查本机工具
 
-临时前台运行单个 Instance：
+在总览的 `TOOLS` 区域确认以下三项都不是 `error`：
 
-```powershell
-agent-channel run --instance triss
-```
+- Node.js
+- DingTalk CLI（DWS）
+- Codex CLI
+
+View 只在启动时探测一次工具。如果修复了安装或登录问题，请退出后重新打开 View，再确认状态。
+
+### Step 2：新建 Instance
+
+在总览执行以下操作：
+
+1. 用 `↑/↓` 选中 `+ 新增 Instance`，按 `Enter`；也可以直接按 `a`。
+2. 输入 **Instance 名称**，例如 `triss`，按 `Enter`。
+3. 输入 **Runtime cwd**。这是 Agent 的专用工作目录，应包含身份、职责、安全边界和所需 skills，按 `Enter`。
+4. 输入 **Agent 名称**，例如 `翠丝`，按 `Enter` 完成创建。
+
+创建完成后，View 会自动进入该 Instance 的 DingTalk Channel 页面。新 Instance 的 Channel 默认是 `disabled`，此时不会抢占 DWS owner，适合先完成群聊配置。
+
+![在 View 总览中新建 Instance](assets/view-create-instance.png)
+
+_截图使用隔离演示数据；底部操作栏会显示当前步骤和可用按键。_
+
+### Step 3：设置群聊准入和默认模式
+
+在 `Channel 设置` 中依次确认：
+
+1. **启用 / 停用**：暂时保持 `disabled`。
+2. **群聊订阅**：选择 `selected`，只接收明确绑定的群聊。
+3. **群聊默认模式**：选择 `shadow`，先处理和观察，不允许 Agent 发言。
+
+选中固定枚举项后按 `Enter/→` 会切换到下一项。首次接入不要使用 `all` 或直接选择 `reply`，避免未确认范围就接收或回复其他会话。
+
+### Step 4：搜索并绑定群聊
+
+继续在 Channel 页面操作：
+
+1. 用 `↑/↓` 选中 `+ 搜索并绑定指定群聊`，按 `Enter`。
+2. 输入群名关键词，按 `Enter` 搜索。
+3. 在候选列表中用 `↑/↓` 选中目标群，核对完整群名后按 `Enter/→`。
+4. 绑定成功后，View 会直接进入该 Conversation 的详情页。
+
+搜索是只读 DWS 操作，选中候选后才会写入当前 Instance 的 allowlist，不会发送消息。新绑定群默认继承上一步设置的 `shadow`，职责为空并使用 Agent 工作目录中的自身职责。
+
+![在 Channel 页面设置准入范围并绑定指定群聊](assets/view-bind-group.png)
+
+_先保持 Channel 为 disabled，确认 `selected + shadow` 后再选择“搜索并绑定指定群聊”。_
+
+### Step 5：确认群聊职责和运行参数
+
+Conversation 详情默认聚焦 `CONVERSATION` 设置。用 `↑/↓` 选择字段，按 `Enter/→` 修改：
+
+- **显示名称**：确认是目标群名。
+- **enabled**：保持启用。
+- **会话职责**：填写该群中 Agent 应处理的事项和边界；留空则完全使用 Agent 工作目录中的职责。
+- **mode**：首次接入保持 `shadow`。
+- **warm TTL**：通常保留默认值；它只决定空闲后 Worker 进程何时释放，不会删除固定 Session。
+
+按 `Esc/←` 返回 Channel 页面。后续需要调整职责或模式时，可以从 Instance 详情的 `CONVERSATIONS` 再次进入该群。
+
+![在 Conversation 详情中设置职责、模式和 Worker 保温时间](assets/view-conversation-settings.png)
+
+_Conversation 详情集中展示会话名称、职责、shadow/reply 模式和 Worker 保温秒数。_
+
+### Step 6：启用 Channel
+
+回到 Channel 页面后：
+
+1. 选中 **启用 / 停用**。
+2. 按 `Enter/→` 将状态切换为 `enabled`。
+3. 等待页面顶部处理状态结束，不要在重启过程中重复操作。
+
+View 会启动该 Instance 的唯一 Channel owner。首次启动会补拉该群的最近消息并交给固定 Agent Session；补拉完成前不会启动 Worker。
+
+### Step 7：在 View 中验收
+
+返回 Instance 详情或总览，确认：
+
+- Instance 的 Host/owner 和 Channel 状态正常，没有新增 `ALERTS`。
+- `CONVERSATIONS` 中能看到刚绑定的群聊，模式为 `shadow`。
+- 群里产生新消息后，Conversation 的最近消息和 `received/pending/claimed/forwarded/failed` 状态会更新。
+- `forwarded` 只表示消息已经交给 Runtime，不代表 Agent 已经回复。
+
+完成一段时间的 shadow 观察并确认职责边界后，再进入 Conversation 详情，把 **mode** 改为 `reply`。`reply` 只是允许 Agent 按自身规则决定是否回复，不表示每条消息都必须回复。
 
 同一个 DWS profile 只能有一个 Channel owner。不要同时用 `view`、`run` 和计划任务抢占同一 Instance。
 
