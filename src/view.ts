@@ -502,7 +502,7 @@ export async function handleManagementViewInput(
     state.exitConfirmation = true;
     return;
   }
-  if (state.detailConversationId && detailInstance) {
+  if (state.detailConversationId && detailInstance && !state.settingsInstanceName) {
     if (key === '\t') {
       state.conversationDetailFocus = state.conversationDetailFocus === 'members' ? 'messages' : 'members';
       return;

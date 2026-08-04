@@ -390,11 +390,14 @@ test('management view 使用右键下钻、左键返回并可进入 instance 设
     assert.equal(state.instanceFocus, 'conversations');
     await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
     assert.equal(state.detailConversationId, conversation.id);
-    await handleManagementViewInput('\u001b[D', state, instances, () => { stopped = true; });
-    assert.equal(state.detailConversationId, null);
     await handleManagementViewInput('s', state, instances, () => { stopped = true; });
     assert.equal(state.tab, 'overview');
     assert.equal(state.settingsInstanceName, 'view-input');
+    assert.equal(state.detailConversationId, conversation.id);
+    await handleManagementViewInput('\u001b[B', state, instances, () => { stopped = true; });
+    assert.equal(state.selectedSetting, 1);
+    await handleManagementViewInput('\u001b[A', state, instances, () => { stopped = true; });
+    assert.equal(state.selectedSetting, 0);
     await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
     assert.equal(state.editing?.key, 'identity.name');
     await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
