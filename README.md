@@ -292,7 +292,7 @@ agent-channel run --instance triss
 
 `status --instance` 输出一个 instance 的机器可读 JSON；`view` 是跨 instance 的交互管理面。非编辑态第一次按 `q` 或任何状态下按 `Ctrl+C` 只打开退出确认，并明确显示会停止多少个 View-owned Host；再次按 `q`、`Ctrl+C` 或 Enter 才退出，按 Esc/`←` 取消且保留当前页面与尚未提交的编辑内容。进程收到外部 SIGINT/SIGTERM 时仍立即安全收尾。总览和详情默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。instance 设置先通过与启动相同的 schema 校验，再原子保存；标记“重启后生效”的配置不会伪装成已即时应用。
 
-首次拉取的群历史不进入普通实时消息计数；`view` 单独显示 `HISTORY loaded/delivered`。这里的 `delivered` 只表示消息已逐条完成 runtime turn，不表示 Agent 已判断、已回复或回复已送达 Channel。
+首次拉取的群历史不进入普通实时消息计数。机器可读的 `status --instance` 保留消息与历史转发计数；交互式 View 总览不重复展示这些汇总，Conversation 列表继续以 `forwarded/loaded` 显示各会话首次历史进度。这里的 `forwarded` 只表示消息已交给 runtime，不表示 Agent 已判断或已回复。
 
 Windows 当前用户常驻可使用计划任务，不以 LocalSystem 运行、不复制登录态：
 

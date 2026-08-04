@@ -60,7 +60,7 @@ test('status/view 共享中立快照且默认不泄露正文、外部 ID 或完�
     assert.match(serialized, /张\*\*\*三/);
     const rendered = renderStatusView([viewInstance('test', defaultConfig('test', '.', 'Agent'), store)], false, 120);
     assert.match(rendered, /INSTANCES/);
-    assert.match(rendered, /MESSAGES/);
+    assert.doesNotMatch(rendered, /MESSAGES received=|HISTORY loaded=/);
     assert.doesNotMatch(rendered, /^CHANNELS$|^CONVERSATIONS$|^RUNTIMES$/m);
     assert.doesNotMatch(rendered, /gpt-test/);
     assert.doesNotMatch(rendered, /open-secret-user|高度敏感|provider-session-complete-secret/);
@@ -178,6 +178,7 @@ test('management view 明确分离总览内 INSTANCES 与全局设置', () => {
     assert.match(overview, /management-view/);
     assert.match(overview, /second-agent/);
     assert.doesNotMatch(overview, /私聊 A|群 B|dingtalk|slack/);
+    assert.doesNotMatch(overview, /MESSAGES received=|HISTORY loaded=/);
 
     state.detailInstanceName = 'management-view';
     const instanceView = renderManagementView(instances, state, detail, settings, 140);

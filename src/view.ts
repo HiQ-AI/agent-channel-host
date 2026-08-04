@@ -1251,18 +1251,6 @@ function renderGlobalOverview(
     lines.push('', ansi('尚未初始化 instance。交互模式可按 a 创建；也可运行 agent-channel init --instance <name> --cwd <path>。', 'yellow-bold', color));
   }
 
-  const totals = snapshots.reduce((result, { snapshot }) => ({
-    received: result.received + number(snapshot.received),
-    pending: result.pending + number(snapshot.pending_messages),
-    claimed: result.claimed + number(snapshot.claimed_messages),
-    forwarded: result.forwarded + number(snapshot.forwarded_messages),
-    failed: result.failed + number(snapshot.failed_messages),
-    outbox: result.outbox + number(snapshot.pending_outbox),
-    submitted: result.submitted + number(snapshot.submitted),
-    historyLoaded: result.historyLoaded + number(snapshot.history_loaded),
-    historyForwarded: result.historyForwarded + number(snapshot.history_forwarded),
-  }), { received: 0, pending: 0, claimed: 0, forwarded: 0, failed: 0, outbox: 0, submitted: 0, historyLoaded: 0, historyForwarded: 0 });
-  lines.push('', messageSummary(totals, color), historySummary(totals, color));
   const alerts = snapshots.flatMap(({ instance, snapshot }) => tagRows(instance.name, snapshot.alerts));
   if (alerts.length > 0) {
     lines.push('', heading('ALERTS', color), ...alerts.map((row) => renderAlert(
@@ -1810,26 +1798,6 @@ function tableDecorator(color: boolean, selectedRow = -1, selectedThroughColumn 
 
 function heading(value: string, color: boolean): string {
   return ansi(value, 'cyan-bold', color);
-}
-
-function messageSummary(
-  values: { received: number; pending: number; claimed: number; forwarded: number; failed: number; outbox: number; submitted: number },
-  color: boolean,
-): string {
-  return `${heading('MESSAGES', color)} received=${values.received}`
-    + ` pending=${ansi(String(values.pending), values.pending > 0 ? 'yellow-bold' : 'dim', color)}`
-    + ` claimed=${ansi(String(values.claimed), values.claimed > 0 ? 'yellow' : 'dim', color)}`
-    + ` forwarded=${ansi(String(values.forwarded), values.forwarded > 0 ? 'green' : 'dim', color)}`
-    + ` failed=${ansi(String(values.failed), values.failed > 0 ? 'red-bold' : 'dim', color)}`
-    + ` outbox=${ansi(`${values.outbox}/${values.submitted}`, values.outbox > 0 ? 'yellow-bold' : 'dim', color)}`;
-}
-
-function historySummary(
-  values: { historyLoaded: number; historyForwarded: number },
-  color: boolean,
-): string {
-  return `${heading('HISTORY', color)} loaded=${ansi(String(values.historyLoaded), values.historyLoaded > 0 ? 'green' : 'dim', color)}`
-    + ` forwarded=${ansi(String(values.historyForwarded), values.historyForwarded > 0 ? 'green' : 'dim', color)}`;
 }
 
 function statusText(value: string, color: boolean): string {
