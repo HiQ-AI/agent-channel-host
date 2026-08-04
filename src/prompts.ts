@@ -1,4 +1,4 @@
-import type { AdmittedEvent } from './types.js';
+import type { AdmittedEvent, Conversation } from './types.js';
 import type { RecentMessage } from './dws.js';
 
 interface MessageEnvelope {
@@ -17,23 +17,31 @@ export function prependResponsibilityReminder(prompt: string, responsibility: st
   return reminder ? `${reminder}\n\n${prompt}` : prompt;
 }
 
-export function batchPrompt(events: AdmittedEvent[]): string {
-  return messagePrompt(events.map((event) => ({
+export function batchPrompt(conversation: Conversation, events: AdmittedEvent[]): string {
+  return messagePrompt(conversation, events.map((event) => ({
     sender: event.senderName ?? event.senderId ?? '未知',
     time: event.occurredAt ?? event.receivedAt,
     content: messageContent(event.content, event.quotedMessage, event.forwardedMessages),
   })));
 }
 
-export function recentMessagesPrompt(messages: RecentMessage[]): string {
-  return messagePrompt(messages);
+export function recentMessagesPrompt(conversation: Conversation, messages: RecentMessage[]): string {
+  return messagePrompt(conversation, messages);
 }
 
-function messagePrompt(messages: MessageEnvelope[]): string {
+function messagePrompt(conversation: Conversation, messages: MessageEnvelope[]): string {
+  const targetName = conversation.kind === 'group' ? '群名称' : '对方名称';
+  const source = [
+    '# 消息来源',
+    `渠道：${conversation.channelId}`,
+    `类型：${conversation.kind}`,
+    `目标ID：${conversation.externalId}`,
+    `${targetName}：${conversation.title}`,
+  ].join('\n');
   const rendered = messages
     .map((message, index) => `消息 ${index + 1}\n发送者：${message.sender}\n时间：${message.time}\n内容：${message.content}`)
     .join('\n\n');
-  return `以下是收到的消息：\n\n${rendered}`;
+  return `${source}\n\n以下是收到的消息：\n\n${rendered}`;
 }
 
 export function messageContent(content: unknown, quoted: unknown, forwarded: unknown): string {

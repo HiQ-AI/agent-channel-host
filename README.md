@@ -2,7 +2,7 @@
 
 `agent-channel-host` 是事件驱动的单向消息投递宿主：它从 Channel adapter 接收已授权群聊/私聊消息，维护 conversation 与 Agent runtime session 的独立映射，并确保每条消息成功进入对应 runtime session。
 
-当前可运行组合是 DingTalk DWS + Codex App Server。DingTalk 不以 `@` 作为唯一入口；每条授权消息都会进入所属 conversation 的固定 Codex session，活动 turn 中的新消息通过 `turn/steer` 立即引导同一 turn。Host 不接收 Agent 的处理结果，不判断是否回复，也不代发回复；Agent 根据自己的工作目录、配置、工具和独立历史，自行决定是否处理、怎么处理、是否回复以及怎么回复。项目不提供第二套消息接收服务。
+当前可运行组合是 DingTalk DWS + Codex App Server。DingTalk 不以 `@` 作为唯一入口；每条授权消息都会进入所属 conversation 的固定 Codex session，活动 turn 中的新消息通过 `turn/steer` 立即引导同一 turn。每个消息批次会携带一次 Channel 消息来源（渠道、群聊/私聊类型、可直接回复的外部目标 ID 和名称），不暴露 Host 内部 Conversation UUID。Host 不接收 Agent 的处理结果，不判断是否回复，也不代发回复；Agent 根据自己的工作目录、配置、工具和独立历史，自行决定是否处理、怎么处理、是否回复以及怎么回复。项目不提供第二套消息接收服务。
 
 首版发布 Node.js/TypeScript npm package，命令名为 `agent-channel`，不提供 Windows portable zip/exe。
 
@@ -27,7 +27,7 @@ flowchart LR
 - 常驻的是 Host、DWS 长连接和 SQLite 状态，不是每个 conversation 的 provider 进程。消息到达后才启动一轮 runtime CLI；该轮完成后进程退出。
 - 每个群聊/私聊持久化自己的 `(channel, profile, conversation) → runtime + provider session ID + generation`，彼此不共享 transcript。
 - 新 Codex 会话执行 `thread/start`，已有会话执行 `thread/resume` 并校验必须精确恢复原 ID，否则 fail closed，不创建第二条 session。Host 不配置 output schema，也不解析 Agent final text。
-- 每个 turn 只转发当前批次内各条消息的“发送者、时间、内容”。引用和合并转发折叠进内容；Host 不附带群名、私聊标识、成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息前增加一份短提醒。
+- 每个 turn 在批次头只附带一次 `渠道 / 类型 / 目标ID / 群名称或对方名称`，其中目标 ID 是 Runtime 可直接回复的 Channel 外部地址，不是 Host 内部 Conversation UUID；随后各条消息仍只转发“发送者、时间、内容”，引用和合并转发折叠进内容。Host 不附带成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息来源前增加一份短提醒。
 - Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不覆盖 provider 的 developer/system 指令；Agent 的长期规则由 runtime 工作目录自行维护。
 - 每条消息先写 SQLite WAL，提交后才发进程内 ready signal；静默窗口内已到达的消息按 `maxBatchMessages` 合成一次 runtime 输入。Host 启动时释放中断的 claim，并重新投递未完成及未达 3 次上限的失败消息。`turn.completed` 只证明 runtime 已完成本次输入，不代表 Agent 已回复或业务已完成。
 - quiet window 用于合并短时间内连续到达的消息。活动 turn 开始后才到达的新消息在 `turn/started` 确认后通过 `turn/steer` 追加到同一 turn，不打断、不排队到下一 turn，也不并发 resume 同一 session；steer 失败时 Worker fail closed，重启恢复后重试，绝不静默改投下一 turn。
@@ -227,7 +227,7 @@ agent-channel conversation worker `
 
 自然讨论过程由各 runtime 的固定 session 保存，并由 runtime 自己 resume 与自动压缩。Host 不猜测何时发生压缩，也不安装 provider 专用 hook。Conversation 职责非空时，Host 在当前 Worker 的首个 turn、职责变更后的首个 turn，以及上次成功提醒后每满 5 个已完成 turn，在新增消息前增加一份 `# 会话职责提醒`；失败或被抢占的 turn 不推进周期。Worker/Host 重启后恢复固定 session 的首个 turn会再次提醒。这样无法保证精确命中压缩后的紧接一轮，最坏会经过 4 个不带提醒的普通 turn；需要更强长期约束的身份、安全和权限规则仍应放在 Agent 自己的工作目录、skill 或 runtime 原生配置中。
 
-除上述低频职责提醒外，每次消息 prompt 只有一组重复的“发送者、时间、内容”和固定的最小返回约定，不包含会话字段。该周期由 RuntimeAdapter 的 session 对象维护，不依赖 Codex 专用压缩事件，Claude Code、Gemini CLI、Qwen CLI adapter 可复用同一语义。
+除上述低频职责提醒外，每次消息 prompt 只有一份可直接回复的 Channel 消息来源，以及一组重复的“发送者、时间、内容”；不包含 Host 内部 Conversation UUID、成员资料或历史摘要。该周期由 RuntimeAdapter 的 session 对象维护，不依赖 Codex 专用压缩事件，Claude Code、Gemini CLI、Qwen CLI adapter 可复用同一语义。
 
 ## 前台启动与管理视图
 
