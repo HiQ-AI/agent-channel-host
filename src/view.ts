@@ -102,6 +102,7 @@ export interface ManagementViewActions {
   createInstance?(input: NewInstanceInput): Promise<ViewInstance>;
   startInstance?(instance: ViewInstance): Promise<void>;
   afterSettingApplied?(instance: ViewInstance, entry: SettingEntry): Promise<string | void>;
+  afterConversationAdded?(instance: ViewInstance, conversation: Conversation): Promise<string | void>;
   searchGroups?(instance: ViewInstance, query: string): Promise<ChannelGroupCandidate[]>;
   deleteInstance?(instance: ViewInstance): Promise<void>;
   deleteConversation?(instance: ViewInstance, conversationId: string): Promise<void>;
@@ -890,6 +891,7 @@ async function handleGroupSearchInput(
   if (!instance) throw new Error('目标 instance 已不存在');
   const candidate = draft.results[draft.selected]!;
   let conversation = findChannelGroup(instance, draft.target, candidate.externalId);
+  let added = false;
   if (!conversation) {
     try {
       conversation = instance.store.addConversation({
@@ -902,6 +904,7 @@ async function handleGroupSearchInput(
         mode: instance.config.channel.defaultModes.groups,
         runtimeId: instance.config.runtime.id,
       });
+      added = true;
       state.notice = `已绑定群组“${candidate.title}”；会话职责未配置，模式为 ${instance.config.channel.defaultModes.groups}`;
     } catch (error) {
       conversation = findChannelGroup(instance, draft.target, candidate.externalId);
@@ -920,6 +923,12 @@ async function handleGroupSearchInput(
   state.selectedMessageSequence = null;
   const index = instance.store.listConversations().findIndex((item) => item.id === conversation!.id);
   state.selectedConversation = Math.max(0, index);
+  if (added) {
+    const notice = await withPendingOperation(state, `加载群聊“${conversation.title}”的最近消息`, () => (
+      actions.afterConversationAdded?.(instance, conversation!) ?? Promise.resolve()
+    ));
+    if (notice) state.notice = notice;
+  }
 }
 
 async function handleInstanceCreationInput(
@@ -1036,6 +1045,7 @@ export function createSettingEntries(
     },
   );
   enabledEntry.input = 'toggle';
+  enabledEntry.restartHost = conversation.kind === 'group' && !conversation.enabled;
   entries.push(
     storeSetting(`conversation:${conversationId}:title`, `会话名称 · ${conversation.title}`, conversation.title, '仅修改本地显示名称', async (value) => {
       if (!store.setConversationTitle(conversationId, value)) throw new Error('conversation 不存在');
