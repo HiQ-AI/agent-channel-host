@@ -7,7 +7,7 @@ import { anonymousConversationTitle } from '../src/conversation-title.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import {
-  bindHostToInteractiveView, createManagementViewState, createSettingEntries, handleManagementViewInput, renderManagementView,
+  bindHostToInteractiveView, createManagementViewState, createSettingEntries, handleManagementViewInput, renderFrameDiff, renderManagementView,
   renderPendingOperation, renderStatusView,
   shouldStartHostForView, shouldUseColor, terminalDisplayWidth, VIEW_ALTERNATE_SCREEN_ENTER, VIEW_ALTERNATE_SCREEN_EXIT,
   type ViewInstance,
@@ -685,6 +685,34 @@ test('Tab 只切顶层，左右键负责层级导航，alternate screen 序列�
     assert.equal(state.tab, 'overview');
     assert.equal(VIEW_ALTERNATE_SCREEN_ENTER, '\u001b[?1049h\u001b[?25l');
     assert.equal(VIEW_ALTERNATE_SCREEN_EXIT, '\u001b[?25h\u001b[?1049l');
+  } finally {
+    store.close();
+  }
+});
+
+test('帧渲染首次清屏、后续只改变化行并清理缩短的尾行', () => {
+  assert.equal(renderFrameDiff('', '第一行\n第二行'), '\u001b[H\u001b[2J第一行\n第二行');
+  assert.equal(renderFrameDiff('第一行\n第二行', '第一行\n新内容'), '\u001b[2;1H\u001b[2K新内容');
+  assert.equal(renderFrameDiff('第一行\n第二行', '第一行'), '\u001b[2;1H\u001b[2K');
+  assert.equal(renderFrameDiff('相同', '相同'), '');
+  assert.equal(renderFrameDiff('旧', '新', true), '\u001b[H\u001b[2J新');
+});
+
+test('p 暂停 View 显示但不停止 Host，恢复后继续刷新', async () => {
+  const store = new Store(':memory:');
+  const state = createManagementViewState();
+  const instances = [viewInstance('pause-view', defaultConfig('pause-view', '.', 'Agent'), store)];
+  try {
+    await handleManagementViewInput('p', state, instances, () => undefined);
+    assert.equal(state.paused, true);
+    const paused = renderManagementView(instances, state, null, [], 120);
+    assert.match(paused, /PAUSED/);
+    assert.match(paused, /Host 仍在后台运行/);
+    await handleManagementViewInput('\u001b[B', state, instances, () => undefined);
+    assert.equal(state.selectedInstance, 0);
+    await handleManagementViewInput('p', state, instances, () => undefined);
+    assert.equal(state.paused, false);
+    assert.equal(state.notice, '已恢复实时刷新');
   } finally {
     store.close();
   }

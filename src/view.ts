@@ -44,6 +44,7 @@ export interface ManagementViewState {
   groupSearch: GroupSearchDraft | null;
   destructiveConfirmation: DestructiveConfirmation | null;
   exitConfirmation: boolean;
+  paused: boolean;
   pendingOperation: { label: string; startedAt: number } | null;
   notice: string | null;
 }
@@ -114,6 +115,22 @@ interface GroupSearchDraft {
 export const VIEW_ALTERNATE_SCREEN_ENTER = '\u001b[?1049h\u001b[?25l';
 export const VIEW_ALTERNATE_SCREEN_EXIT = '\u001b[?25h\u001b[?1049l';
 
+export function renderFrameDiff(previous: string, next: string, forceFull = false): string {
+  if (forceFull || previous === '') return `\u001b[H\u001b[2J${next}`;
+  if (previous === next) return '';
+  const previousLines = previous.split('\n');
+  const nextLines = next.split('\n');
+  const rowCount = Math.max(previousLines.length, nextLines.length);
+  let output = '';
+  for (let index = 0; index < rowCount; index += 1) {
+    const previousLine = previousLines[index] ?? '';
+    const nextLine = nextLines[index] ?? '';
+    if (previousLine === nextLine) continue;
+    output += `\u001b[${index + 1};1H\u001b[2K${nextLine}`;
+  }
+  return output;
+}
+
 export function createManagementViewState(): ManagementViewState {
   return {
     tab: 'overview',
@@ -133,6 +150,7 @@ export function createManagementViewState(): ManagementViewState {
     groupSearch: null,
     destructiveConfirmation: null,
     exitConfirmation: false,
+    paused: false,
     pendingOperation: null,
     notice: null,
   };
@@ -212,6 +230,8 @@ export async function runView(
   let inputBusy = false;
   let progressFrame = 0;
   let lastStableFrame = '';
+  let displayedFrame = '';
+  let terminalSize = `${process.stdout.columns ?? 120}x${process.stdout.rows ?? 30}`;
   let stopRequested = false;
   let renderFailure: Error | null = null;
   let resolveStop!: () => void;
@@ -253,24 +273,31 @@ export async function runView(
       color,
     );
   };
+  const writeFrame = (frame: string) => {
+    const nextTerminalSize = `${process.stdout.columns ?? 120}x${process.stdout.rows ?? 30}`;
+    const output = renderFrameDiff(displayedFrame, frame, nextTerminalSize !== terminalSize);
+    terminalSize = nextTerminalSize;
+    displayedFrame = frame;
+    if (output) process.stdout.write(output);
+  };
   const paint = () => {
     lastStableFrame = render();
-    process.stdout.write(`\u001b[H\u001b[2J${lastStableFrame}\n`);
+    writeFrame(lastStableFrame);
   };
   const paintProgress = () => {
     if (!state.pendingOperation) return;
-    process.stdout.write(`\u001b[H\u001b[2J${renderPendingOperation(
+    writeFrame(renderPendingOperation(
       lastStableFrame,
       state.pendingOperation,
       process.stdout.columns ?? 120,
       process.stdout.rows ?? 30,
       progressFrame,
       color,
-    )}\n`);
+    ));
     progressFrame += 1;
   };
-  const repaint = () => {
-    if (stopRequested || inputBusy) return;
+  const repaint = (fromInput = false) => {
+    if (stopRequested || inputBusy || (state.paused && !fromInput)) return;
     try {
       paint();
     } catch (error) {
@@ -290,7 +317,7 @@ export async function runView(
       .catch((error) => { state.notice = (error as Error).message; })
       .finally(() => {
         inputBusy = false;
-        repaint();
+        repaint(true);
       });
   };
   const onSignal = () => requestStop();
@@ -444,6 +471,21 @@ export async function handleManagementViewInput(
       return;
     }
     editSingleLine(state.editing, key);
+    return;
+  }
+
+  if (state.paused) {
+    if (key.toLowerCase() === 'p') {
+      state.paused = false;
+      state.notice = '已恢复实时刷新';
+    } else if (key.toLowerCase() === 'q') {
+      state.exitConfirmation = true;
+    }
+    return;
+  }
+  if (key.toLowerCase() === 'p') {
+    state.paused = true;
+    state.notice = null;
     return;
   }
 
@@ -1089,7 +1131,7 @@ export function renderManagementView(
     })
     .join('   ');
   const lines = [
-    `${ansi(CLI_NAME, 'cyan-bold', color)}  instances=${instances.length}  running=${ansi(String(running), running > 0 ? 'green-bold' : 'dim', color)}  ${ansi(`refreshed=${new Date().toISOString()}`, 'dim', color)}`,
+    `${ansi(CLI_NAME, 'cyan-bold', color)}  instances=${instances.length}  running=${ansi(String(running), running > 0 ? 'green-bold' : 'dim', color)}  ${state.paused ? ansi('PAUSED', 'yellow-bold', color) : ansi(`refreshed=${new Date().toISOString()}`, 'dim', color)}`,
     tabs,
     ansi('─'.repeat(Math.min(width, 120)), 'dim', color),
   ];
@@ -1130,6 +1172,8 @@ export function renderManagementView(
     ? ansi('Enter/d 确认删除  Esc/← 取消', 'red-bold', color)
     : state.exitConfirmation
     ? ansi('Enter/q/Ctrl+C 确认退出  Esc/← 取消', 'yellow-bold', color)
+    : state.paused
+    ? ansi('显示已暂停，Host 仍在后台运行；可选中文字复制。p 恢复刷新  q 退出', 'yellow-bold', color)
     : state.creatingInstance
     ? ansi(`新增 Instance · ${creationStepLabel(state.creatingInstance.step)}：${renderTextCursor(state.creatingInstance.value, state.creatingInstance.cursor)}  ←/→ 移动  Enter 下一步  Esc 取消`, 'cyan-bold', color)
     : state.groupSearch?.phase === 'query'
