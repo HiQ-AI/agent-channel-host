@@ -247,7 +247,7 @@ agent-channel view
 - `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 
-每个 Instance 设置页可修改仅供本地展示的 Agent 名称、Runtime cwd、runtime model/effort 和合批参数，不再维护 Agent 默认角色或回复签名。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；交互式 View 管理的 Host 随配置重启。若已有 provider session 的 cwd 与新值不一致，Host 会提升 generation 后创建新 session。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、会话职责、mode、warm TTL 和已观察成员资料；会话职责按周期提醒进入对应 runtime session，成员资料仍只供本地查询。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
+每个 Instance 设置页可修改仅供本地展示的 Agent 名称、Runtime cwd、runtime model/effort 和合批参数，不再维护 Agent 默认角色、回复签名或成员资料。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；交互式 View 管理的 Host 随配置重启。若已有 provider session 的 cwd 与新值不一致，Host 会提升 generation 后创建新 session。Conversation 详情按 `e` 或 `s` 后可修改本地显示名称、enabled、会话职责、mode 和 warm TTL；会话职责按周期提醒进入对应 runtime session，已观察成员资料只在 Conversation 详情中只读展示。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
 
 ### 删除 Instance 与 Conversation
 
@@ -266,6 +266,8 @@ Conversation 删除后不会用原 provider session 恢复；如果以后重新�
 保存设置、搜索、新建和删除等可能触发配置校验、Host 重启或文件生命周期的操作，会在真正等待前立即切换到带 spinner 和已用时的“处理中”帧。处理期间输入锁定，同一 View 内的写操作仍串行；进度帧仅使用操作前的稳定快照，不读取删除期间可能已关闭的 SQLite Store。完成后自动刷新结果，失败则回到原页面并显示原始错误。
 
 交互式终端会进入 alternate screen，以固定窗口刷新，不把历史帧留在主终端 scrollback；退出或收到 SIGINT/SIGTERM 时恢复原屏幕和光标。刷新采用逐行差量渲染，只覆写发生变化的行；终端尺寸变化时才执行一次完整重绘。需要稳定选择文字时按 `p` 暂停显示，再按 `p` 读取最新状态并恢复刷新；暂停只影响 View，Host 与消息处理继续在后台运行。界面用少量语义颜色突出当前选中项、正常/等待/异常状态和告警。`INSTANCES`、Channel 与 Instance 设置表格使用清晰分隔并按终端显示宽度左对齐；中文、全角字符、常见 emoji 和组合字符不会再按 JavaScript 字符长度误算列宽。`view --once` 和非交互输出不进入 alternate screen，也始终不带 ANSI；需要在交互终端禁用颜色时设置 `NO_COLOR`：
+
+`CONVERSATIONS`、Conversation 详情的 `MEMBERS` 和 `RECENT MESSAGES` 使用按终端高度计算的内部视口，内容不会继续向终端下方生长。`↑/↓` 逐行移动，`PgUp/PgDn` 翻页，`Home/End` 到首尾；会话详情用 Tab 在成员和消息间切换焦点。视口显示当前范围、总数及上下剩余条数；新消息到达时以 sequence 保持当前选中消息，不自动抢回最新一条。`RECENT MESSAGES` 固定包含 `CONTENT` 列；默认显示为隐藏提示，使用 `agent-channel view --show-content` 才显示截断正文。
 
 ```powershell
 $env:NO_COLOR = '1'

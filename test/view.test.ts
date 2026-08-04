@@ -85,7 +85,6 @@ test('ALERTS 将遗留 DWS 长错误压缩为单行脱敏摘要', () => {
   const config = defaultConfig('alert-summary', '.', 'Agent');
   const instance = viewInstance('alert-summary', config, store);
   const state = createManagementViewState();
-  state.detailInstanceName = instance.name;
   try {
     const rendered = renderManagementView([instance], state, null, [], 72);
     assert.match(rendered, /onboarding\/测试群: delivery_unknown: duplicate_uuid/);
@@ -114,9 +113,8 @@ test('首次群历史不再把批次 turn 冒充为逐消息判断结果', () =>
     assert.equal(snapshot.history_loaded, 2);
     assert.equal(snapshot.history_forwarded, 0);
     const rendered = renderManagementView([instance], state, null, [], 140);
-    assert.match(rendered, /MESSAGES received=0 .*forwarded=0/);
-    assert.match(rendered, /HISTORY loaded=2 forwarded=0/);
     assert.match(rendered, /历史证据群.*0\/2.*delivery_unknown/);
+    assert.doesNotMatch(rendered, /MESSAGES received=|HISTORY loaded=|RECENT MESSAGES|ALERTS/);
   } finally {
     store.close();
   }
@@ -186,14 +184,15 @@ test('management view 明确分离总览内 INSTANCES 与全局设置', () => {
     assert.match(instanceView, /CHANNELS/);
     assert.match(instanceView, /CONVERSATIONS/);
     assert.match(instanceView, /RUNTIMES/);
-    assert.match(instanceView, /RECENT MESSAGES/);
     assert.match(instanceView, /私聊 A/);
-    assert.ok(instanceView.indexOf('CONVERSATIONS') < instanceView.indexOf('MESSAGES received='));
-    assert.ok(instanceView.indexOf('CONVERSATIONS') < instanceView.indexOf('RECENT MESSAGES'));
+    assert.doesNotMatch(instanceView, /MESSAGES received=|HISTORY loaded=|RECENT MESSAGES|ALERTS/);
+    assert.ok(instanceView.indexOf('CHANNELS') < instanceView.indexOf('CONVERSATIONS'));
+    assert.ok(instanceView.indexOf('CONVERSATIONS') < instanceView.indexOf('RUNTIMES'));
 
     state.detailConversationId = first.id;
     const detailView = renderManagementView(instances, state, detail, settings, 140);
     assert.match(detailView, /会话详情 \/ 私聊 A/);
+    assert.match(detailView, /RECENT MESSAGES/);
     assert.doesNotMatch(detailView, /member-a/);
 
     state.detailInstanceName = null;
@@ -272,7 +271,7 @@ test('instance 设置使用清晰的列分隔符并保持左对齐', () => {
   }
 });
 
-test('settings 使用同一 schema 原子保存 config，并更新 conversation 与成员资料', async () => {
+test('settings 使用同一 schema 原子保存 config 和 conversation，但不提供成员资料编辑', async () => {
   const root = resolve('.test-view-settings');
   const configFile = resolve(root, 'config.yaml');
   await rm(root, { recursive: true, force: true });
@@ -305,6 +304,7 @@ test('settings 使用同一 schema 原子保存 config，并更新 conversation 
     assert.deepEqual(entries.find((entry) => entry.key.endsWith(':mode'))?.options, ['shadow', 'reply']);
     assert.equal(entries.some((entry) => entry.key === 'identity.role'), false);
     assert.equal(entries.some((entry) => entry.key === 'identity.signature'), false);
+    assert.equal(entries.some((entry) => entry.key.startsWith('member:')), false);
     assert.doesNotMatch(await readFile(configFile, 'utf8'), /\n\s+(role|signature):/);
     await assert.rejects(entries.find((entry) => entry.key === 'runtime.effort')!.apply('light'), /Invalid option/);
 
@@ -321,13 +321,16 @@ test('settings 使用同一 schema 原子保存 config，并更新 conversation 
     await handleManagementViewInput('\r', state, [instance], () => undefined);
     assert.equal(state.editing, null);
     assert.equal(state.notice, '会话模式 · 更新后的私聊 已选择 reply');
-    await entries.find((entry) => entry.key.endsWith(':organizationRole'))!.apply('产品经理');
     assert.equal(store.getConversation(conversation.id)?.responsibility, '新职责边界');
     assert.equal(store.getConversation(conversation.id)?.mode, 'reply');
     assert.equal(store.getConversation(conversation.id)?.title, '更新后的私聊');
     assert.equal(store.getConversation(conversation.id)?.enabled, false);
     assert.equal(store.getConversation(conversation.id)?.policyVersion, 5);
-    assert.equal(store.listConversationMembers(conversation.id)[0]?.organizationRole, '产品经理');
+    assert.equal(store.listConversationMembers(conversation.id)[0]?.organizationRole, '');
+    assert.doesNotMatch(
+      renderManagementView([instance], state, store.conversationDetail(conversation.id), entries, 140),
+      /MEMBERS|成员甲/,
+    );
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -713,6 +716,70 @@ test('p 暂停 View 显示但不停止 Host，恢复后继续刷新', async () =
     await handleManagementViewInput('p', state, instances, () => undefined);
     assert.equal(state.paused, false);
     assert.equal(state.notice, '已恢复实时刷新');
+  } finally {
+    store.close();
+  }
+});
+
+test('大表格按终端高度建立内部视口，并以 sequence 保持消息选中位置', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('viewport', '.', 'Agent');
+  const conversations = Array.from({ length: 10 }, (_, index) => store.addConversation({
+    kind: 'group', externalId: `viewport-group-${index}`, title: `会话-${index}`,
+    responsibility: '', mode: 'shadow',
+  }));
+  const target = conversations[0]!;
+  for (let index = 0; index < 10; index += 1) {
+    store.updateConversationMember(target.id, `member-${index}`, { displayName: `成员-${index}` });
+    store.admitEvent(target, normalizeDwsEvent({
+      type: 'user_im_message_receive_group', event_id: `viewport-event-${index}`,
+      conversation_id: target.externalId, sender_open_dingtalk_id: `member-${index}`,
+      sender_name: `成员-${index}`, content: `这是第 ${index} 条用于视口验证的消息内容`,
+    })!);
+  }
+  const instance = viewInstance('viewport', config, store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.instanceFocus = 'conversations';
+  state.selectedConversation = 9;
+  state.selectedConversationId = conversations[9]!.id;
+  try {
+    const instanceView = renderManagementView([instance], state, null, [], 120, false, false, 24);
+    assert.ok(instanceView.split('\n').length <= 24);
+    assert.match(instanceView, /显示 7-10 \/ 共 10 条/);
+    assert.match(instanceView, />\s+dingtalk\s+会话-9/);
+    assert.doesNotMatch(instanceView, /会话-0/);
+    await handleManagementViewInput('\u001b[H', state, [instance], () => undefined);
+    assert.equal(state.selectedConversation, 0);
+    await handleManagementViewInput('\u001b[6~', state, [instance], () => undefined);
+    assert.equal(state.selectedConversation, 6);
+
+    state.detailConversationId = target.id;
+    state.selectedConversationId = target.id;
+    state.conversationDetailFocus = 'messages';
+    let detail = store.conversationDetail(target.id, true)!;
+    let detailView = renderManagementView([instance], state, detail, [], 120, true, false, 28);
+    assert.ok(detailView.split('\n').length <= 28);
+    assert.match(detailView, /CONTENT/);
+    assert.match(detailView, /用于视口验证的消息内容/);
+    assert.match(detailView, /显示 1-3 \/ 共 10 条/);
+    await handleManagementViewInput('\u001b[6~', state, [instance], () => undefined);
+    const selectedSequence = state.selectedMessageSequence;
+    assert.ok(selectedSequence !== null);
+    store.admitEvent(target, normalizeDwsEvent({
+      type: 'user_im_message_receive_group', event_id: 'viewport-event-new',
+      conversation_id: target.externalId, sender_open_dingtalk_id: 'member-new',
+      sender_name: '新成员', content: '新到达但不抢走当前消息焦点',
+    })!);
+    detail = store.conversationDetail(target.id, true)!;
+    detailView = renderManagementView([instance], state, detail, [], 120, true, false, 28);
+    assert.equal(state.selectedMessageSequence, selectedSequence);
+    assert.match(detailView, /↑ 还有/);
+    await handleManagementViewInput('\t', state, [instance], () => undefined);
+    assert.equal(state.conversationDetailFocus, 'members');
+    await handleManagementViewInput('\u001b[F', state, [instance], () => undefined);
+    assert.equal(state.selectedMember, 10);
+    assert.match(renderManagementView([instance], state, detail, [], 120, true, false, 28), /显示 9-11 \/ 共 11 条/);
   } finally {
     store.close();
   }
