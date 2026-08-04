@@ -37,6 +37,11 @@ export interface RecentMessage {
   content: string;
 }
 
+interface HistoryPage {
+  messages: unknown[];
+  hasMore: boolean;
+}
+
 export interface DwsGroupSearchResult {
   title: string;
   openConversationId: string;
@@ -158,6 +163,90 @@ export function parseRecentGroupHistory(value: unknown): RecentGroupHistory {
 export function formatDwsLocalTime(value: Date): string {
   const pad = (part: number) => String(part).padStart(2, '0');
   return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
+}
+
+export async function fetchConversationBackfill(
+  config: HostConfig,
+  conversation: Conversation,
+  start: Date,
+  until: Date,
+  runner: typeof runDwsJson = runDwsJson,
+): Promise<NormalizedEvent[]> {
+  let pageTime = start;
+  const events: NormalizedEvent[] = [];
+  while (true) {
+    const target = conversation.kind === 'group'
+      ? ['--group', conversation.externalId]
+      : ['--open-dingtalk-id', conversation.externalId];
+    const value = await runner(config, [
+      'chat', 'message', 'list', ...target,
+      '--time', formatDwsLocalTime(pageTime), '--direction', 'newer', '--limit', '50',
+    ], 45_000);
+    const page = parseHistoryPage(value);
+    let boundary = pageTime.getTime();
+    for (const raw of page.messages) {
+      const event = normalizeDwsHistoryMessage(conversation, raw);
+      const occurred = event.occurredAt ? Date.parse(event.occurredAt) : Number.NaN;
+      if (!Number.isFinite(occurred)) throw new Error('DWS 历史消息缺少有效 createTime');
+      boundary = Math.max(boundary, occurred);
+      if (occurred <= until.getTime()) events.push(event);
+    }
+    if (!page.hasMore) break;
+    if (boundary <= pageTime.getTime()) throw new Error(`DWS 历史分页边界未推进：${conversation.id}`);
+    pageTime = new Date(boundary);
+  }
+  return events.sort((left, right) => Date.parse(left.occurredAt!) - Date.parse(right.occurredAt!));
+}
+
+export function parseHistoryPage(value: unknown): HistoryPage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS 历史返回结构无效');
+  const body = value as Record<string, unknown>;
+  if (body.success !== true) {
+    throw new Error(`DWS 历史读取失败：${text(body.errorMsg) ?? text(body.errorCode) ?? 'unknown'}`);
+  }
+  const result = body.result;
+  const nested = result && typeof result === 'object' && !Array.isArray(result)
+    ? result as Record<string, unknown>
+    : null;
+  const messages = Array.isArray(result)
+    ? result
+    : Array.isArray(nested?.messages)
+      ? nested.messages
+      : Array.isArray(nested?.data)
+        ? nested.data
+        : null;
+  if (!messages) throw new Error('DWS 历史返回缺少消息数组');
+  return { messages, hasMore: body.hasMore === true || nested?.hasMore === true };
+}
+
+export function normalizeDwsHistoryMessage(conversation: Conversation, value: unknown): NormalizedEvent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS 历史消息结构无效');
+  const source = value as Record<string, unknown>;
+  const messageId = text(firstValue(source, ['openMessageId', 'messageId', 'message_id', 'msgId', 'msg_id']));
+  const occurredAt = parseDwsMessageTime(firstValue(source, ['createTime', 'create_time', 'sendTime', 'timestamp']));
+  if (!occurredAt) throw new Error('DWS 历史消息缺少有效 createTime');
+  const fingerprintSource = [
+    conversation.channelId, conversation.channelProfileId, messageId, conversation.externalId,
+    occurredAt, firstValue(source, ['content', 'msgContent', 'text', 'message']),
+  ].map((part) => safeJson(part)).join('|');
+  return {
+    channelId: conversation.channelId,
+    channelProfileId: conversation.channelProfileId,
+    fingerprint: createHash('sha256').update(fingerprintSource).digest('hex'),
+    eventId: null,
+    messageId,
+    conversationExternalId: conversation.externalId,
+    conversationTitle: conversation.title,
+    kind: conversation.kind,
+    senderId: text(firstValue(source, ['senderOpenDingTalkId', 'sender_open_dingtalk_id', 'senderId', 'sender_id'])),
+    senderName: text(firstValue(source, ['senderName', 'sender_name', 'sender', 'nickName', 'nickname'])),
+    content: firstValue(source, ['content', 'msgContent', 'text', 'message']),
+    quotedMessage: firstValue(source, ['quotedMessage', 'quoted_message']),
+    forwardedMessages: firstValue(source, ['forwardMessages', 'forward_messages']),
+    occurredAt,
+    receivedAt: new Date().toISOString(),
+    source,
+  };
 }
 
 export async function dwsDoctor(config: HostConfig): Promise<Record<string, unknown>> {
@@ -428,6 +517,27 @@ export class DwsChannelAdapter implements ChannelAdapter {
     this.owner = null;
   }
 
+  async backfill(
+    targets: Array<{ conversation: Conversation; start: Date }>,
+    until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<number> {
+    let count = 0;
+    for (const { conversation, start } of targets) {
+      const events = await fetchConversationBackfill(
+        this.config,
+        conversation,
+        start,
+        until,
+      );
+      for (const event of events) {
+        onEvent(event);
+        count++;
+      }
+    }
+    return count;
+  }
+
 }
 
 function profileArgs(config: HostConfig): string[] {
@@ -550,4 +660,14 @@ function firstValue(source: Record<string, unknown>, names: string[]): unknown {
     if (source[name] !== undefined && source[name] !== null) return source[name];
   }
   return null;
+}
+
+function parseDwsMessageTime(value: unknown): string | null {
+  const raw = text(value);
+  if (!raw) return null;
+  const numeric = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  const parsed = Number.isFinite(numeric)
+    ? new Date(numeric < 10_000_000_000 ? numeric * 1_000 : numeric)
+    : new Date(raw.includes('T') ? raw : raw.replace(' ', 'T'));
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }

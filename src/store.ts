@@ -645,6 +645,19 @@ export class Store {
     return (this.db.prepare(sql).all() as Row[]).map((row) => mapConversation(row)!);
   }
 
+  conversationBackfillStart(conversation: Conversation, overlapMs = 2_000): Date {
+    const rows = this.db.prepare(`
+      SELECT occurred_at FROM inbound_events
+      WHERE conversation_id=? AND occurred_at IS NOT NULL
+    `).all(conversation.id) as Row[];
+    let latest = Date.parse(conversation.createdAt);
+    for (const row of rows) {
+      const parsed = parseStoredMessageTime(row.occurred_at);
+      if (parsed !== null && parsed > latest) latest = parsed;
+    }
+    return new Date(Math.max(0, latest - overlapMs));
+  }
+
   deleteConversation(id: string): boolean {
     const existing = this.getConversation(id);
     if (!existing) return false;
@@ -795,7 +808,12 @@ export class Store {
     }
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const duplicate = this.db.prepare('SELECT id FROM inbound_events WHERE fingerprint=?').get(event.fingerprint);
+      const duplicate = event.messageId
+        ? this.db.prepare(`
+            SELECT id FROM inbound_events
+            WHERE fingerprint=? OR (conversation_id=? AND message_id=?) LIMIT 1
+          `).get(event.fingerprint, conversation.id, event.messageId)
+        : this.db.prepare('SELECT id FROM inbound_events WHERE fingerprint=?').get(event.fingerprint);
       if (duplicate) {
         this.db.exec('COMMIT');
         return { admitted: false, event: null };
@@ -1711,6 +1729,17 @@ function mapConversation(row: Row | undefined): Conversation | null {
     sessionGeneration: Number(row.session_generation ?? 1),
     enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
+}
+
+function parseStoredMessageTime(value: unknown): number | null {
+  if (typeof value === 'number' || (typeof value === 'string' && /^\d+$/.test(value.trim()))) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    return numeric < 10_000_000_000 ? numeric * 1_000 : numeric;
+  }
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const parsed = Date.parse(value.includes('T') ? value : value.replace(' ', 'T'));
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function assertWorkerWarmSeconds(value: number): void {

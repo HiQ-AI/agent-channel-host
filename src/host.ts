@@ -6,7 +6,7 @@ import { OwnerLock } from './owner-lock.js';
 import { DwsChannelAdapter } from './dws.js';
 import { CodexRuntimeAdapter } from './codex-runtime.js';
 import { ConversationWorker } from './actor.js';
-import type { Conversation, NormalizedEvent } from './types.js';
+import type { AdmittedEvent, Conversation, NormalizedEvent } from './types.js';
 import { anonymousConversationTitle, discoveredConversationTitle, isGeneratedConversationTitle } from './conversation-title.js';
 
 interface WorkerHandle {
@@ -352,6 +352,38 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
       model: runtime.descriptor.model, protocolFingerprintPrefix: runtime.descriptor.protocolFingerprint.slice(0, 20),
     });
     scheduler = new EventDrivenScheduler(config, store, channels, runtimes, log, requestStop);
+    let startupRecoveryComplete = false;
+    const startupSignals = new Set<string>();
+    const admitNormalized = (normalized: NormalizedEvent, ingress: AdmittedEvent['ingress'] = 'live') => {
+      store.noteChannelEvent(normalized.channelId, normalized.channelProfileId, normalized.receivedAt);
+      const resolution = resolveEventConversation(config, store, normalized);
+      const conversation = resolution.conversation;
+      if (!conversation) {
+        log({
+          type: 'EVENT_REJECTED', reason: resolution.reason,
+          channelId: normalized.channelId, kind: normalized.kind,
+          fingerprintPrefix: normalized.fingerprint.slice(0, 12), ingress,
+        });
+        return;
+      }
+      if (resolution.created) {
+        log({
+          type: 'CONVERSATION_AUTO_CREATED', conversationId: conversation.id,
+          channelId: normalized.channelId, kind: normalized.kind, mode: conversation.mode,
+        });
+      }
+      const admitted = store.admitEvent(conversation, normalized, ingress);
+      if (!admitted.admitted || !admitted.event) {
+        log({
+          type: 'EVENT_DUPLICATE', conversationId: conversation.id,
+          fingerprintPrefix: normalized.fingerprint.slice(0, 12), ingress,
+        });
+        return;
+      }
+      log({ type: 'EVENT_ADMITTED', conversationId: conversation.id, sequence: admitted.event.sequence, ingress });
+      if (startupRecoveryComplete) scheduler?.signal(conversation.id);
+      else startupSignals.add(conversation.id);
+    };
 
     if (channel) {
       const descriptor = channel.descriptor;
@@ -365,32 +397,7 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
       });
       try {
         await channel.start({
-          onEvent: (normalized) => {
-            store.noteChannelEvent(normalized.channelId, normalized.channelProfileId, normalized.receivedAt);
-            const resolution = resolveEventConversation(config, store, normalized);
-            const conversation = resolution.conversation;
-            if (!conversation) {
-              log({
-                type: 'EVENT_REJECTED', reason: resolution.reason,
-                channelId: normalized.channelId, kind: normalized.kind,
-                fingerprintPrefix: normalized.fingerprint.slice(0, 12),
-              });
-              return;
-            }
-            if (resolution.created) {
-              log({
-                type: 'CONVERSATION_AUTO_CREATED', conversationId: conversation.id,
-                channelId: normalized.channelId, kind: normalized.kind, mode: conversation.mode,
-              });
-            }
-            const admitted = store.admitEvent(conversation, normalized);
-            if (!admitted.admitted || !admitted.event) {
-              log({ type: 'EVENT_DUPLICATE', conversationId: conversation.id, fingerprintPrefix: normalized.fingerprint.slice(0, 12) });
-              return;
-            }
-            log({ type: 'EVENT_ADMITTED', conversationId: conversation.id, sequence: admitted.event.sequence });
-            scheduler?.signal(conversation.id);
-          },
+          onEvent: (normalized) => admitNormalized(normalized),
           onFatal: (error) => {
             channelFatal ??= error;
             store.setChannelConnection({ ...descriptor, state: 'error', ownerPid: process.pid, error: error.message });
@@ -403,8 +410,19 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
       }
       const connectedAt = new Date().toISOString();
       store.setChannelConnection({ ...descriptor, state: 'ready', ownerPid: process.pid, connectedAt });
+      if (channel.backfill) {
+        const until = new Date(connectedAt);
+        const targets = store.listConversations(true).map((conversation) => ({
+          conversation,
+          start: store.conversationBackfillStart(conversation),
+        }));
+        const loaded = await channel.backfill(targets, until, (event) => admitNormalized(event, 'history'));
+        log({ type: 'OFFLINE_BACKFILL_COMPLETED', conversations: targets.length, loaded, until: until.toISOString() });
+      }
     }
     const recovered = scheduler.reconcile();
+    startupRecoveryComplete = true;
+    for (const conversationId of startupSignals) scheduler.signal(conversationId);
     if (recovered.length > 0) log({ type: 'PENDING_RECONCILED', conversations: recovered.length });
     log({
       type: 'HOST_READY', pid: process.pid, channels: channels.size, runtimes: runtimes.size,

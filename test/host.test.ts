@@ -7,7 +7,7 @@ import type { AgentSession, ChannelAdapter, ChannelHandlers, RuntimeAdapter } fr
 import { EventDrivenScheduler, resolveEventConversation, runHost } from '../src/host.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
-import type { Conversation, DeliveryRun } from '../src/types.js';
+import type { Conversation, DeliveryRun, NormalizedEvent } from '../src/types.js';
 
 class FakeChannel implements ChannelAdapter {
   readonly descriptor = { channelId: 'dingtalk', profileId: 'default', label: 'Fake Channel' };
@@ -21,6 +21,42 @@ class FailingChannel extends FakeChannel {
   override async start(_handlers: ChannelHandlers): Promise<void> {
     this.started += 1;
     throw new Error('模拟 Channel 启动失败');
+  }
+}
+
+class BackfillChannel extends FakeChannel {
+  targets: Array<{ conversation: Conversation; start: Date }> = [];
+  private releaseBackfill: (() => void) | null = null;
+  private handlers: ChannelHandlers | null = null;
+
+  override async start(handlers: ChannelHandlers): Promise<void> {
+    await super.start(handlers);
+    this.handlers = handlers;
+  }
+
+  async backfill(
+    targets: Array<{ conversation: Conversation; start: Date }>,
+    _until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<number> {
+    this.targets = targets;
+    this.handlers?.onEvent(normalizeDwsEvent({
+      type: 'user_im_message_receive_o2o_all', event_id: 'startup-live', message_id: 'startup-live-message',
+      sender_open_dingtalk_id: targets[0]!.conversation.externalId,
+      create_time: '2030-08-04 09:00:01', content: '订阅建立后实时到达',
+    })!);
+    await new Promise<void>((resolve) => { this.releaseBackfill = resolve; });
+    onEvent(normalizeDwsEvent({
+      type: 'user_im_message_receive_o2o_all', event_id: 'startup-history', message_id: 'startup-history-message',
+      sender_open_dingtalk_id: targets[0]!.conversation.externalId,
+      create_time: '2030-08-04 09:00:00', content: '离线期间历史消息',
+    })!);
+    return 1;
+  }
+
+  release(): void {
+    this.releaseBackfill?.();
+    this.releaseBackfill = null;
   }
 }
 
@@ -390,6 +426,44 @@ test('可嵌入 Host 由 AbortSignal 停止，第二个 owner 不覆盖运行状
     await running;
     assert.equal(channel.stopped, 1);
     assert.equal(owner.released, 1);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+    else process.env.AGENT_CHANNEL_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Host 先建立实时订阅再补拉，补拉完成前不启动 Worker，完成后统一恢复', async () => {
+  const root = resolve('.test-host-offline-backfill');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const previous = process.env.AGENT_CHANNEL_HOME;
+  process.env.AGENT_CHANNEL_HOME = root;
+  const config = defaultConfig('offline-backfill', '.', 'Agent');
+  const state = resolve(root, 'instances', 'offline-backfill', 'state.sqlite3');
+  const setup = new Store(state);
+  const conversation = setup.addConversation({
+    kind: 'direct', externalId: 'offline-user', title: '离线私聊', responsibility: '', mode: 'shadow',
+  });
+  setup.close();
+  const channel = new BackfillChannel();
+  const runtime = new FakeRuntime();
+  const abort = new AbortController();
+  try {
+    const running = runHost(config, {
+      signal: abort.signal, handleProcessSignals: false, channel, runtime,
+      ownerLock: new FakeOwnerLock('offline-owner'), log: () => undefined,
+    });
+    await waitFor(() => channel.targets.length === 1);
+    assert.equal(channel.started, 1);
+    assert.equal(channel.targets[0]?.conversation.id, conversation.id);
+    assert.equal(runtime.sessions.length, 0);
+    channel.release();
+    await waitFor(() => runtime.sessions[0]?.prompts.length === 1);
+    assert.match(runtime.sessions[0]!.prompts[0]!, /订阅建立后实时到达/);
+    assert.match(runtime.sessions[0]!.prompts[0]!, /离线期间历史消息/);
+    abort.abort();
+    await running;
   } finally {
     if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
     else process.env.AGENT_CHANNEL_HOME = previous;
