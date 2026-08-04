@@ -38,7 +38,7 @@ export interface RequiredToolStatus {
 export interface ManagementViewState {
   tab: 'overview' | 'settings';
   selectedInstance: number;
-  instanceFocus: 'channels' | 'conversations';
+  instanceFocus: 'settings' | 'channels' | 'conversations';
   selectedChannel: number;
   selectedConversation: number;
   selectedConversationId: string | null;
@@ -148,7 +148,7 @@ export function createManagementViewState(): ManagementViewState {
   return {
     tab: 'overview',
     selectedInstance: 0,
-    instanceFocus: 'channels',
+    instanceFocus: 'settings',
     selectedChannel: 0,
     selectedConversation: 0,
     selectedConversationId: null,
@@ -510,9 +510,9 @@ export async function handleManagementViewInput(
       return;
     }
     if (key === '\r' || key === '\n') {
-      const editingInstance = settingsInstance ?? (state.detailConversationId ? detailInstance : null);
+      const editingInstance = settingsInstance ?? detailInstance;
       if (!editingInstance) throw new Error('没有可配置的 instance');
-      const selectedId = settingsInstance ? null : state.detailConversationId;
+      const selectedId = state.detailConversationId;
       const entry = createSettingEntries(
         editingInstance.config,
         editingInstance.store,
@@ -579,7 +579,7 @@ export async function handleManagementViewInput(
       state.selectedChannelItem = 0;
     } else if (state.detailInstanceName) {
       state.detailInstanceName = null;
-      state.instanceFocus = 'channels';
+      state.instanceFocus = 'settings';
     }
     state.notice = null;
     return;
@@ -596,7 +596,7 @@ export async function handleManagementViewInput(
       state.notice = null;
       return;
     }
-    state.settingsInstanceName = state.detailInstanceName;
+    state.instanceFocus = 'settings';
     state.selectedSetting = 0;
     state.notice = null;
     return;
@@ -639,7 +639,9 @@ export async function handleManagementViewInput(
   }
   if (detailInstance && !state.detailChannel && !state.settingsInstanceName
     && (key === '\u001b[H' || key === '\u001b[F')) {
-    if (state.instanceFocus === 'channels') {
+    if (state.instanceFocus === 'settings') {
+      state.selectedSetting = key === '\u001b[H' ? 0 : Math.max(0, instanceSettingEntries(detailInstance).length - 1);
+    } else if (state.instanceFocus === 'channels') {
       state.selectedChannel = key === '\u001b[H' ? 0 : Math.max(0, configuredChannels(detailInstance.config).length - 1);
     } else {
       const conversations = detailInstance.store.listConversations();
@@ -666,7 +668,7 @@ export async function handleManagementViewInput(
         state.selectedSetting = clamp(state.selectedSetting + direction, 0, Math.max(0, total - 1));
       } else if (!state.detailInstanceName) {
         state.selectedInstance = clamp(state.selectedInstance + direction, 0, instances.length);
-        state.instanceFocus = 'channels';
+        state.instanceFocus = 'settings';
         state.selectedChannel = 0;
         state.selectedConversation = 0;
         state.selectedConversationId = null;
@@ -700,6 +702,12 @@ export async function handleManagementViewInput(
         state.editing = { key: entry.key, label: entry.label, value: entry.value, cursor: textLength(entry.value) };
         return;
       }
+      if (detailInstance && !state.detailChannel && !state.detailConversationId && state.instanceFocus === 'settings') {
+        const entry = instanceSettingEntries(detailInstance)[state.selectedSetting];
+        if (!entry) return;
+        await activateSettingEntry(state, detailInstance, entry, actions);
+        return;
+      }
       if (state.settingsInstanceName) {
         if (!settingsInstance) return;
         const entry = createSettingEntries(
@@ -731,7 +739,7 @@ export async function handleManagementViewInput(
         }
         if (!overviewInstance) return;
         state.detailInstanceName = overviewInstance.name;
-        state.instanceFocus = 'channels';
+        state.instanceFocus = 'settings';
         state.selectedChannel = 0;
         state.selectedConversation = 0;
         state.selectedConversationId = null;
@@ -740,7 +748,9 @@ export async function handleManagementViewInput(
         await activateChannelItem(state, detailInstance, actions);
       } else {
         if (!detailInstance) return;
-        if (state.instanceFocus === 'channels') {
+        if (state.instanceFocus === 'settings') {
+          return;
+        } else if (state.instanceFocus === 'channels') {
           const channel = configuredChannels(detailInstance.config)[state.selectedChannel];
           if (!channel) return;
           state.detailChannel = {
@@ -1048,6 +1058,32 @@ function conversationSettingEntries(instance: ViewInstance, conversationId: stri
     .filter((entry) => entry.section === 'conversation');
 }
 
+function instanceSettingEntries(instance: ViewInstance): SettingEntry[] {
+  return createSettingEntries(instance.config, instance.store, null, instance.configFile)
+    .filter((entry) => entry.section === 'instance');
+}
+
+async function activateSettingEntry(
+  state: ManagementViewState,
+  instance: ViewInstance,
+  entry: SettingEntry,
+  actions: ManagementViewActions,
+): Promise<void> {
+  if (entry.input === 'toggle') {
+    const next = entry.value === 'enabled' ? 'disabled' : 'enabled';
+    const actionNotice = await applySettingWithProgress(state, instance, entry, next, actions);
+    state.notice = actionNotice ?? `${entry.label} 已切换为 ${next}`;
+    return;
+  }
+  if (entry.input === 'select') {
+    const next = nextOption(entry);
+    const actionNotice = await applySettingWithProgress(state, instance, entry, next, actions);
+    state.notice = actionNotice ?? `${entry.label} 已选择 ${next}`;
+    return;
+  }
+  state.editing = { key: entry.key, label: entry.label, value: entry.value, cursor: textLength(entry.value) };
+}
+
 export function createChannelSettingEntry(
   config: HostConfig,
   store: Store,
@@ -1304,9 +1340,9 @@ export function renderManagementView(
             : state.detailChannel
               ? ansi('↑/↓ 选择  →/Enter 操作、选择下一项或下钻  d 删除会话  ←/Esc 返回 Instance  q 退出', 'dim', color)
           : state.detailInstanceName
-            ? ansi('↑/↓ 选择  →/Enter 下钻  s Instance 设置  d 删除 Instance  ←/Esc 返回  q 退出', 'dim', color)
+            ? ansi('↑/↓ 选择  →/Enter 编辑或下钻  s 定位 INSTANCE 设置  d 删除 Instance  ←/Esc 返回  q 退出', 'dim', color)
             : ansi('↑/↓ 选择  →/Enter 下钻  a 新增  d 删除 Instance  Tab 全局设置  q 退出', 'dim', color));
-  return lines.join('\n');
+  return fitFrame(lines, width, height);
 }
 
 function renderGlobalOverview(
@@ -1385,13 +1421,15 @@ function renderInstanceOverview(
   });
   const conversations = array(snapshot.conversations);
   const runtimeAdapters = array(snapshot.runtimeAdapters);
-  const ancillaryPageSize = clamp(Math.floor((Math.max(20, height) - 18) / 4), 1, 4);
+  const settings = instanceSettingEntries(instance);
+  state.selectedSetting = clamp(state.selectedSetting, 0, Math.max(0, settings.length - 1));
+  const ancillaryPageSize = clamp(Math.floor((Math.max(20, height) - 27) / 4), 1, 4);
   const channelPageSize = Math.min(Math.max(1, channels.length), ancillaryPageSize);
   const runtimePageSize = Math.min(Math.max(1, runtimeAdapters.length), ancillaryPageSize);
   const ancillaryRows = Math.min(channels.length, channelPageSize) + Math.min(runtimeAdapters.length, runtimePageSize);
   const ancillaryHints = Number(channels.length > channelPageSize) + Number(runtimeAdapters.length > runtimePageSize);
   const conversationPageSize = clamp(
-    Math.max(20, height) - 18 - ancillaryRows - ancillaryHints - Number(conversations.length > 1),
+    Math.max(20, height) - 27 - ancillaryRows - ancillaryHints - Number(conversations.length > 1),
     1,
     8,
   );
@@ -1401,8 +1439,20 @@ function renderInstanceOverview(
   const host = object(snapshot.host);
   const lines = [
     `${heading(`实例详情 / ${instance.name}`, color)}  Agent=${instance.config.identity.name}  host=${statusText(text(host.state) ?? 'unknown', color)}  pid=${text(host.pid) ?? '-'}  ${statusText(instance.hostOwnership, color)}`,
-    '', heading('CHANNELS', color),
+    '', state.instanceFocus === 'settings' ? ansi('[ INSTANCE ]', 'cyan-bold', color) : heading('INSTANCE', color),
   ];
+  lines.push(...table(
+    ['', 'SETTING', 'VALUE', 'EFFECT'],
+    settings.map((entry, index) => [
+      state.instanceFocus === 'settings' && index === state.selectedSetting ? '>' : ' ', entry.label, entry.value || '(空)', entry.hint,
+    ]),
+    width,
+    {
+      separator: ' │ ', dividerSeparator: '─┼─', dividerFill: '─',
+      decorate: tableDecorator(color, state.instanceFocus === 'settings' ? state.selectedSetting : -1, 1),
+    },
+  ));
+  lines.push('', heading('CHANNELS', color));
   lines.push(...table(
     ['', 'CHANNEL', 'PROFILE', 'STATE', 'PID', 'LAST EVENT', 'ERROR'],
     channelWindow.rows.map((row, index) => [
@@ -1721,7 +1771,24 @@ export function renderStatusView(
     '',
     '只读聚合快照；交互模式会逐 instance 启动或 attach Host，并从总览下钻详情与 Instance 设置',
   ];
-  return lines.join('\n');
+  return fitFrame(lines, width);
+}
+
+function fitFrame(lines: string[], width: number, height?: number): string {
+  const safeWidth = Math.max(1, width);
+  const fitted = lines.map((line) => truncateAnsi(line, safeWidth));
+  if (height === undefined || fitted.length <= height) return fitted.join('\n');
+  const headerCount = Math.min(3, fitted.length);
+  const footerCount = Math.min(2, fitted.length - headerCount);
+  const body = fitted.slice(headerCount, fitted.length - footerCount);
+  const capacity = Math.max(1, height - headerCount - footerCount);
+  const selected = body.findIndex((line) => /^>/.test(stripAnsi(line)));
+  const start = clamp(
+    selected < 0 ? 0 : selected - Math.floor(capacity / 2),
+    0,
+    Math.max(0, body.length - capacity),
+  );
+  return [...fitted.slice(0, headerCount), ...body.slice(start, start + capacity), ...fitted.slice(-footerCount)].join('\n');
 }
 
 function channelGroups(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
@@ -1817,20 +1884,26 @@ function moveConversationDetailSelection(
 
 function moveInstanceSelection(state: ManagementViewState, instance: ViewInstance | null, direction: number): void {
   if (!instance) return;
+  const settingCount = instanceSettingEntries(instance).length;
   const channelCount = configuredChannels(instance.config).length;
   const conversationCount = instance.store.listConversations().length;
-  const total = channelCount + conversationCount;
+  const total = settingCount + channelCount + conversationCount;
   if (total === 0) return;
-  const current = state.instanceFocus === 'channels'
-    ? state.selectedChannel
-    : channelCount + state.selectedConversation;
+  const current = state.instanceFocus === 'settings'
+    ? state.selectedSetting
+    : state.instanceFocus === 'channels'
+      ? settingCount + state.selectedChannel
+      : settingCount + channelCount + state.selectedConversation;
   const next = clamp(current + direction, 0, total - 1);
-  if (next < channelCount) {
+  if (next < settingCount) {
+    state.instanceFocus = 'settings';
+    state.selectedSetting = next;
+  } else if (next < settingCount + channelCount) {
     state.instanceFocus = 'channels';
-    state.selectedChannel = next;
+    state.selectedChannel = next - settingCount;
   } else {
     state.instanceFocus = 'conversations';
-    state.selectedConversation = next - channelCount;
+    state.selectedConversation = next - settingCount - channelCount;
     state.selectedConversationId = instance.store.listConversations()[state.selectedConversation]?.id ?? null;
   }
 }

@@ -406,6 +406,8 @@ test('management view 从会话详情直接编辑内嵌 Conversation 设置', as
   try {
     await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
     assert.equal(state.detailInstanceName, 'view-input');
+    assert.equal(state.instanceFocus, 'settings');
+    await handleManagementViewInput('\u001b[6~', state, instances, () => { stopped = true; });
     assert.equal(state.instanceFocus, 'channels');
     await handleManagementViewInput('\u001b[B', state, instances, () => { stopped = true; });
     assert.equal(state.instanceFocus, 'conversations');
@@ -428,6 +430,29 @@ test('management view 从会话详情直接编辑内嵌 Conversation 设置', as
     assert.equal(state.editing?.key, `conversation:${conversation.id}:title`);
     await handleManagementViewInput('\u001b', state, instances, () => { stopped = true; });
     assert.equal(state.editing, null);
+    await handleManagementViewInput('\u001b[B', state, instances, () => { stopped = true; });
+    await handleManagementViewInput('\u001b[B', state, instances, () => { stopped = true; });
+    assert.equal(state.selectedSetting, 2);
+    await handleManagementViewInput('\u001b[C', state, instances, () => { stopped = true; });
+    const longResponsibility = '负责编辑器方案、评审、排查和开发协作；先回复后处理，耗时操作放后台；'.repeat(6);
+    const responsibilityEditor = state.editing as { value: string; cursor: number } | null;
+    assert.ok(responsibilityEditor);
+    responsibilityEditor.value = longResponsibility;
+    responsibilityEditor.cursor = [...longResponsibility].length;
+    const editingFrame = renderManagementView(
+      instances, state, store.conversationDetail(conversation.id), [], 120,
+    );
+    assert.ok(editingFrame.split('\n').every((line) => terminalDisplayWidth(line) <= 120));
+    await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
+    const savedFrame = renderManagementView(
+      instances, state, store.conversationDetail(conversation.id), [], 120,
+    );
+    const refreshedFrame = renderManagementView(
+      instances, state, store.conversationDetail(conversation.id), [], 120,
+    );
+    assert.ok(savedFrame.split('\n').every((line) => terminalDisplayWidth(line) <= 120));
+    assert.deepEqual(refreshedFrame.split('\n').slice(1), savedFrame.split('\n').slice(1));
+    assert.equal(store.getConversation(conversation.id)?.responsibility, longResponsibility);
     await handleManagementViewInput('q', state, instances, () => { stopped = true; });
     assert.equal(stopped, false);
     assert.equal(state.exitConfirmation, true);
@@ -550,7 +575,7 @@ test('Instance 设置表按终端显示宽度对齐中文、全角、emoji 与�
   }
 });
 
-test('INSTANCES 在上层 view 中显式选择 instance 后编辑对应配置', async () => {
+test('INSTANCES 在上层 view 中下钻后直接编辑内嵌 INSTANCE 设置', async () => {
   const firstStore = new Store(':memory:');
   const secondStore = new Store(':memory:');
   const firstConfig = defaultConfig('first', '.', 'First Agent');
@@ -566,13 +591,16 @@ test('INSTANCES 在上层 view 中显式选择 instance 后编辑对应配置', 
     assert.equal(state.selectedInstance, 1);
     await handleManagementViewInput('\r', state, instances, () => undefined);
     assert.equal(state.detailInstanceName, 'second');
+    assert.equal(state.instanceFocus, 'settings');
     await handleManagementViewInput('s', state, instances, () => undefined);
-    assert.equal(state.settingsInstanceName, 'second');
+    assert.equal(state.settingsInstanceName, null);
+    assert.equal(state.instanceFocus, 'settings');
     await handleManagementViewInput('\r', state, instances, () => undefined);
     assert.equal(state.editing?.key, 'identity.name');
     assert.equal(state.editing?.value, 'Second Agent');
     const rendered = renderManagementView(instances, state, null, createSettingEntries(secondConfig, secondStore, null), 120);
-    assert.match(rendered, /Instance 设置 \/ second/);
+    assert.match(rendered, /\[ INSTANCE \]/);
+    assert.ok(rendered.indexOf('[ INSTANCE ]') < rendered.indexOf('CHANNELS'));
   } finally {
     firstStore.close();
     secondStore.close();
@@ -776,7 +804,7 @@ test('大表格按终端高度建立内部视口，并以 sequence 保持消息�
   try {
     const instanceView = renderManagementView([instance], state, null, [], 120, false, false, 24);
     assert.ok(instanceView.split('\n').length <= 24);
-    assert.match(instanceView, /显示 7-10 \/ 共 10 条/);
+    assert.match(instanceView, /显示 10-10 \/ 共 10 条/);
     assert.match(instanceView, />\s+dingtalk\s+会话-9/);
     assert.doesNotMatch(instanceView, /会话-0/);
     await handleManagementViewInput('\u001b[H', state, [instance], () => undefined);
