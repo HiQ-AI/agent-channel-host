@@ -57,6 +57,7 @@ export class CodexAppServerSession implements AgentSession {
   private providerSessionId: string | null = null;
   private activeTurnId: string | null = null;
   private stopping = false;
+  private terminalError: Error | null = null;
   private stderrTail: string[] = [];
   private completedTurnsSinceResponsibilityReminder = RESPONSIBILITY_REMINDER_INTERVAL_TURNS;
   private lastCompletedResponsibility: string | null = null;
@@ -74,6 +75,7 @@ export class CodexAppServerSession implements AgentSession {
 
   async start(): Promise<void> {
     if (this.child) throw new Error('Codex App Server session 已启动');
+    this.terminalError = null;
     this.child = spawn(this.identity.command.file, commandArgs(this.identity.command, ['app-server', '--listen', 'stdio://']), {
       cwd: this.config.runtime.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: process.env,
     });
@@ -197,6 +199,7 @@ export class CodexAppServerSession implements AgentSession {
   }
 
   private request(method: string, params: JsonObject): Promise<unknown> {
+    if (this.terminalError) return Promise.reject(this.terminalError);
     const id = this.requestId++;
     const response = new Promise<unknown>((resolve, reject) => this.pending.set(id, { resolve, reject }));
     this.send({ id, method, params });
@@ -214,6 +217,7 @@ export class CodexAppServerSession implements AgentSession {
   }
 
   private waitForCompletion(turnId: string): Promise<JsonObject> {
+    if (this.terminalError) return Promise.reject(this.terminalError);
     const buffered = this.notifications.get(turnId);
     if (buffered) {
       this.notifications.delete(turnId);
@@ -292,6 +296,7 @@ export class CodexAppServerSession implements AgentSession {
   }
 
   private failAll(error: Error): void {
+    this.terminalError ??= error;
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     for (const waiter of this.waiters) waiter.reject(error);
