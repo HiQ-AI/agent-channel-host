@@ -6,6 +6,8 @@
 
 项目以公开 Node.js/TypeScript npm package `@zzusp/agent-channel-host` 发布，命令名为 `agent-channel`，不提供 Windows portable zip/exe。
 
+面向安装、接入和日常运维的完整步骤见 [agent-channel-host 使用指南](https://github.com/HiQ-AI/agent-channel-host/blob/main/docs/manual/agent-channel-host-guide.md)。
+
 ## 运行机制
 
 ```mermaid
