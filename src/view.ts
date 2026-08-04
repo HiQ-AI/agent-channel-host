@@ -1281,7 +1281,8 @@ export function renderManagementView(
     tabs,
     ansi('─'.repeat(Math.min(width, 120)), 'dim', color),
   ];
-  if (state.tab === 'settings') lines.push(...renderGlobalSettings(instances, width, color));
+  if (state.editing) lines.push(...renderEditingPanel(state.editing, width, color));
+  else if (state.tab === 'settings') lines.push(...renderGlobalSettings(instances, width, color));
   else if (state.groupSearch && detailInstance) lines.push(...renderGroupSearch(detailInstance, state.groupSearch, width, color));
   else if (settingsInstance) {
     state.selectedSetting = clamp(state.selectedSetting, 0, Math.max(0, settings.length - 1));
@@ -1330,7 +1331,7 @@ export function renderManagementView(
       : state.groupSearch?.phase === 'results'
         ? ansi('↑/↓ 选择  →/Enter 绑定或打开  ←/Esc 修改关键词  q 退出', 'dim', color)
     : state.editing
-      ? ansi(`编辑 ${state.editing.label}：${renderTextCursor(state.editing.value, state.editing.cursor)}  ←/→ 移动  Enter 保存  Esc 取消`, 'cyan-bold', color)
+      ? ansi(`编辑 ${state.editing.label}  ←/→ 移动  Home/End 首尾  Backspace/Delete 删除  Enter 保存  Esc 取消`, 'cyan-bold', color)
       : state.tab === 'settings'
         ? ansi('Tab 切换总览  ←/Esc 返回总览  q 退出', 'dim', color)
         : state.settingsInstanceName
@@ -1776,19 +1777,39 @@ export function renderStatusView(
 
 function fitFrame(lines: string[], width: number, height?: number): string {
   const safeWidth = Math.max(1, width);
-  const fitted = lines.map((line) => truncateAnsi(line, safeWidth));
+  const fitted = lines.flatMap((line) => wrapAnsiLine(line, safeWidth));
   if (height === undefined || fitted.length <= height) return fitted.join('\n');
   const headerCount = Math.min(3, fitted.length);
   const footerCount = Math.min(2, fitted.length - headerCount);
   const body = fitted.slice(headerCount, fitted.length - footerCount);
   const capacity = Math.max(1, height - headerCount - footerCount);
-  const selected = body.findIndex((line) => /^>/.test(stripAnsi(line)));
+  const selected = body.findIndex((line) => /^>/.test(stripAnsi(line)) || line.includes('█'));
   const start = clamp(
     selected < 0 ? 0 : selected - Math.floor(capacity / 2),
     0,
     Math.max(0, body.length - capacity),
   );
   return [...fitted.slice(0, headerCount), ...body.slice(start, start + capacity), ...fitted.slice(-footerCount)].join('\n');
+}
+
+function wrapAnsiLine(value: string, width: number): string[] {
+  if (ansiDisplayWidth(value) <= width) return [value];
+  const plain = stripAnsi(value);
+  const wrapped: string[] = [];
+  let current = '';
+  let used = 0;
+  for (const segment of graphemeSegments(plain)) {
+    const segmentWidth = graphemeDisplayWidth(segment);
+    if (current && used + segmentWidth > width) {
+      wrapped.push(current);
+      current = '';
+      used = 0;
+    }
+    current += segment;
+    used += segmentWidth;
+  }
+  wrapped.push(current);
+  return wrapped;
 }
 
 function channelGroups(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
@@ -2223,6 +2244,23 @@ function renderTextCursor(value: string, cursor: number): string {
   const characters = Array.from(value);
   const index = clamp(cursor, 0, characters.length);
   return `${characters.slice(0, index).join('')}█${characters.slice(index).join('')}`;
+}
+
+function renderEditingPanel(
+  editing: NonNullable<ManagementViewState['editing']>,
+  width: number,
+  color: boolean,
+): string[] {
+  const innerWidth = Math.max(10, width - 4);
+  const wrapped = wrapAnsiLine(renderTextCursor(editing.value, editing.cursor), innerWidth);
+  return [
+    heading(`编辑 / ${editing.label}`, color),
+    ansi('完整内容按终端宽度自动换行；编辑期间暂停展示背后的详情，保存或取消后返回原位置。', 'dim', color),
+    '',
+    `┌${'─'.repeat(innerWidth + 2)}┐`,
+    ...wrapped.map((line) => `│ ${pad(line, innerWidth)} │`),
+    `└${'─'.repeat(innerWidth + 2)}┘`,
+  ];
 }
 
 function textLength(value: string): number {

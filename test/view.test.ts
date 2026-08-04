@@ -443,6 +443,7 @@ test('management view 从会话详情直接编辑内嵌 Conversation 设置', as
       instances, state, store.conversationDetail(conversation.id), [], 120,
     );
     assert.ok(editingFrame.split('\n').every((line) => terminalDisplayWidth(line) <= 120));
+    assert.match(editingFrame, /█/, '长职责编辑时必须显示光标及其附近文本');
     await handleManagementViewInput('\r', state, instances, () => { stopped = true; });
     const savedFrame = renderManagementView(
       instances, state, store.conversationDetail(conversation.id), [], 120,
@@ -453,6 +454,10 @@ test('management view 从会话详情直接编辑内嵌 Conversation 设置', as
     assert.ok(savedFrame.split('\n').every((line) => terminalDisplayWidth(line) <= 120));
     assert.deepEqual(refreshedFrame.split('\n').slice(1), savedFrame.split('\n').slice(1));
     assert.equal(store.getConversation(conversation.id)?.responsibility, longResponsibility);
+    const expandedFrame = renderManagementView(
+      instances, state, store.conversationDetail(conversation.id), [], 120, false, false, 60,
+    );
+    assert.match(expandedFrame, /耗时操作放后台；$/m, '长职责应显式换行完整展示，不能被帧出口截断');
     await handleManagementViewInput('q', state, instances, () => { stopped = true; });
     assert.equal(stopped, false);
     assert.equal(state.exitConfirmation, true);
@@ -599,8 +604,15 @@ test('INSTANCES 在上层 view 中下钻后直接编辑内嵌 INSTANCE 设置', 
     assert.equal(state.editing?.key, 'identity.name');
     assert.equal(state.editing?.value, 'Second Agent');
     const rendered = renderManagementView(instances, state, null, createSettingEntries(secondConfig, secondStore, null), 120);
-    assert.match(rendered, /\[ INSTANCE \]/);
-    assert.ok(rendered.indexOf('[ INSTANCE ]') < rendered.indexOf('CHANNELS'));
+    assert.match(rendered, /编辑 \/ Agent 名称/);
+    assert.match(rendered, /Second Agent█/);
+    assert.doesNotMatch(rendered, /\[ INSTANCE \]/);
+
+    await handleManagementViewInput('\u001b', state, instances, () => undefined);
+    assert.equal(state.editing, null);
+    const returned = renderManagementView(instances, state, null, createSettingEntries(secondConfig, secondStore, null), 120);
+    assert.match(returned, /\[ INSTANCE \]/);
+    assert.ok(returned.indexOf('[ INSTANCE ]') < returned.indexOf('CHANNELS'));
   } finally {
     firstStore.close();
     secondStore.close();
