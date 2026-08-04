@@ -13,3 +13,5 @@ Host 不设置 turn 超时。活动 claim 不按时间自动释放；新消息�
 Host 不覆盖 runtime 的 developer/system 指令、审批、sandbox、网络、额外 writable roots 或 MCP/skills。可选 Conversation 职责只作为低频普通上下文提醒，不能提供权限隔离。`runtime.cwd` 必须指向专用工作目录，不应指向用户主目录、磁盘根目录或混有其他敏感项目的上级目录。
 
 Codex App Server 在 Worker 活跃和保温期间持续运行，以提供 `turn/steer`；warm TTL 到期关闭进程，但不删除 SQLite 中的 provider session ID 或 Codex 本地 rollout。View 删除 Conversation 会清理 Host 自己保存的消息和 session 映射，但不会删除 provider 在其用户目录维护的本地 rollout。
+
+Codex Runtime 以非交互后台模式启动：thread start/resume 固定 `approvalPolicy=never` 与 `sandbox=danger-full-access`。部署者必须把 runtime cwd 和 Agent 工具本身作为权限边界审计；Host 不提供审批 UI，也不会把审批转发到 Channel。任何意外 server-initiated 交互请求都会立即失败并终止当前 Worker 进程，消息由 durable inbox 在后续启动时恢复，禁止无限等待。
