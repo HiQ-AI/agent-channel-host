@@ -982,6 +982,46 @@ test('多行文本编辑按视觉行上下移动并保持显示列', async () =>
   }
 });
 
+test('长文本设置页支持粘贴换行内容、复制与粘贴快捷键', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('multiline-edit', '.', 'Agent');
+  const conversation = store.addConversation({
+    kind: 'group',
+    externalId: 'multiline-group',
+    title: '多行编辑',
+    responsibility: '旧职责',
+    mode: 'reply',
+  });
+  const instance = viewInstance('multiline-edit', config, store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.detailConversationId = conversation.id;
+  state.conversationDetailFocus = 'settings';
+  try {
+    state.editing = {
+      key: `conversation:${conversation.id}:responsibility`,
+      label: '会话职责 · 多行编辑',
+      value: '旧职责',
+      cursor: 3,
+      multiline: true,
+    };
+    await handleManagementViewInput('第一段\n第二段', state, [instance], () => undefined);
+    assert.equal(state.editing?.value, '旧职责第一段\n第二段');
+    await handleManagementViewInput('\u0003', state, [instance], () => undefined);
+    assert.equal(state.notice, '已复制输入内容到剪贴板，可用 Ctrl+V 粘贴');
+    state.editing.value = '清空';
+    state.editing.cursor = 2;
+    await handleManagementViewInput('\n', state, [instance], () => undefined);
+    assert.equal(state.editing?.value, '清空\n');
+    await handleManagementViewInput('\u0016', state, [instance], () => undefined);
+    assert.equal(state.editing?.value, '清空\n旧职责第一段\n第二段');
+    await handleManagementViewInput('\r', state, [instance], () => undefined);
+    assert.equal(store.getConversation(conversation.id)?.responsibility, '清空\n旧职责第一段\n第二段');
+  } finally {
+    store.close();
+  }
+});
+
 test('Channel 页面分别选择群聊/私聊订阅与默认模式，并展示两类指定绑定', async () => {
   const root = resolve('.test-view-channel-subscriptions');
   const configFile = resolve(root, 'config.yaml');

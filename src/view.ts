@@ -57,6 +57,7 @@ export interface ManagementViewState {
     label: string;
     value: string;
     cursor: number;
+    multiline?: boolean;
     wrapWidth?: number;
     preferredColumn?: number | null;
   } | null;
@@ -84,6 +85,7 @@ export interface SettingEntry {
   key: string;
   section: 'instance' | 'channels' | 'conversation';
   input: 'text' | 'toggle' | 'select';
+  multiline?: boolean;
   options?: readonly string[];
   label: string;
   value: string;
@@ -135,6 +137,13 @@ interface GroupSearchDraft {
 
 export const VIEW_ALTERNATE_SCREEN_ENTER = '\u001b[?1049h\u001b[?25l';
 export const VIEW_ALTERNATE_SCREEN_EXIT = '\u001b[?25h\u001b[?1049l';
+
+const BRACKETED_PASTE_START = '\u001b[200~';
+const BRACKETED_PASTE_END = '\u001b[201~';
+const CTRL_C = '\u0003';
+const CTRL_V_KEY = '\u0016';
+const EDITING_COPY_NOTICE = '已复制输入内容到剪贴板，可用 Ctrl+V 粘贴';
+let editingClipboard = '';
 
 export function renderFrameDiff(previous: string, next: string, forceFull = false): string {
   if (forceFull || previous === '') return `\u001b[H\u001b[2J${next}`;
@@ -486,10 +495,6 @@ export async function handleManagementViewInput(
     state.destructiveConfirmation = null;
     return;
   }
-  if (key === '\u0003') {
-    state.exitConfirmation = true;
-    return;
-  }
   if (state.creatingInstance) {
     await handleInstanceCreationInput(key, state, instances, actions);
     return;
@@ -512,12 +517,13 @@ export async function handleManagementViewInput(
   const back = key === '\u001b' || key === '\u001b[D';
   const forward = key === '\r' || key === '\n' || key === '\u001b[C';
   if (state.editing) {
+    const isMultiline = Boolean(state.editing.multiline);
     if (key === '\u001b') {
       state.editing = null;
       state.notice = '已取消修改';
       return;
     }
-    if (key === '\r' || key === '\n') {
+    if (isSaveKey(key, isMultiline)) {
       const editingInstance = settingsInstance ?? detailInstance;
       if (!editingInstance) throw new Error('没有可配置的 instance');
       const selectedId = state.detailConversationId;
@@ -537,7 +543,33 @@ export async function handleManagementViewInput(
       state.editing = null;
       return;
     }
-    editSingleLine(state.editing, key);
+    if (key === CTRL_C) {
+      if (isMultiline) {
+        state.notice = copyEditingValue(state.editing.value);
+      } else {
+        state.exitConfirmation = true;
+      }
+      return;
+    }
+    if (isMultiline && key === CTRL_V_KEY) {
+      if (editingClipboard === '') {
+        state.notice = '剪贴板为空，无法粘贴';
+        return;
+      }
+      editSingleLine(state.editing, editingClipboard, { multiline: true });
+      state.notice = '已粘贴';
+      return;
+    }
+    const insertedText = extractInsertedText(key);
+    if (insertedText !== null) {
+      editSingleLine(state.editing, insertedText, { multiline: isMultiline });
+      return;
+    }
+    editSingleLine(state.editing, key, { multiline: isMultiline });
+    return;
+  }
+  if (key === CTRL_C) {
+    state.exitConfirmation = true;
     return;
   }
 
@@ -707,7 +739,13 @@ export async function handleManagementViewInput(
           state.notice = actionNotice ?? `${entry.label} 已选择 ${next}`;
           return;
         }
-        state.editing = { key: entry.key, label: entry.label, value: entry.value, cursor: textLength(entry.value) };
+      state.editing = {
+        key: entry.key,
+        label: entry.label,
+        value: entry.value,
+        cursor: textLength(entry.value),
+        multiline: entry.multiline,
+      };
         return;
       }
       if (detailInstance && !state.detailChannel && !state.detailConversationId && state.instanceFocus === 'settings') {
@@ -737,7 +775,13 @@ export async function handleManagementViewInput(
           state.notice = actionNotice ?? `${entry.label} 已选择 ${next}`;
           return;
         }
-        state.editing = { key: entry.key, label: entry.label, value: entry.value, cursor: textLength(entry.value) };
+        state.editing = {
+          key: entry.key,
+          label: entry.label,
+          value: entry.value,
+          cursor: textLength(entry.value),
+          multiline: entry.multiline,
+        };
         return;
       }
       if (!state.detailInstanceName) {
@@ -1051,9 +1095,18 @@ export function createSettingEntries(
       if (!store.setConversationTitle(conversationId, value)) throw new Error('conversation 不存在');
     }),
     enabledEntry,
-    storeSetting(`conversation:${conversationId}:responsibility`, `会话职责 · ${conversation.title}`, conversation.responsibility, '首轮、变更后首轮及按会话间隔提醒；留空沿用 Agent 自身职责', async (value) => {
-      if (!store.setConversationResponsibility(conversationId, value)) throw new Error('conversation 不存在');
-    }),
+    storeSetting(
+      `conversation:${conversationId}:responsibility`,
+      `会话职责 · ${conversation.title}`,
+      conversation.responsibility,
+      '首轮、变更后首轮及按会话间隔提醒；留空沿用 Agent 自身职责',
+      async (value) => {
+        if (typeof value !== 'string') throw new Error('conversation responsibilities must be text');
+        if (!store.setConversationResponsibility(conversationId, value)) throw new Error('conversation 不存在');
+      },
+      'conversation',
+      true,
+    ),
     storeSetting(
       `conversation:${conversationId}:responsibilityReminderInterval`,
       `职责周期提醒(turn) · ${conversation.title}`,
@@ -1110,7 +1163,13 @@ async function activateSettingEntry(
     state.notice = actionNotice ?? `${entry.label} 已选择 ${next}`;
     return;
   }
-  state.editing = { key: entry.key, label: entry.label, value: entry.value, cursor: textLength(entry.value) };
+  state.editing = {
+    key: entry.key,
+    label: entry.label,
+    value: entry.value,
+    cursor: textLength(entry.value),
+    multiline: entry.multiline,
+  };
 }
 
 export function createChannelSettingEntry(
@@ -1229,8 +1288,19 @@ function storeSetting(
   hint: string,
   apply: (value: string) => Promise<void>,
   section: SettingEntry['section'] = 'conversation',
+  multiline = false,
 ): SettingEntry {
-  return { key, section, input: 'text', label, value, hint, restartHost: false, apply };
+  return {
+    key,
+    section,
+    input: 'text',
+    label,
+    value,
+    hint,
+    restartHost: false,
+    apply,
+    multiline,
+  };
 }
 
 function selectSetting(entry: SettingEntry, options: readonly string[]): SettingEntry {
@@ -1360,7 +1430,13 @@ export function renderManagementView(
       : state.groupSearch?.phase === 'results'
         ? ansi('↑/↓ 选择  →/Enter 绑定或打开  ←/Esc 修改关键词  q 退出', 'dim', color)
     : state.editing
-      ? ansi(`编辑 ${state.editing.label}  方向键移动  Home/End 行首尾  Ctrl+Home/End 全文首尾  Backspace/Delete 删除  Enter 保存  Esc 取消`, 'cyan-bold', color)
+      ? ansi(
+        `编辑 ${state.editing.label}  方向键移动  Home/End 行首尾  Ctrl+Home/End 全文首尾  Backspace/Delete 删除  Enter 保存  ${state.editing.multiline
+          ? 'Esc 取消  Ctrl+V 粘贴  Ctrl+C 复制'
+          : 'Esc 取消'}`,
+        'cyan-bold',
+        color,
+      )
       : state.tab === 'settings'
         ? ansi('Tab 切换总览  ←/Esc 返回总览  q 退出', 'dim', color)
         : state.settingsInstanceName
@@ -1822,22 +1898,35 @@ function fitFrame(lines: string[], width: number, height?: number): string {
 }
 
 function wrapAnsiLine(value: string, width: number): string[] {
-  if (ansiDisplayWidth(value) <= width) return [value];
+  if (ansiDisplayWidth(value) <= width && !value.includes('\n') && !value.includes('\r')) return [value];
   const plain = stripAnsi(value);
   const wrapped: string[] = [];
-  let current = '';
-  let used = 0;
-  for (const segment of graphemeSegments(plain)) {
-    const segmentWidth = graphemeDisplayWidth(segment);
-    if (current && used + segmentWidth > width) {
-      wrapped.push(current);
-      current = '';
-      used = 0;
+  const lines = plain.split(/\r\n|\n|\r/);
+  if (lines.length === 0) return [''];
+  for (const line of lines) {
+    if (line === '') {
+      wrapped.push('');
+      continue;
     }
-    current += segment;
-    used += segmentWidth;
+    const wrappedLine = ansiDisplayWidth(line);
+    if (wrappedLine <= width) {
+      wrapped.push(line);
+      continue;
+    }
+    let current = '';
+    let used = 0;
+    for (const segment of graphemeSegments(line)) {
+      const segmentWidth = graphemeDisplayWidth(segment);
+      if (current && used + segmentWidth > width) {
+        wrapped.push(current);
+        current = '';
+        used = 0;
+      }
+      current += segment;
+      used += segmentWidth;
+    }
+    wrapped.push(current);
   }
-  wrapped.push(current);
   return wrapped;
 }
 
@@ -2227,7 +2316,7 @@ function integer(value: string, min: number, max: number, label: string): number
   return parsed;
 }
 
-function editSingleLine(line: { value: string; cursor: number }, key: string): void {
+function editSingleLine(line: { value: string; cursor: number }, key: string, options: { multiline?: boolean } = {}): void {
   const characters = Array.from(line.value);
   line.cursor = clamp(line.cursor, 0, characters.length);
   const visual = line as typeof line & { wrapWidth?: number; preferredColumn?: number | null };
@@ -2284,12 +2373,59 @@ function editSingleLine(line: { value: string; cursor: number }, key: string): v
     }
     return;
   }
-  if (key.startsWith('\u001b') || key === '\u0003') return;
-  const inserted = Array.from(key.replace(/[\u0000-\u001f]/g, ''));
+  if (key.startsWith('\u001b')) return;
+  const allowNewLine = options.multiline === true;
+  const inserted = Array.from(key)
+    .map((character) => (character === '\r' ? '\n' : character))
+    .filter((character) => !isControlCharacter(character) || (allowNewLine && character === '\n'));
   if (inserted.length === 0) return;
   characters.splice(line.cursor, 0, ...inserted);
   line.cursor += inserted.length;
   line.value = characters.join('');
+}
+
+function isControlCharacter(character: string): boolean {
+  if (character.length !== 1) return false;
+  const codePoint = character.codePointAt(0)!;
+  return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+}
+
+function isSaveKey(key: string, isMultiline: boolean): boolean {
+  return key === '\r' || (key === '\n' && !isMultiline);
+}
+
+function normalizeLineEndings(value: string): string {
+  return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function isSingleLine(value: string): boolean {
+  return /^[\r\n]+$/.test(value);
+}
+
+function extractBracketedPasteText(key: string): string | null {
+  const start = key.indexOf(BRACKETED_PASTE_START);
+  if (start < 0) return null;
+  const end = key.indexOf(BRACKETED_PASTE_END, start + BRACKETED_PASTE_START.length);
+  if (end < 0) return null;
+  return normalizeLineEndings(key.slice(start + BRACKETED_PASTE_START.length, end));
+}
+
+function extractInsertedText(key: string): string | null {
+  const bracketed = extractBracketedPasteText(key);
+  if (bracketed !== null) return bracketed;
+  if (key.length === 1 || !/[\r\n]/.test(key) || isSingleLine(key)) return null;
+  return normalizeLineEndings(key);
+}
+
+function copyEditingValue(value: string): string {
+  editingClipboard = value;
+  const encoded = Buffer.from(value, 'utf8').toString('base64');
+  try {
+    process.stdout.write(`\u001b]52;c;${encoded}\u0007`);
+  } catch {
+    // ignore
+  }
+  return EDITING_COPY_NOTICE;
 }
 
 interface VisualLine {
@@ -2305,7 +2441,23 @@ function visualLineLayout(value: string, width: number): VisualLine[] {
   let start = 0;
   let used = 0;
   for (let index = 0; index < characters.length; index += 1) {
-    const characterWidth = graphemeDisplayWidth(characters[index]!);
+    const character = characters[index]!;
+    if (character === '\r') {
+      if (index + 1 < characters.length && characters[index + 1] === '\n') {
+        index += 1;
+      }
+      lines.push({ start, end: index, width: used });
+      start = index + 1;
+      used = 0;
+      continue;
+    }
+    if (character === '\n') {
+      lines.push({ start, end: index, width: used });
+      start = index + 1;
+      used = 0;
+      continue;
+    }
+    const characterWidth = graphemeDisplayWidth(character);
     if (index > start && used + characterWidth > width) {
       lines.push({ start, end: index, width: used });
       start = index;
