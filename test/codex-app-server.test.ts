@@ -43,6 +43,36 @@ test('后台 App Server 意外发出审批请求时立即失败，不悬挂 turn
   store.close();
 });
 
+test('协议升级轮换 generation 后以数据库当前 generation 保存新 session', async () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'generation-user', title: '版本升级私聊', responsibility: '', mode: 'reply',
+  });
+  const now = new Date().toISOString();
+  store.saveSession({
+    conversationId: conversation.id,
+    runtimeId: 'codex',
+    providerSessionId: 'old-session',
+    generation: 1,
+    lifecycle: 'ready',
+    protocolFingerprint: 'old-fingerprint',
+    runtimeCwd: resolve('.'),
+    bootstrapTurnId: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const session = new CodexAppServerSession(defaultConfig('generation', '.', 'Agent'), conversation, fakeIdentity(), store);
+  try {
+    await session.start();
+    assert.equal(store.getConversation(conversation.id)?.sessionGeneration, 2);
+    assert.equal(store.getSession(conversation.id)?.generation, 2);
+    assert.notEqual(store.getSession(conversation.id)?.providerSessionId, 'old-session');
+  } finally {
+    await session.stop();
+    store.close();
+  }
+});
+
 function fakeIdentity(): CodexAppServerIdentity {
   return {
     version: 'fake-codex',

@@ -189,9 +189,11 @@ export class CodexAppServerSession implements AgentSession {
   }
 
   private sessionRecord(lifecycle: SessionRecord['lifecycle'], createdAt: string, updatedAt: string): SessionRecord {
+    const generation = this.store.getConversation(this.conversation.id)?.sessionGeneration;
+    if (!generation) throw new Error(`conversation 不存在：${this.conversation.id}`);
     return {
       conversationId: this.conversation.id, runtimeId: this.config.runtime.id,
-      providerSessionId: this.providerSessionId!, generation: this.conversation.sessionGeneration,
+      providerSessionId: this.providerSessionId!, generation,
       lifecycle, protocolFingerprint: this.identity.fingerprint, runtimeCwd: this.config.runtime.cwd,
       bootstrapTurnId: null, createdAt, updatedAt,
     };
