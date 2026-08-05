@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import type { Store } from './store.js';
 import type { Conversation, ConversationMode } from './types.js';
 import { CLI_NAME } from './product.js';
-import { CONVERSATION_MODES, MAX_WORKER_WARM_SECONDS } from './types.js';
+import { CONVERSATION_MODES, MAX_RESPONSIBILITY_REMINDER_INTERVAL, MAX_WORKER_WARM_SECONDS } from './types.js';
 import { safeName } from './paths.js';
 import { displayConversationTitle } from './conversation-title.js';
 import { execResolved, resolveCommand } from './command.js';
@@ -1051,9 +1051,21 @@ export function createSettingEntries(
       if (!store.setConversationTitle(conversationId, value)) throw new Error('conversation 不存在');
     }),
     enabledEntry,
-    storeSetting(`conversation:${conversationId}:responsibility`, `会话职责 · ${conversation.title}`, conversation.responsibility, '首轮、变更后首轮及每 5 个已完成 turn 提醒；留空沿用 Agent 自身职责', async (value) => {
+    storeSetting(`conversation:${conversationId}:responsibility`, `会话职责 · ${conversation.title}`, conversation.responsibility, '首轮、变更后首轮及按会话间隔提醒；留空沿用 Agent 自身职责', async (value) => {
       if (!store.setConversationResponsibility(conversationId, value)) throw new Error('conversation 不存在');
     }),
+    storeSetting(
+      `conversation:${conversationId}:responsibilityReminderInterval`,
+      `职责周期提醒(turn) · ${conversation.title}`,
+      String(conversation.responsibilityReminderInterval),
+      '0 关闭周期提醒；1-99 表示每 N 个已完成 turn',
+      async (value) => {
+        if (!store.setResponsibilityReminderInterval(
+          conversationId,
+          integer(value, 0, MAX_RESPONSIBILITY_REMINDER_INTERVAL, '职责周期提醒间隔'),
+        )) throw new Error('conversation 不存在');
+      },
+    ),
     selectSetting(storeSetting(`conversation:${conversationId}:mode`, `会话模式 · ${conversation.title}`, conversation.mode, '从 shadow/reply 选择；发送前即时生效', async (value) => {
       if (value !== 'shadow' && value !== 'reply') throw new Error('会话模式必须是 shadow 或 reply');
       if (!store.setConversationMode(conversationId, value)) throw new Error('conversation 不存在');

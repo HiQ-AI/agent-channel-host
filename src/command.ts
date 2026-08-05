@@ -30,6 +30,10 @@ async function resolveCommandUncached(command: string): Promise<ResolvedCommand>
     const codexJs = await findCodexJs(command);
     if (codexJs) return { kind: 'node-script', file: process.execPath, target: codexJs };
   }
+  if (commandName === 'npm' && extension !== '.exe') {
+    const npmCli = await findNpmCli(command);
+    if (npmCli) return { kind: 'node-script', file: process.execPath, target: npmCli };
+  }
   if (['.ps1', '.cmd', '.bat'].includes(extension)) {
     throw new Error(`不支持通过 ${extension} shim 启动 JSONL 子进程；请提供原生 .exe（Codex npm launcher 会自动解析 codex.js）`);
   }
@@ -48,6 +52,10 @@ async function resolveCommandUncached(command: string): Promise<ResolvedCommand>
         if (codexJs) return { kind: 'node-script', file: process.execPath, target: codexJs };
       }
     }
+    if (lookup.toLowerCase() === 'npm') {
+      const npmCli = await findNpmCli(command, candidates);
+      if (npmCli) return { kind: 'node-script', file: process.execPath, target: npmCli };
+    }
     const executable = candidates.find((item) => extname(item).toLowerCase() === '.exe');
     if (executable) return { kind: 'native', file: executable, target: executable };
     if (candidates.length > 0) {
@@ -57,6 +65,24 @@ async function resolveCommandUncached(command: string): Promise<ResolvedCommand>
     // Fall through to the native command so the caller receives the operating system error.
   }
   return { kind: 'native', file: command, target: command };
+}
+
+async function findNpmCli(command: string, resolvedCandidates: string[] = []): Promise<string | null> {
+  const candidates = [
+    process.env.npm_execpath,
+    join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    ...resolvedCandidates.map((item) => join(dirname(item), 'node_modules', 'npm', 'bin', 'npm-cli.js')),
+  ].filter((item): item is string => Boolean(item));
+  if (extname(command)) candidates.unshift(join(dirname(command), 'node_modules', 'npm', 'bin', 'npm-cli.js'));
+  for (const candidate of new Set(candidates)) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // Try the next npm installation location.
+    }
+  }
+  return null;
 }
 
 export function commandArgs(command: ResolvedCommand, args: string[]): string[] {

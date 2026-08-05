@@ -8,7 +8,9 @@ import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from 
 import { withTimeout } from './process-utils.js';
 import type { Store } from './store.js';
 import type { Conversation, DeliveryRun, SessionRecord } from './types.js';
-import { prependResponsibilityReminder } from './prompts.js';
+import {
+  nextResponsibilityReminderCount, prependResponsibilityReminder, shouldInjectResponsibilityReminder,
+} from './prompts.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -24,7 +26,6 @@ export interface SessionStartup {
 }
 
 const DRIVER_PROTOCOL = 'exec-jsonl-v4-one-way-delivery';
-export const RESPONSIBILITY_REMINDER_INTERVAL_TURNS = 5;
 
 export async function verifyCodexCommand(config: HostConfig): Promise<CodexCommandIdentity> {
   const command = await resolveCommand(config.runtime.command);
@@ -117,7 +118,7 @@ export class CodexCommandSession implements AgentSession {
   private started = false;
   private interruptRequested = false;
   private stderrTail: string[] = [];
-  private completedTurnsSinceResponsibilityReminder = RESPONSIBILITY_REMINDER_INTERVAL_TURNS;
+  private completedTurnsSinceResponsibilityReminder = 0;
   private lastCompletedResponsibility: string | null = null;
 
   constructor(
@@ -156,9 +157,10 @@ export class CodexCommandSession implements AgentSession {
     const conversation = this.store.getConversation(this.conversation.id);
     if (!conversation) throw new Error(`conversation 不存在：${this.conversation.id}`);
     const responsibility = conversation.responsibility.trim();
-    const injectResponsibility = responsibility.length > 0 && (
-      responsibility !== this.lastCompletedResponsibility
-      || this.completedTurnsSinceResponsibilityReminder >= RESPONSIBILITY_REMINDER_INTERVAL_TURNS
+    const reminderInterval = conversation.responsibilityReminderInterval;
+    const injectResponsibility = shouldInjectResponsibilityReminder(
+      responsibility, this.lastCompletedResponsibility,
+      this.completedTurnsSinceResponsibilityReminder, reminderInterval,
     );
     const effectivePrompt = injectResponsibility
       ? prependResponsibilityReminder(prompt, responsibility)
@@ -226,9 +228,9 @@ export class CodexCommandSession implements AgentSession {
     if (!collector.turnCompleted) throw new Error('Codex exec 未返回 turn.completed');
     this.persistReady(collector.providerSessionId, turnId);
     this.lastCompletedResponsibility = responsibility;
-    this.completedTurnsSinceResponsibilityReminder = injectResponsibility
-      ? 1
-      : this.completedTurnsSinceResponsibilityReminder + 1;
+    this.completedTurnsSinceResponsibilityReminder = nextResponsibilityReminderCount(
+      this.completedTurnsSinceResponsibilityReminder, injectResponsibility, reminderInterval,
+    );
     return {
       turnId,
       status: 'completed',

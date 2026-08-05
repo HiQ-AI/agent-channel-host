@@ -7,7 +7,9 @@ import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from 
 import { stopChild, withTimeout } from './process-utils.js';
 import type { Store } from './store.js';
 import type { Conversation, DeliveryRun, SessionRecord } from './types.js';
-import { prependResponsibilityReminder } from './prompts.js';
+import {
+  nextResponsibilityReminderCount, prependResponsibilityReminder, shouldInjectResponsibilityReminder,
+} from './prompts.js';
 
 type JsonObject = Record<string, unknown>;
 type Pending = { resolve(value: unknown): void; reject(error: Error): void };
@@ -20,7 +22,6 @@ export interface CodexAppServerIdentity {
 }
 
 const DRIVER_PROTOCOL = 'app-server-v1-turn-steer';
-const RESPONSIBILITY_REMINDER_INTERVAL_TURNS = 5;
 const NON_INTERACTIVE_THREAD_OPTIONS = {
   approvalPolicy: 'never',
   sandbox: 'danger-full-access',
@@ -58,7 +59,7 @@ export class CodexAppServerSession implements AgentSession {
   private stopping = false;
   private terminalError: Error | null = null;
   private stderrTail: string[] = [];
-  private completedTurnsSinceResponsibilityReminder = RESPONSIBILITY_REMINDER_INTERVAL_TURNS;
+  private completedTurnsSinceResponsibilityReminder = 0;
   private lastCompletedResponsibility: string | null = null;
 
   constructor(
@@ -116,10 +117,12 @@ export class CodexAppServerSession implements AgentSession {
   async deliver(prompt: string): Promise<DeliveryRun> {
     if (!this.providerSessionId) throw new Error('Codex App Server session 尚未 start');
     if (this.activeTurnId) throw new Error('同一 conversation 已有活动 Codex turn');
-    const responsibility = this.store.getConversation(this.conversation.id)?.responsibility.trim() ?? '';
-    const inject = responsibility.length > 0 && (
-      responsibility !== this.lastCompletedResponsibility
-      || this.completedTurnsSinceResponsibilityReminder >= RESPONSIBILITY_REMINDER_INTERVAL_TURNS
+    const conversation = this.store.getConversation(this.conversation.id);
+    const responsibility = conversation?.responsibility.trim() ?? '';
+    const reminderInterval = conversation?.responsibilityReminderInterval ?? 0;
+    const inject = shouldInjectResponsibilityReminder(
+      responsibility, this.lastCompletedResponsibility,
+      this.completedTurnsSinceResponsibilityReminder, reminderInterval,
     );
     const effectivePrompt = inject ? prependResponsibilityReminder(prompt, responsibility) : prompt;
     const result = await this.request('turn/start', {
@@ -143,7 +146,9 @@ export class CodexAppServerSession implements AgentSession {
         ? { ...existing, lifecycle: 'ready', updatedAt: now }
         : this.sessionRecord('ready', now, now));
       this.lastCompletedResponsibility = responsibility;
-      this.completedTurnsSinceResponsibilityReminder = inject ? 1 : this.completedTurnsSinceResponsibilityReminder + 1;
+      this.completedTurnsSinceResponsibilityReminder = nextResponsibilityReminderCount(
+        this.completedTurnsSinceResponsibilityReminder, inject, reminderInterval,
+      );
       return { turnId, status: 'completed' };
     } finally {
       this.activeTurnId = null;

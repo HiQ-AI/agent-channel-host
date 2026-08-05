@@ -3,6 +3,8 @@ export const CONVERSATION_MODES = ['shadow', 'reply'] as const;
 export type ConversationMode = typeof CONVERSATION_MODES[number];
 export const DEFAULT_WORKER_WARM_SECONDS = 30;
 export const MAX_WORKER_WARM_SECONDS = 2_147_483;
+export const DEFAULT_RESPONSIBILITY_REMINDER_INTERVAL = 5;
+export const MAX_RESPONSIBILITY_REMINDER_INTERVAL = 99;
 export const MAX_RECOVERY_ATTEMPTS = 3;
 
 export interface Conversation {
@@ -16,6 +18,7 @@ export interface Conversation {
   mode: ConversationMode;
   runtimeId: string;
   workerWarmSeconds: number;
+  responsibilityReminderInterval: number;
   policyVersion: number;
   sessionGeneration: number;
   enabled: boolean;

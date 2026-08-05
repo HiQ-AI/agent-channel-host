@@ -17,6 +17,23 @@ export function prependResponsibilityReminder(prompt: string, responsibility: st
   return reminder ? `${reminder}\n\n${prompt}` : prompt;
 }
 
+export function shouldInjectResponsibilityReminder(
+  responsibility: string,
+  lastCompletedResponsibility: string | null,
+  completedTurnsSinceReminder: number,
+  interval: number,
+): boolean {
+  return responsibility.length > 0 && (
+    responsibility !== lastCompletedResponsibility
+    || (interval > 0 && completedTurnsSinceReminder >= interval)
+  );
+}
+
+export function nextResponsibilityReminderCount(current: number, injected: boolean, interval: number): number {
+  if (interval === 0) return 0;
+  return injected ? 1 : current + 1;
+}
+
 export function batchPrompt(conversation: Conversation, events: AdmittedEvent[]): string {
   return messagePrompt(conversation, events.map((event) => ({
     sender: event.senderName ?? event.senderId ?? '未知',

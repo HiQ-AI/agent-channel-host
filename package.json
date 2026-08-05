@@ -27,6 +27,7 @@
     "dist/src",
     "examples",
     "README.md",
+    "CHANGELOG.md",
     "SECURITY.md",
     "LICENSE"
   ],

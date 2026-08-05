@@ -352,6 +352,10 @@ test('Instance 与内嵌 Conversation 设置共用 schema，但不提供成员�
     await entries.find((entry) => entry.key.endsWith(':title'))!.apply('更新后的私聊');
     await entries.find((entry) => entry.key.endsWith(':enabled'))!.apply('disabled');
     await entries.find((entry) => entry.key.endsWith(':responsibility'))!.apply('新职责边界');
+    const reminderInterval = entries.find((entry) => entry.key.endsWith(':responsibilityReminderInterval'))!;
+    assert.equal(reminderInterval.value, '5');
+    await reminderInterval.apply('0');
+    await assert.rejects(reminderInterval.apply('100'), /0-99/);
     const state = createManagementViewState();
     const instance = { ...viewInstance('view-settings', config, store), configFile };
     state.detailInstanceName = instance.name;
@@ -366,7 +370,8 @@ test('Instance 与内嵌 Conversation 设置共用 schema，但不提供成员�
     assert.equal(store.getConversation(conversation.id)?.mode, 'reply');
     assert.equal(store.getConversation(conversation.id)?.title, '更新后的私聊');
     assert.equal(store.getConversation(conversation.id)?.enabled, false);
-    assert.equal(store.getConversation(conversation.id)?.policyVersion, 5);
+    assert.equal(store.getConversation(conversation.id)?.responsibilityReminderInterval, 0);
+    assert.equal(store.getConversation(conversation.id)?.policyVersion, 6);
     assert.equal(store.listConversationMembers(conversation.id)[0]?.organizationRole, '');
     const detailView = renderManagementView([instance], state, store.conversationDetail(conversation.id), entries, 140);
     assert.match(detailView, /RECENT MESSAGES.*MEMBERS/);
@@ -854,13 +859,13 @@ test('大表格按终端高度建立内部视口，并以 sequence 保持消息�
     state.selectedConversationId = target.id;
     state.conversationDetailFocus = 'messages';
     let detail = store.conversationDetail(target.id, true)!;
-    let detailView = renderManagementView([instance], state, detail, [], 120, true, false, 28);
-    assert.ok(detailView.split('\n').length <= 28);
+    let detailView = renderManagementView([instance], state, detail, [], 120, true, false, 29);
+    assert.ok(detailView.split('\n').length <= 29);
     assert.ok(detailView.split('\n').every((line) => terminalDisplayWidth(line) <= 120));
     assert.match(detailView, /CONTENT/);
     assert.match(detailView, /用于视口验证的消息内容/);
     assert.match(detailView, /RECENT MESSAGES.*MEMBERS/);
-    assert.match(detailView, /显示 1-2 \/ 共 10 条/);
+    assert.match(detailView, /显示 1-3 \/ 共 10 条/);
     await handleManagementViewInput('\u001b[6~', state, [instance], () => undefined);
     const selectedSequence = state.selectedMessageSequence;
     assert.ok(selectedSequence !== null);
@@ -870,14 +875,14 @@ test('大表格按终端高度建立内部视口，并以 sequence 保持消息�
       sender_name: '新成员', content: '新到达但不抢走当前消息焦点',
     })!);
     detail = store.conversationDetail(target.id, true)!;
-    detailView = renderManagementView([instance], state, detail, [], 120, true, false, 28);
+    detailView = renderManagementView([instance], state, detail, [], 120, true, false, 29);
     assert.equal(state.selectedMessageSequence, selectedSequence);
     assert.match(detailView, /↑ 还有/);
     await handleManagementViewInput('\t', state, [instance], () => undefined);
     assert.equal(state.conversationDetailFocus, 'members');
     await handleManagementViewInput('\u001b[F', state, [instance], () => undefined);
     assert.equal(state.selectedMember, 10);
-    assert.match(renderManagementView([instance], state, detail, [], 120, true, false, 28), /显示 10-11 \/ 共 11 条/);
+    assert.match(renderManagementView([instance], state, detail, [], 120, true, false, 29), />\s+新\*\*\*员/);
     await handleManagementViewInput('\t', state, [instance], () => undefined);
     assert.equal(state.conversationDetailFocus, 'settings');
   } finally {
