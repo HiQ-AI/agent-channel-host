@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-05
+
 ### Added
 
 - 新增 `agent-channel update`，可通过 npm 更新到 registry 最新版本并回读安装版本。
@@ -26,5 +28,6 @@
 
 - 首次发布 `@zzusp/agent-channel-host`，提供 DingTalk DWS Channel、每会话固定 Codex session、持久化 inbox、按需 Worker 和交互式管理 View。
 
-[Unreleased]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/HiQ-AI/agent-channel-host/releases/tag/v1.0.0
