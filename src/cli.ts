@@ -11,7 +11,8 @@ import { runHost } from './host.js';
 import {
   installUserService, removeUserService, removeUserServiceIfInstalled, windowsServicePlan,
 } from './service.js';
-import { MAX_WORKER_WARM_SECONDS } from './types.js';
+import { MAX_RESPONSIBILITY_REMINDER_INTERVAL, MAX_WORKER_WARM_SECONDS } from './types.js';
+import { updateGlobalPackage } from './update.js';
 import {
   assertInteractiveView, bindHostToInteractiveView, runView, type SettingEntry, type ViewInstance,
 } from './view.js';
@@ -25,6 +26,12 @@ program
   .name(CLI_NAME)
   .description('将 Channel 消息路由到每个会话独立、可恢复的 Agent runtime session')
   .version(PRODUCT_VERSION);
+
+program.command('update')
+  .description('通过 npm 将 agent-channel-host 更新到 registry 最新版本')
+  .action(async () => {
+    print(await updateGlobalPackage());
+  });
 
 program.command('init')
   .description('初始化一个不含凭据的用户级 Host instance')
@@ -120,6 +127,7 @@ conversation.command('add')
   .option('--responsibility <text>', '该会话的职责边界；省略时沿用 Agent 自身职责')
   .option('--mode <mode>', 'shadow 或 reply；省略时使用对应 Channel 默认模式')
   .option('--warm-seconds <seconds>', '处理完成后保留 Worker 的秒数，默认 30；0 表示立即释放', parseWarmSeconds)
+  .option('--reminder-interval <turns>', '职责周期提醒间隔，默认 5；0 表示关闭', parseReminderInterval)
   .option('--open-dingtalk-id <id>', 'direct 对端的 openDingTalkId')
   .action(async (options) => {
     if (!['group', 'direct'].includes(options.kind)) throw new Error('--kind 必须是 group 或 direct');
@@ -144,6 +152,7 @@ conversation.command('add')
         channelProfileId: config.channel.profileId,
         runtimeId: config.runtime.id,
         workerWarmSeconds: options.warmSeconds,
+        responsibilityReminderInterval: options.reminderInterval,
       });
       print(publicConversation(created));
     } finally {
@@ -209,6 +218,24 @@ conversation.command('worker')
         throw new Error(`conversation 不存在：${options.id}`);
       }
       print({ ...publicConversation(store.getConversation(options.id)!), restartRequired: true });
+    } finally {
+      store.close();
+    }
+  });
+
+conversation.command('reminder')
+  .description('设置职责周期提醒间隔；0 关闭，1-99 表示每 N 个已完成 turn 提醒')
+  .requiredOption('--instance <name>', 'instance 名称')
+  .requiredOption('--id <id>', 'conversation UUID')
+  .requiredOption('--interval <turns>', '0-99 的整数', parseReminderInterval)
+  .action(async (options) => {
+    await loadConfig(options.instance);
+    const store = new Store(statePath(options.instance));
+    try {
+      if (!store.setResponsibilityReminderInterval(options.id, options.interval)) {
+        throw new Error(`conversation 不存在：${options.id}`);
+      }
+      print(publicConversation(store.getConversation(options.id)!));
     } finally {
       store.close();
     }
@@ -424,7 +451,8 @@ function print(value: unknown): void {
 
 function publicConversation(value: {
   id: string; channelId: string; channelProfileId: string; kind: string; externalId: string;
-  title: string; responsibility: string; mode: string; runtimeId: string; workerWarmSeconds: number; enabled: boolean;
+  title: string; responsibility: string; mode: string; runtimeId: string; workerWarmSeconds: number;
+  responsibilityReminderInterval: number; enabled: boolean;
 }): Record<string, unknown> {
   return {
     id: value.id,
@@ -437,6 +465,7 @@ function publicConversation(value: {
     mode: value.mode,
     runtimeId: value.runtimeId,
     workerWarmSeconds: value.workerWarmSeconds,
+    responsibilityReminderInterval: value.responsibilityReminderInterval,
     enabled: value.enabled,
   };
 }
@@ -445,6 +474,14 @@ function parseWarmSeconds(value: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > MAX_WORKER_WARM_SECONDS) {
     throw new Error(`秒数必须是 0-${MAX_WORKER_WARM_SECONDS} 的整数`);
+  }
+  return parsed;
+}
+
+function parseReminderInterval(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > MAX_RESPONSIBILITY_REMINDER_INTERVAL) {
+    throw new Error(`提醒间隔必须是 0-${MAX_RESPONSIBILITY_REMINDER_INTERVAL} 的整数`);
   }
   return parsed;
 }

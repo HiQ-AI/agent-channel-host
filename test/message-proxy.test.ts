@@ -2,8 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultConfig } from '../src/config.js';
 import { normalizeDwsEvent } from '../src/dws.js';
-import { batchPrompt, conversationResponsibilityReminder, prependResponsibilityReminder, recentMessagesPrompt } from '../src/prompts.js';
+import {
+  batchPrompt, conversationResponsibilityReminder, nextResponsibilityReminderCount,
+  prependResponsibilityReminder, recentMessagesPrompt, shouldInjectResponsibilityReminder,
+} from '../src/prompts.js';
 import { Store } from '../src/store.js';
+
+test('职责提醒间隔支持 1-99，0 关闭周期判断但保留职责变化提醒', () => {
+  assert.equal(shouldInjectResponsibilityReminder('职责', null, 0, 5), true);
+  assert.equal(shouldInjectResponsibilityReminder('职责', '职责', 1, 2), false);
+  assert.equal(shouldInjectResponsibilityReminder('职责', '职责', 2, 2), true);
+  assert.equal(shouldInjectResponsibilityReminder('职责', '职责', 99, 0), false);
+  assert.equal(shouldInjectResponsibilityReminder('新职责', '旧职责', 0, 0), true);
+  assert.equal(nextResponsibilityReminderCount(99, false, 0), 0);
+});
 
 test('普通群聊 turn 每批注入一次外部回复目标，消息仍只含发送者、时间、内容', () => {
   const config = defaultConfig('message-proxy', '.', '身份标记');

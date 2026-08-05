@@ -24,6 +24,11 @@ test('授权会话才可持久化，事件按会话单调编号并去重', () =>
   const conversation = store.addConversation({
     kind: 'group', externalId: 'cid-1', title: '测试群', responsibility: '回答测试问题', mode: 'shadow',
   });
+  assert.equal(conversation.responsibilityReminderInterval, 5);
+  assert.equal(store.setResponsibilityReminderInterval(conversation.id, 0), true);
+  assert.equal(store.getConversation(conversation.id)?.responsibilityReminderInterval, 0);
+  assert.equal(store.setResponsibilityReminderInterval(conversation.id, 99), true);
+  assert.throws(() => store.setResponsibilityReminderInterval(conversation.id, 100), /0-99/);
   const event = normalizeDwsEvent({
     type: 'user_im_message_receive_group_all',
     event_id: 'evt-1', message_id: 'msg-1', conversation_id: 'cid-1', sender: '同事甲', content: '问题一',
@@ -590,7 +595,8 @@ test('v1 会话迁移后补 onboarding 和每类生命周期默认值', () => {
     assert.equal(migrated.getConversation('group-v1')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v1')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+    assert.equal(migrated.getConversation('group-v1')?.responsibilityReminderInterval, 5);
     assert.equal(migrated.getConversation('group-v1')?.policyVersion, 1);
     migrated.close();
   } finally {
@@ -624,7 +630,7 @@ test('v2 会话迁移到当前 schema 时得到固定逻辑 session 和按需 Wo
     assert.equal(migrated.getConversation('group-v2')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v2')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 30);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -689,7 +695,7 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
     assert.equal(onboarding?.introUuid, null);
     assert.equal(migrated.getGroupOnboarding('group-v3-submitted')?.state, 'submitted');
     assert.deepEqual(migrated.db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -731,7 +737,7 @@ test('v5 Channel 状态表迁移后保留旧记录并允许 disabled', () => {
       `).get() as { state: string; label: string };
       assert.equal(row.state, 'disabled');
       assert.equal(row.label, 'DingTalk DWS');
-      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
     } finally {
       migrated.close();
     }
@@ -795,7 +801,7 @@ test('v11 completed 与空 decision 迁移为纯 forwarded 凭据', () => {
       assert.equal(migrated.db.prepare(
         "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='decisions'",
       ).get()!.count, 0);
-      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
     } finally {
       migrated.close();
     }

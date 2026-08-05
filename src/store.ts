@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { DEFAULT_WORKER_WARM_SECONDS, MAX_RECOVERY_ATTEMPTS, MAX_WORKER_WARM_SECONDS } from './types.js';
+import {
+  DEFAULT_RESPONSIBILITY_REMINDER_INTERVAL, DEFAULT_WORKER_WARM_SECONDS, MAX_RECOVERY_ATTEMPTS,
+  MAX_RESPONSIBILITY_REMINDER_INTERVAL, MAX_WORKER_WARM_SECONDS,
+} from './types.js';
 import type {
   AdmittedEvent,
   Conversation,
@@ -527,6 +530,14 @@ export class Store {
         this.db.exec('PRAGMA foreign_keys=ON');
       }
     }
+    const reminderIntervalVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (reminderIntervalVersion < 13) {
+      this.db.exec(`
+        ALTER TABLE conversations ADD COLUMN responsibility_reminder_interval INTEGER NOT NULL DEFAULT 5
+          CHECK(responsibility_reminder_interval BETWEEN 0 AND 99);
+        PRAGMA user_version=13;
+      `);
+    }
   }
 
   addConversation(input: {
@@ -539,6 +550,7 @@ export class Store {
     mode: ConversationMode;
     runtimeId?: string;
     workerWarmSeconds?: number;
+    responsibilityReminderInterval?: number;
   }): Conversation {
     const now = new Date().toISOString();
     const id = randomUUID();
@@ -546,17 +558,19 @@ export class Store {
     const channelProfileId = input.channelProfileId ?? 'default';
     const runtimeId = input.runtimeId ?? 'codex';
     const workerWarmSeconds = input.workerWarmSeconds ?? DEFAULT_WORKER_WARM_SECONDS;
+    const responsibilityReminderInterval = input.responsibilityReminderInterval ?? DEFAULT_RESPONSIBILITY_REMINDER_INTERVAL;
     assertWorkerWarmSeconds(workerWarmSeconds);
+    assertResponsibilityReminderInterval(responsibilityReminderInterval);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare(`
         INSERT INTO conversations(
           id,channel_id,channel_profile_id,kind,external_id,title,responsibility,mode,runtime_id,
-          worker_warm_seconds,policy_version,enabled,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,1,1,?,?)
+          worker_warm_seconds,responsibility_reminder_interval,policy_version,enabled,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,1,1,?,?)
       `).run(
         id, channelId, channelProfileId, input.kind, input.externalId, input.title,
-        input.responsibility.trim(), input.mode, runtimeId, workerWarmSeconds, now, now,
+        input.responsibility.trim(), input.mode, runtimeId, workerWarmSeconds, responsibilityReminderInterval, now, now,
       );
       this.db.prepare(`
         INSERT INTO runtime_workers(conversation_id,runtime_id,state,updated_at) VALUES(?,?,'stopped',?)
@@ -609,6 +623,14 @@ export class Store {
     assertWorkerWarmSeconds(workerWarmSeconds);
     const result = this.db.prepare('UPDATE conversations SET worker_warm_seconds=?,updated_at=? WHERE id=?')
       .run(workerWarmSeconds, new Date().toISOString(), id);
+    return Number(result.changes) === 1;
+  }
+
+  setResponsibilityReminderInterval(id: string, interval: number): boolean {
+    assertResponsibilityReminderInterval(interval);
+    const result = this.db.prepare(`
+      UPDATE conversations SET responsibility_reminder_interval=?,policy_version=policy_version+1,updated_at=? WHERE id=?
+    `).run(interval, new Date().toISOString(), id);
     return Number(result.changes) === 1;
   }
 
@@ -1662,6 +1684,7 @@ function mapConversation(row: Row | undefined): Conversation | null {
     kind: row.kind as ConversationKind, externalId: String(row.external_id),
     title: String(row.title), responsibility: String(row.responsibility), mode: row.mode as ConversationMode,
     runtimeId: String(row.runtime_id), workerWarmSeconds: Number(row.worker_warm_seconds),
+    responsibilityReminderInterval: Number(row.responsibility_reminder_interval ?? DEFAULT_RESPONSIBILITY_REMINDER_INTERVAL),
     policyVersion: Number(row.policy_version ?? 1),
     sessionGeneration: Number(row.session_generation ?? 1),
     enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
@@ -1684,6 +1707,12 @@ function parseStoredMessageTime(value: unknown): number | null {
 function assertWorkerWarmSeconds(value: number): void {
   if (!Number.isInteger(value) || value < 0 || value > MAX_WORKER_WARM_SECONDS) {
     throw new Error(`workerWarmSeconds 必须是 0-${MAX_WORKER_WARM_SECONDS} 的整数`);
+  }
+}
+
+function assertResponsibilityReminderInterval(value: number): void {
+  if (!Number.isInteger(value) || value < 0 || value > MAX_RESPONSIBILITY_REMINDER_INTERVAL) {
+    throw new Error(`responsibilityReminderInterval 必须是 0-${MAX_RESPONSIBILITY_REMINDER_INTERVAL} 的整数`);
   }
 }
 

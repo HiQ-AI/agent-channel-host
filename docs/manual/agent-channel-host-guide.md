@@ -44,11 +44,10 @@ agent-channel --help
 升级到 npm 上的最新版本：
 
 ```powershell
-npm install --global @zzusp/agent-channel-host@latest
-agent-channel --version
+agent-channel update
 ```
 
-升级前先退出交互式 View；使用 Windows 常驻任务时，先移除旧任务，升级后再重新安装。
+命令会安装 npm 上的 `@zzusp/agent-channel-host@latest` 并回读全局安装版本。它不会重启已经运行的 Host；升级前先退出交互式 View，并在升级后重启前台 Host 或 Windows 常驻任务。版本变化见仓库根目录 `CHANGELOG.md`。
 
 ## 核心概念
 
@@ -155,6 +154,7 @@ Conversation 详情默认聚焦 `CONVERSATION` 设置。用 `↑/↓` 选择字�
 - **显示名称**：确认是目标群名。
 - **enabled**：保持启用。
 - **会话职责**：填写该群中 Agent 应处理的事项和边界；留空则完全使用 Agent 工作目录中的职责。
+- **职责周期提醒(turn)**：默认每 5 个已完成 turn 重新注入一次职责；可设为 1–99，设为 0 时关闭按 turn 数量的周期提醒。首次 turn 和职责变更后的首次 turn 仍会提醒。
 - **mode**：首次接入保持 `shadow`。
 - **warm TTL**：通常保留默认值；它只决定空闲后 Worker 进程何时释放，不会删除固定 Session。
 
@@ -162,7 +162,7 @@ Conversation 详情默认聚焦 `CONVERSATION` 设置。用 `↑/↓` 选择字�
 
 ![在 Conversation 详情中设置职责、模式和 Worker 保温时间](assets/view-conversation-settings.png)
 
-_Conversation 详情集中展示会话名称、职责、shadow/reply 模式和 Worker 保温秒数。_
+_Conversation 详情集中展示会话名称、职责、职责周期提醒、shadow/reply 模式和 Worker 保温秒数。_
 
 ### Step 6：启用 Channel
 
