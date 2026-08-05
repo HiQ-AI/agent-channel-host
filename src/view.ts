@@ -3,7 +3,7 @@ import { CHANNEL_SUBSCRIPTION_MODES, configuredChannels, validateConfig, writeCo
 import { resolve } from 'node:path';
 import type { Store } from './store.js';
 import type { Conversation, ConversationMode } from './types.js';
-import { CLI_NAME } from './product.js';
+import { CLI_NAME, PRODUCT_VERSION } from './product.js';
 import { CONVERSATION_MODES, MAX_RESPONSIBILITY_REMINDER_INTERVAL, MAX_WORKER_WARM_SECONDS } from './types.js';
 import { safeName } from './paths.js';
 import { displayConversationTitle } from './conversation-title.js';
@@ -144,6 +144,11 @@ const CTRL_C = '\u0003';
 const CTRL_V_KEY = '\u0016';
 const EDITING_COPY_NOTICE = '已复制输入内容到剪贴板，可用 Ctrl+V 粘贴';
 let editingClipboard = '';
+
+function formatViewTime(date: Date = new Date()): string {
+  const m = (value: number): string => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${m(date.getMonth() + 1)}-${m(date.getDate())} ${m(date.getHours())}:${m(date.getMinutes())}:${m(date.getSeconds())}`;
+}
 
 export function renderFrameDiff(previous: string, next: string, forceFull = false): string {
   if (forceFull || previous === '') return `\u001b[H\u001b[2J${next}`;
@@ -1376,7 +1381,7 @@ export function renderManagementView(
     })
     .join('   ');
   const lines = [
-    `${ansi(CLI_NAME, 'cyan-bold', color)}  instances=${instances.length}  running=${ansi(String(running), running > 0 ? 'green-bold' : 'dim', color)}  ${state.paused ? ansi('PAUSED', 'yellow-bold', color) : ansi(`refreshed=${new Date().toISOString()}`, 'dim', color)}`,
+    `${ansi(CLI_NAME, 'cyan-bold', color)} v${PRODUCT_VERSION}  instances=${instances.length}  running=${ansi(String(running), running > 0 ? 'green-bold' : 'dim', color)}  ${state.paused ? ansi('PAUSED', 'yellow-bold', color) : ansi(`refreshed=${formatViewTime()}`, 'dim', color)}`,
     tabs,
     ansi('─'.repeat(Math.min(width, 120)), 'dim', color),
   ];
@@ -1872,7 +1877,7 @@ export function renderStatusView(
   const state = createManagementViewState();
   const snapshots = instances.map((instance) => ({ instance, snapshot: instance.store.status(showContent) }));
   const lines = [
-    `${CLI_NAME} view  instances=${instances.length}  refreshed=${new Date().toISOString()}`,
+    `${CLI_NAME} view  v${PRODUCT_VERSION}  instances=${instances.length}  refreshed=${formatViewTime()}`,
     ...renderGlobalOverview(snapshots, state, width, false, requiredTools),
     '',
     '只读聚合快照；交互模式会逐 instance 启动或 attach Host，并从总览下钻详情与 Instance 设置',

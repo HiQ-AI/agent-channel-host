@@ -7,6 +7,7 @@ import { anonymousConversationTitle } from '../src/conversation-title.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import type { Conversation } from '../src/types.js';
+import { PRODUCT_VERSION } from '../src/product.js';
 import {
   bindHostToInteractiveView, createManagementViewState, createSettingEntries, handleManagementViewInput, inspectRequiredTools, renderFrameDiff, renderManagementView,
   renderPendingOperation, renderStatusView,
@@ -30,6 +31,23 @@ test('View 总览展示 Node.js、DWS、Codex CLI 三项启动时工具探测', 
     assert.match(rendered, /Node\.js\s+ready\s+v\d+/);
     assert.match(rendered, /DWS\s+ready\s+v\d+/);
     assert.match(rendered, /Codex CLI\s+ready\s+v\d+/);
+  } finally {
+    store.close();
+  }
+});
+
+test('view 顶部显示当前版本号与标准时间格式', () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('view-version', '.', 'Agent');
+  const state = createManagementViewState();
+  try {
+    const rendered = renderManagementView([viewInstance('view-version', config, store)], state, null, [], 120);
+    const plain = stripAnsi(rendered);
+    assert.match(plain, new RegExp(`\\bv${PRODUCT_VERSION.replaceAll('.', '\\.')}`));
+    assert.match(plain, /\brefreshed=\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\b/);
+    const status = renderStatusView([viewInstance('view-version', defaultConfig('view-version-status', '.', 'Agent'), store)], false, 120);
+    assert.match(stripAnsi(status), new RegExp(`\\bv${PRODUCT_VERSION.replaceAll('.', '\\.')}`));
+    assert.match(stripAnsi(status), /\brefreshed=\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\b/);
   } finally {
     store.close();
   }
@@ -353,7 +371,7 @@ test('Instance 与内嵌 Conversation 设置共用 schema，但不提供成员�
     await entries.find((entry) => entry.key.endsWith(':enabled'))!.apply('disabled');
     await entries.find((entry) => entry.key.endsWith(':responsibility'))!.apply('新职责边界');
     const reminderInterval = entries.find((entry) => entry.key.endsWith(':responsibilityReminderInterval'))!;
-    assert.equal(reminderInterval.value, '5');
+    assert.equal(reminderInterval.value, '15');
     await reminderInterval.apply('0');
     await assert.rejects(reminderInterval.apply('100'), /0-99/);
     const state = createManagementViewState();

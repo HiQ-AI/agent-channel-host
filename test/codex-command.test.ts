@@ -72,7 +72,7 @@ test('命令进程退出后以同一 provider session ID 精确 resume', async (
   }
 });
 
-test('会话职责在首轮、每 5 个已完成 turn 和变更后首轮提醒，失败不推进周期', async () => {
+test('会话职责在首轮、每 15 个已完成 turn 和变更后首轮提醒，失败不推进周期', async () => {
   const root = resolve('.test-codex-responsibility-reminder-state');
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
