@@ -49,8 +49,8 @@ flowchart LR
 ## 前置条件
 
 - Node.js `>=22.13.0`。项目使用 Node 内置 `node:sqlite`，Node 22 可能显示 experimental warning。
-- 已安装并登录 DWS；当前验证基线为 `dws v1.0.55`。
-- 已安装并登录 Codex CLI；当前固定基线为 `codex-cli 0.145.0`。
+- 已安装并登录 DWS；最低版本为 `dws v1.0.55`，允许使用更高版本。
+- 已安装并登录 Codex CLI；最低版本为 `codex-cli 0.145.0`，允许使用更高版本。
 - DWS/Codex 凭据由各自 CLI 管理；Host 配置与数据库不复制 token、cookie 或 client secret。
 
 ## 从 npm 安装

@@ -1,4 +1,5 @@
-import type { HostConfig } from './config.js';
+import { MINIMUM_NODE_VERSION, type HostConfig } from './config.js';
+import { assertMinimumToolVersion } from './tool-version.js';
 import type { ChannelAdapter, RuntimeAdapter } from './contracts.js';
 import { statePath } from './paths.js';
 import { Store } from './store.js';
@@ -264,6 +265,7 @@ export class EventDrivenScheduler {
 }
 
 export async function runHost(config: HostConfig, options: HostRunOptions = {}): Promise<void> {
+  assertMinimumToolVersion('Node.js', MINIMUM_NODE_VERSION, process.version);
   const store = new Store(statePath(config.instance));
   const lock = options.ownerLock ?? new OwnerLock(config.instance, config.channel.profile);
   const sink = options.log ?? ((record: Record<string, unknown>) => {
