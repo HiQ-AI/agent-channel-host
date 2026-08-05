@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
-import type { HostConfig } from './config.js';
+import { MINIMUM_DWS_VERSION, type HostConfig } from './config.js';
+import { assertMinimumToolVersion } from './tool-version.js';
 import type { ChannelAdapter, ChannelHandlers } from './contracts.js';
 import type { Conversation, ConversationKind, NormalizedEvent } from './types.js';
 import { delay, stopChild, withTimeout } from './process-utils.js';
@@ -261,8 +262,10 @@ export async function dwsDoctor(config: HostConfig): Promise<Record<string, unkn
     timeout: 10_000,
     windowsHide: true,
   });
+  const actualVersion = version.stdout.trim();
+  assertMinimumToolVersion('DWS', MINIMUM_DWS_VERSION, actualVersion);
   const status = await runDwsJson(config, ['event', 'status'], 15_000);
-  return { version: version.stdout.trim(), eventStatus: status };
+  return { version: actualVersion, eventStatus: status };
 }
 
 export function normalizeDwsEvent(
@@ -504,6 +507,11 @@ export class DwsChannelAdapter implements ChannelAdapter {
 
   async start(handlers: ChannelHandlers): Promise<void> {
     if (this.owner) throw new Error('DWS ChannelAdapter 已启动');
+    const command = await resolveCommand(this.config.channel.command);
+    const version = await execResolved(command, ['--version'], {
+      cwd: this.config.runtime.cwd, encoding: 'utf8', timeout: 10_000, windowsHide: true,
+    });
+    assertMinimumToolVersion('DWS', MINIMUM_DWS_VERSION, version.stdout.trim());
     this.owner = new DwsEventOwner(
       this.config,
       (raw) => {

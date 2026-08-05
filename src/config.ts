@@ -5,7 +5,9 @@ import { z } from 'zod';
 import { configPath } from './paths.js';
 import { CONVERSATION_MODES } from './types.js';
 
-export const CURRENT_CODEX_VERSION = 'codex-cli 0.145.0';
+export const MINIMUM_NODE_VERSION = 'v22.13.0';
+export const MINIMUM_DWS_VERSION = 'dws v1.0.55';
+export const MINIMUM_CODEX_VERSION = 'codex-cli 0.145.0';
 export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
 export const DEFAULT_CODEX_EFFORT = 'low';
 export const CODEX_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
@@ -36,7 +38,7 @@ const configSchema = z.object({
   runtime: z.object({
     id: z.literal('codex'),
     command: z.string().min(1).default('codex'),
-    version: z.string().min(1).default(CURRENT_CODEX_VERSION),
+    version: z.string().min(1).default(MINIMUM_CODEX_VERSION),
     model: z.string().trim().min(1).default(DEFAULT_CODEX_MODEL),
     effort: z.enum(CODEX_REASONING_EFFORTS).default(DEFAULT_CODEX_EFFORT),
     cwd: z.string().min(1),
@@ -78,7 +80,7 @@ export function defaultConfig(instance: string, cwd: string, name: string): Host
     runtime: {
       id: 'codex',
       command: 'codex',
-      version: CURRENT_CODEX_VERSION,
+      version: MINIMUM_CODEX_VERSION,
       model: DEFAULT_CODEX_MODEL,
       effort: DEFAULT_CODEX_EFFORT,
       cwd: resolve(cwd),

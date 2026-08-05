@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
 import type { HostConfig } from './config.js';
+import { assertMinimumToolVersion } from './tool-version.js';
 import type { AgentSession } from './contracts.js';
 import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from './command.js';
 import { stopChild, withTimeout } from './process-utils.js';
@@ -31,9 +32,7 @@ export async function verifyCodexAppServer(config: HostConfig): Promise<CodexApp
     cwd: config.runtime.cwd, encoding: 'utf8', timeout: config.runtime.startupTimeoutSeconds * 1_000, windowsHide: true,
   });
   const actualVersion = version.stdout.trim();
-  if (actualVersion !== config.runtime.version) {
-    throw new Error(`Codex 版本不匹配：要求 ${config.runtime.version}，实际 ${actualVersion}`);
-  }
+  assertMinimumToolVersion('Codex', config.runtime.version, actualVersion);
   const help = await execResolved(command, ['app-server', '--help'], {
     cwd: config.runtime.cwd, encoding: 'utf8', timeout: 10_000, windowsHide: true,
   });
