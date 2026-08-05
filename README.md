@@ -152,7 +152,7 @@ Windows 默认数据目录：
 
 0.3 配置版本为 `version: 2`，删除 `protocol` 块，并把原来混在 `runtime` 中的 DWS、调度与 Codex 字段拆开。项目尚未正式部署，因此不保留两套加载路径；读取 `version: 1` 会明确失败。
 
-旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v9，新增 conversation session generation、重置审计和 `delivery_unknown` 发送终态；旧 checkpoint/成员资料列仅作为本地管理数据保留，不再自动注入 runtime。旧决策协议或 command runtime session 与当前单向 App Server 协议不兼容时，Host 会提升 generation、审计旧 provider session ID 并创建新 session，不会错误 resume 受污染 transcript。
+旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v9，保留 conversation session generation、历史重置审计和 `delivery_unknown` 发送终态；旧 checkpoint/成员资料列仅作为本地管理数据保留，不再自动注入 runtime。已有 Conversation 一律恢复其原 provider session；版本、协议、Runtime 配置或 cwd 变化不会自动轮换 session，恢复失败会明确报错并保留原映射。
 
 ## 添加授权会话
 
@@ -257,7 +257,7 @@ agent-channel view
 - `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 
-Instance 详情在 `CHANNELS` 上方直接展示并编辑 `INSTANCE` 设置，不再跳转到独立设置页；`s` 只把焦点定位到该区域。这里可修改仅供本地展示的 Agent 名称、Runtime cwd、runtime model/effort 和合批参数，不再维护 Agent 默认角色、回复签名或成员资料。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；交互式 View 管理的 Host 随配置重启。若已有 provider session 的 cwd 与新值不一致，Host 会提升 generation 后创建新 session。Conversation 详情可直接修改本地显示名称、enabled、会话职责、mode 和 warm TTL；会话职责按周期提醒进入对应 runtime session，已观察成员资料只在 Conversation 详情中只读展示。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
+Instance 详情在 `CHANNELS` 上方直接展示并编辑 `INSTANCE` 设置，不再跳转到独立设置页；`s` 只把焦点定位到该区域。这里可修改仅供本地展示的 Agent 名称、Runtime cwd、runtime model/effort 和合批参数，不再维护 Agent 默认角色、回复签名或成员资料。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；交互式 View 管理的 Host 随配置重启，但已有 Conversation 仍恢复原 provider session。Conversation 详情可直接修改本地显示名称、enabled、会话职责、mode 和 warm TTL；会话职责按周期提醒进入对应 runtime session，已观察成员资料只在 Conversation 详情中只读展示。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
 
 ### 删除 Instance 与 Conversation
 
@@ -325,7 +325,7 @@ agent-channel service remove --instance triss
 - Host 不覆盖 Codex 的 `approval_policy`、sandbox、network 或 writable roots；这些权限与 MCP/skills 一样由 runtime 自身配置加载。`runtime.cwd` 必须指向专用工作目录，部署者必须按该 runtime 的权限模型独立审计。
 - Host 不安装 compaction hook，也不覆盖用户的 developer/system 指令；短职责提醒属于低频普通上下文，不能作为权限隔离。Host 不审查 Agent 的命令、文件或内部任务行为。
 - Runtime 未返回 `turn.completed` 或命令异常退出时，仅将对应消息转发标为 failed；不会停止唯一 Channel owner 或阻断其他 Conversation。Host 不读取 Agent final text。View 只显示 `received/pending/claimed/forwarded/failed`，不提供业务完成或已处理计数。
-- inbox 完成状态仍按单条消息写入；同一批消息共享一次 runtime turn。Host 重启发现活动 claim 时会提升 session generation，避免把同一消息再次输入可能已包含该消息的旧 transcript。
+- inbox 完成状态仍按单条消息写入；同一批消息共享一次 runtime turn。Host 重启发现活动 claim 时释放并重试该消息，但始终恢复 Conversation 原 session；极端中断点可能让同一消息再次进入同一 transcript，Host 不以自动换 session 规避重复。
 
 ## 开发与验收
 
@@ -338,6 +338,6 @@ $canaryRoot = 'D:\baibu-agent\scratchpad\agent-channel-host-command-canary'
 node docs/acceptance/message-forwarding-proxy/scripts/codex-message-proxy-canary.mjs $canaryRoot
 ```
 
-自动化测试覆盖最小消息信封、实时 burst 与首次群历史合批投递、活动 turn `steer`、Host 零发送、SQLite admission/去重/sequence、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、claim/release/有界失败恢复、session generation 重置审计、跨 Channel 路由、固定 session resume、lease、ready signal、无 turn 超时、warm TTL、DWS 参数、错误处理、稳定 Conversation 选择、详情分区顺序、Runtime cwd 原子保存、Channel 行删除、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
+自动化测试覆盖最小消息信封、实时 burst 与首次群历史合批投递、活动 turn `steer`、Host 零发送、SQLite admission/去重/sequence、Conversation 删除级联、Instance 精确删除、`none/selected/all` 准入与自动建档、claim/release/有界失败恢复、跨版本/协议/cwd 的固定 session resume、跨 Channel 路由、lease、ready signal、无 turn 超时、warm TTL、DWS 参数、错误处理、稳定 Conversation 选择、详情分区顺序、Runtime cwd 原子保存、Channel 行删除、分层 `status/view`、删除确认、管理设置保存、service plan 和 CLI 实跑。
 
 真实 Codex canary 只验证 runtime CLI 与固定 session 恢复，不连接或发送 DingTalk。真实 DWS 收发必须在专用测试群/账号获得单独授权后执行。

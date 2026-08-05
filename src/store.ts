@@ -757,42 +757,6 @@ export class Store {
     );
   }
 
-  rotateConversationSession(conversationId: string, reason: string): number {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const nextGeneration = this.rotateConversationSessionInTransaction(conversationId, reason, new Date().toISOString());
-      this.db.exec('COMMIT');
-      return nextGeneration;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
-
-  private rotateConversationSessionInTransaction(conversationId: string, reason: string, now: string): number {
-    const conversation = this.db.prepare(
-      'SELECT session_generation FROM conversations WHERE id=?',
-    ).get(conversationId) as Row | undefined;
-    if (!conversation) throw new Error(`conversation 不存在：${conversationId}`);
-    const previousGeneration = Number(conversation.session_generation);
-    const nextGeneration = previousGeneration + 1;
-    const session = this.db.prepare(
-      'SELECT provider_session_id FROM runtime_sessions WHERE conversation_id=?',
-    ).get(conversationId) as Row | undefined;
-    this.db.prepare(`
-      INSERT INTO runtime_session_resets(
-        id,conversation_id,previous_generation,next_generation,previous_provider_session_id,reason,created_at
-      ) VALUES(?,?,?,?,?,?,?)
-    `).run(
-      randomUUID(), conversationId, previousGeneration, nextGeneration,
-      session?.provider_session_id ? String(session.provider_session_id) : null, reason, now,
-    );
-    this.db.prepare('DELETE FROM runtime_sessions WHERE conversation_id=?').run(conversationId);
-    this.db.prepare('UPDATE conversations SET session_generation=?,updated_at=? WHERE id=?')
-      .run(nextGeneration, now, conversationId);
-    return nextGeneration;
-  }
-
   admitEvent(
     conversation: Conversation,
     event: NormalizedEvent,
@@ -952,33 +916,6 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const now = new Date().toISOString();
-      const rotations = new Map<string, string>();
-      const interrupted = this.db.prepare(`
-        SELECT DISTINCT conversation_id FROM inbound_events WHERE processing_state='claimed'
-      `).all() as Row[];
-      for (const row of interrupted) {
-        rotations.set(String(row.conversation_id), 'host-restart-claimed-turn');
-      }
-      const retryingFailed = this.db.prepare(`
-        SELECT DISTINCT conversation_id FROM inbound_events
-        WHERE processing_state='failed' AND failure_count<?
-      `).all(MAX_RECOVERY_ATTEMPTS) as Row[];
-      for (const row of retryingFailed) {
-        const conversationId = String(row.conversation_id);
-        if (!rotations.has(conversationId)) rotations.set(conversationId, 'host-restart-retry-failed-turn');
-      }
-      const pendingGroupHistory = this.db.prepare(`
-        SELECT g.conversation_id FROM group_onboarding g
-        JOIN runtime_sessions s ON s.conversation_id=g.conversation_id
-        WHERE g.state NOT IN ('forwarded','submitted','delivered','delivery_unknown') AND g.intro_text IS NULL
-      `).all() as Row[];
-      for (const row of pendingGroupHistory) {
-        const conversationId = String(row.conversation_id);
-        if (!rotations.has(conversationId)) rotations.set(conversationId, 'host-restart-pending-group-history');
-      }
-      for (const [conversationId, reason] of rotations) {
-        this.rotateConversationSessionInTransaction(conversationId, reason, now);
-      }
       this.db.prepare(`
         UPDATE inbound_events SET processing_state='admitted',claim_owner=NULL,
           claim_expires_at_ms=NULL,claimed_at=NULL
