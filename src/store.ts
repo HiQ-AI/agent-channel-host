@@ -533,7 +533,7 @@ export class Store {
     const reminderIntervalVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
     if (reminderIntervalVersion < 13) {
       this.db.exec(`
-        ALTER TABLE conversations ADD COLUMN responsibility_reminder_interval INTEGER NOT NULL DEFAULT 5
+        ALTER TABLE conversations ADD COLUMN responsibility_reminder_interval INTEGER NOT NULL DEFAULT ${DEFAULT_RESPONSIBILITY_REMINDER_INTERVAL}
           CHECK(responsibility_reminder_interval BETWEEN 0 AND 99);
         PRAGMA user_version=13;
       `);

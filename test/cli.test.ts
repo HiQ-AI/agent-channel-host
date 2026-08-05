@@ -63,7 +63,7 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     assert.equal(addedBody.runtimeId, 'codex');
     assert.equal(addedBody.mode, 'shadow');
     assert.equal(addedBody.responsibility, '');
-    assert.equal(addedBody.workerWarmSeconds, 30);
+    assert.equal(addedBody.workerWarmSeconds, 300);
 
     const currentConfig = await loadConfig('test', join(root, 'instances', 'test', 'config.yaml'));
     currentConfig.channel.defaultModes.directs = 'reply';

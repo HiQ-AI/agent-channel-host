@@ -51,11 +51,11 @@ identity:
 
 1. 当前 Worker/Runtime session 对象的首个 turn；
 2. Conversation 职责相对上次成功注入发生变化后的首个 turn；
-3. 上次成功注入后每满 5 个已完成 turn。
+3. 上次成功注入后每满 15 个已完成 turn。
 
 其余 turn 仍只包含新增消息和最小返回约定。Host/Worker 重启后内存计数归零，因此恢复固定 provider session 的首个 turn 会再次注入；失败或被新消息中断的 turn 不推进周期，重试仍会带上原提醒。该方案不安装 hook，不覆盖用户的 `developer_instructions`，也不要求 RuntimeAdapter 暴露压缩事件。
 
-反证边界：Host 无法获知所有 runtime 的准确压缩时刻，所以不能保证“压缩后的紧接一轮”一定已有职责；最坏会在 4 个不带提醒的已完成 turn 后再次注入。用户接受以这个简单、跨 runtime 的周期策略替代精确 compaction hook。
+反证边界：Host 无法获知所有 runtime 的准确压缩时刻，所以不能保证“压缩后的紧接一轮”一定已有职责；最坏会在 14 个不带提醒的已完成 turn 后再次注入。用户接受以这个简单、跨 runtime 的周期策略替代精确 compaction hook。
 
 ### 外置资料
 
@@ -75,6 +75,6 @@ identity:
 2. `init --help`、TUI 新建和 Instance 设置均没有默认角色/回复签名。
 3. 自动建档、群搜索绑定和省略 `--responsibility` 的 CLI Conversation 职责为空。
 4. 普通消息 prompt 不含 Agent 名称、职责或签名。
-5. 首轮、职责变更后首轮和第 6/11/... 轮含一份职责提醒；中间 turn 不含；失败/中断不推进周期；空职责始终不含。
+5. 首轮、职责变更后首轮和第 16/31/... 轮含一份职责提醒；中间 turn 不含；失败/中断不推进周期；空职责始终不含。
 6. 多次 resume 保持同一 provider session，周期中间的消息 prompt 不含职责正文。
 7. TUI/CLI、全量测试、pack、README/SECURITY 和隔离状态验证通过。

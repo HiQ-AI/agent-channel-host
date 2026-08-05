@@ -1,9 +1,9 @@
 export type ConversationKind = 'group' | 'direct';
 export const CONVERSATION_MODES = ['shadow', 'reply'] as const;
 export type ConversationMode = typeof CONVERSATION_MODES[number];
-export const DEFAULT_WORKER_WARM_SECONDS = 30;
+export const DEFAULT_WORKER_WARM_SECONDS = 300;
 export const MAX_WORKER_WARM_SECONDS = 2_147_483;
-export const DEFAULT_RESPONSIBILITY_REMINDER_INTERVAL = 5;
+export const DEFAULT_RESPONSIBILITY_REMINDER_INTERVAL = 15;
 export const MAX_RESPONSIBILITY_REMINDER_INTERVAL = 99;
 export const MAX_RECOVERY_ATTEMPTS = 3;
 

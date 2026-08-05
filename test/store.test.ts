@@ -24,7 +24,7 @@ test('授权会话才可持久化，事件按会话单调编号并去重', () =>
   const conversation = store.addConversation({
     kind: 'group', externalId: 'cid-1', title: '测试群', responsibility: '回答测试问题', mode: 'shadow',
   });
-  assert.equal(conversation.responsibilityReminderInterval, 5);
+  assert.equal(conversation.responsibilityReminderInterval, 15);
   assert.equal(store.setResponsibilityReminderInterval(conversation.id, 0), true);
   assert.equal(store.getConversation(conversation.id)?.responsibilityReminderInterval, 0);
   assert.equal(store.setResponsibilityReminderInterval(conversation.id, 99), true);
@@ -136,7 +136,7 @@ test('conversation 使用中立 channel/runtime binding，并可设置 Worker wa
   assert.equal(group.channelId, 'dingtalk');
   assert.equal(group.channelProfileId, 'default');
   assert.equal(group.runtimeId, 'codex');
-  assert.equal(group.workerWarmSeconds, 30);
+  assert.equal(group.workerWarmSeconds, 300);
   assert.equal(otherChannel.runtimeId, 'claude');
   assert.equal(otherChannel.workerWarmSeconds, 12);
   assert.equal(store.findEnabledConversation('dingtalk', 'default', 'group', 'shared-id')?.id, group.id);
@@ -594,9 +594,9 @@ test('v1 会话迁移后补 onboarding 和每类生命周期默认值', () => {
     assert.equal(migrated.status().pending_group_onboarding, 1);
     assert.equal(migrated.getConversation('group-v1')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v1')?.runtimeId, 'codex');
-    assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 30);
+    assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 300);
     assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
-    assert.equal(migrated.getConversation('group-v1')?.responsibilityReminderInterval, 5);
+    assert.equal(migrated.getConversation('group-v1')?.responsibilityReminderInterval, 15);
     assert.equal(migrated.getConversation('group-v1')?.policyVersion, 1);
     migrated.close();
   } finally {
@@ -629,7 +629,7 @@ test('v2 会话迁移到当前 schema 时得到固定逻辑 session 和按需 Wo
     const migrated = new Store(path);
     assert.equal(migrated.getConversation('group-v2')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v2')?.runtimeId, 'codex');
-    assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 30);
+    assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 300);
     assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
     migrated.close();
   } finally {
@@ -688,7 +688,7 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
     assert.equal(session?.providerSessionId, 'thread-complete-v3');
     assert.equal(session?.generation, 1);
     assert.equal(session?.protocolFingerprint, 'codex-cli 0.145.0:schema-v3');
-    assert.equal(migrated.getConversation('group-v3')?.workerWarmSeconds, 30);
+    assert.equal(migrated.getConversation('group-v3')?.workerWarmSeconds, 300);
     const onboarding = migrated.getGroupOnboarding('group-v3');
     assert.equal(onboarding?.state, 'pending');
     assert.equal(onboarding?.introText, null);

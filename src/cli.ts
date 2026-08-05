@@ -126,8 +126,8 @@ conversation.command('add')
   .requiredOption('--title <title>', '显示名称；group 时用于精确搜索')
   .option('--responsibility <text>', '该会话的职责边界；省略时沿用 Agent 自身职责')
   .option('--mode <mode>', 'shadow 或 reply；省略时使用对应 Channel 默认模式')
-  .option('--warm-seconds <seconds>', '处理完成后保留 Worker 的秒数，默认 30；0 表示立即释放', parseWarmSeconds)
-  .option('--reminder-interval <turns>', '职责周期提醒间隔，默认 5；0 表示关闭', parseReminderInterval)
+  .option('--warm-seconds <seconds>', '处理完成后保留 Worker 的秒数，默认 300；0 表示立即释放', parseWarmSeconds)
+  .option('--reminder-interval <turns>', '职责周期提醒间隔，默认 15；0 表示关闭', parseReminderInterval)
   .option('--open-dingtalk-id <id>', 'direct 对端的 openDingTalkId')
   .action(async (options) => {
     if (!['group', 'direct'].includes(options.kind)) throw new Error('--kind 必须是 group 或 direct');

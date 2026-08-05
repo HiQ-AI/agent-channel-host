@@ -82,7 +82,7 @@ ReadyQueue 对同一 conversation 去重；多个 signal 只表示“状态可�
 ## Worker 生命周期
 
 - 所有 conversation 都是按需 Worker；删除 `resident/idle` 产品语义。
-- 每个 conversation 配置 `workerWarmSeconds`，默认 30 秒；`0` 表示处理完立即释放。
+- 每个 conversation 配置 `workerWarmSeconds`，默认 5 分钟（300 秒）；`0` 表示处理完立即释放。
 - session mapping 不随 Worker 释放而删除。下一次 activation 必须恢复同一 `provider_session_id + generation`；不兼容或恢复失败时 fail closed。
 - background subagent 尚未结束时 Worker 保持 warm；Host 停止时显式结束所有本地 provider 进程。
 - pending group onboarding 是一种持久工作。Host 启动 reconciliation 可唤醒对应 Worker，但不会为所有普通群预热。

@@ -173,7 +173,7 @@ agent-channel conversation add `
   --title '广场＆编辑器迭代中...' `
   --responsibility '回答编辑器相关问题、需求、方案和 bug 排查；不负责开发实现' `
   --mode shadow `
-  --warm-seconds 30
+  --warm-seconds 300
 
 agent-channel conversation list --instance triss
 ```
@@ -231,7 +231,7 @@ agent-channel verify --instance triss --id '<conversation UUID>'
 
 ## Worker 生命周期
 
-群聊和私聊都保留固定逻辑 session；Worker 活跃或保温期间 App Server 进程持续存在，以便新消息立即 steer。默认 Worker 在 inbox 清空后保温 30 秒，TTL 到期关闭 App Server 进程但不删除 provider session ID 或 Codex rollout。
+群聊和私聊都保留固定逻辑 session；Worker 活跃或保温期间 App Server 进程持续存在，以便新消息立即 steer。默认 Worker 在 inbox 清空后保温 5 分钟（300 秒），TTL 到期关闭 App Server 进程但不删除 provider session ID 或 Codex rollout。
 
 ```powershell
 agent-channel conversation worker `
@@ -244,7 +244,7 @@ agent-channel conversation worker `
 
 ## 长会话与上下文压缩
 
-自然讨论过程由各 runtime 的固定 session 保存，并由 runtime 自己 resume 与自动压缩。Host 不猜测何时发生压缩，也不安装 provider 专用 hook。Conversation 职责非空时，Host 在当前 Worker 的首个 turn、职责变更后的首个 turn，以及按该会话配置的间隔在新增消息前增加一份 `# 会话职责提醒`；间隔默认 5，可设为 1–99，设为 0 时关闭按已完成 turn 数量触发的周期提醒。失败或被抢占的 turn 不推进周期。Worker/Host 重启后恢复固定 session 的首个 turn 会再次提醒。需要更强长期约束的身份、安全和权限规则仍应放在 Agent 自己的工作目录、skill 或 runtime 原生配置中。
+自然讨论过程由各 runtime 的固定 session 保存，并由 runtime 自己 resume 与自动压缩。Host 不猜测何时发生压缩，也不安装 provider 专用 hook。Conversation 职责非空时，Host 在当前 Worker 的首个 turn、职责变更后的首个 turn，以及按该会话配置的间隔在新增消息前增加一份 `# 会话职责提醒`；间隔默认 15，可设为 1–99，设为 0 时关闭按已完成 turn 数量触发的周期提醒。失败或被抢占的 turn 不推进周期。Worker/Host 重启后恢复固定 session 的首个 turn 会再次提醒。需要更强长期约束的身份、安全和权限规则仍应放在 Agent 自己的工作目录、skill 或 runtime 原生配置中。
 
 除上述低频职责提醒外，每次消息 prompt 只有一份可直接回复的 Channel 消息来源，以及一组重复的“发送者、时间、内容”；不包含 Host 内部 Conversation UUID、成员资料或历史摘要。该周期由 RuntimeAdapter 的 session 对象维护，不依赖 Codex 专用压缩事件，Claude Code、Gemini CLI、Qwen CLI adapter 可复用同一语义。
 
