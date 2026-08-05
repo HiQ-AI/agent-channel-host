@@ -43,7 +43,7 @@ test('后台 App Server 意外发出审批请求时立即失败，不悬挂 turn
   store.close();
 });
 
-test('协议升级轮换 generation 后以数据库当前 generation 保存新 session', async () => {
+test('协议升级后仍恢复 Conversation 原 session 且 generation 不变', async () => {
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'direct', externalId: 'generation-user', title: '版本升级私聊', responsibility: '', mode: 'reply',
@@ -64,9 +64,9 @@ test('协议升级轮换 generation 后以数据库当前 generation 保存新 s
   const session = new CodexAppServerSession(defaultConfig('generation', '.', 'Agent'), conversation, fakeIdentity(), store);
   try {
     await session.start();
-    assert.equal(store.getConversation(conversation.id)?.sessionGeneration, 2);
-    assert.equal(store.getSession(conversation.id)?.generation, 2);
-    assert.notEqual(store.getSession(conversation.id)?.providerSessionId, 'old-session');
+    assert.equal(store.getConversation(conversation.id)?.sessionGeneration, 1);
+    assert.equal(store.getSession(conversation.id)?.generation, 1);
+    assert.equal(store.getSession(conversation.id)?.providerSessionId, 'old-session');
   } finally {
     await session.stop();
     store.close();

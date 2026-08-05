@@ -91,16 +91,7 @@ export class CodexAppServerSession implements AgentSession {
     });
     await this.request('initialize', { clientInfo: { name: 'agent-channel-host', version: '1.0.0' } });
     this.notify('initialized', {});
-    let existing = this.store.getSession(this.conversation.id);
-    if (existing && (
-      existing.lifecycle !== 'ready'
-      || existing.runtimeId !== this.config.runtime.id
-      || existing.protocolFingerprint !== this.identity.fingerprint
-      || existing.runtimeCwd !== this.config.runtime.cwd
-    )) {
-      this.store.rotateConversationSession(this.conversation.id, 'runtime-incompatible');
-      existing = null;
-    }
+    const existing = this.store.getSession(this.conversation.id);
     if (existing) {
       const result = await this.request('thread/resume', {
         threadId: existing.providerSessionId,

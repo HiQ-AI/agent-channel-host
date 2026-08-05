@@ -176,7 +176,7 @@ test('pending message 可事务 claim、释放并在 Host 重启时 reconciliati
   assert.deepEqual(store.recoverPendingWork(), [conversation.id]);
   assert.equal(store.status().pending_messages, 2);
   assert.equal(store.status().claimed_messages, 0);
-  assert.equal(store.getConversation(conversation.id)?.sessionGeneration, 2);
+  assert.equal(store.getConversation(conversation.id)?.sessionGeneration, 1);
   store.close();
 });
 
@@ -315,7 +315,7 @@ test('批次成功只记录 Runtime 转发凭据，不创建 Host decision 或�
   store.close();
 });
 
-test('重启发现活动 claim 时删除旧 provider session、提升 generation 并留审计', () => {
+test('重启发现活动 claim 时释放消息但保留原 provider session 和 generation', () => {
   const store = new Store(':memory:');
   const conversation = store.addConversation({
     kind: 'direct', externalId: 'rotate-user', title: '重置私聊', responsibility: '本地备注', mode: 'shadow',
@@ -341,18 +341,11 @@ test('重启发现活动 claim 时删除旧 provider session、提升 generation
   store.claimPendingEvents(conversation, 'dead-worker', 20);
 
   assert.deepEqual(store.recoverPendingWork(), [conversation.id]);
-  assert.equal(store.getSession(conversation.id), null);
-  assert.equal(store.getConversation(conversation.id)?.sessionGeneration, 2);
-  const audit = store.db.prepare(`
-    SELECT previous_generation,next_generation,previous_provider_session_id,reason
-    FROM runtime_session_resets WHERE conversation_id=?
-  `).get(conversation.id) as Record<string, unknown>;
-  assert.deepEqual({ ...audit }, {
-    previous_generation: 1,
-    next_generation: 2,
-    previous_provider_session_id: 'polluted-session',
-    reason: 'host-restart-claimed-turn',
-  });
+  assert.equal(store.getSession(conversation.id)?.providerSessionId, 'polluted-session');
+  assert.equal(store.getConversation(conversation.id)?.sessionGeneration, 1);
+  assert.equal(store.db.prepare(
+    'SELECT COUNT(*) AS count FROM runtime_session_resets WHERE conversation_id=?',
+  ).get(conversation.id)!.count, 0);
   store.close();
 });
 

@@ -109,7 +109,7 @@ test('会话职责在首轮、每 5 个已完成 turn 和变更后首轮提醒�
   }
 });
 
-test('协议不兼容时提升 generation 并新建 session，不向旧 transcript 重灌指令', async () => {
+test('协议、版本或 cwd 变化时仍精确恢复 Conversation 原 session', async () => {
   const root = resolve('.test-codex-command-rotation-state');
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
@@ -125,18 +125,17 @@ test('协议不兼容时提升 generation 并新建 session，不向旧 transcri
       generation: 1,
       lifecycle: 'ready',
       protocolFingerprint: 'old-protocol',
-      runtimeCwd: config.runtime.cwd,
+      runtimeCwd: resolve('old-cwd'),
       bootstrapTurnId: 'old-turn',
       createdAt: '2026-08-03T00:00:00.000Z',
       updatedAt: '2026-08-03T00:00:00.000Z',
     });
     const session = new CodexCommandSession(config, stored, identity, store);
-    assert.deepEqual(await session.start(), { mode: 'new', providerSessionId: null });
-    assert.equal(store.getSession(stored.id), null);
-    assert.equal(store.getConversation(stored.id)?.sessionGeneration, 2);
-    await session.deliver('new-generation');
-    assert.equal(store.getSession(stored.id)?.providerSessionId, 'fake-session-fixed');
-    assert.equal(store.getSession(stored.id)?.generation, 2);
+    assert.deepEqual(await session.start(), { mode: 'resumed', providerSessionId: 'old-provider-session' });
+    assert.equal(store.getConversation(stored.id)?.sessionGeneration, 1);
+    await session.deliver('resume-original');
+    assert.equal(store.getSession(stored.id)?.providerSessionId, 'old-provider-session');
+    assert.equal(store.getSession(stored.id)?.generation, 1);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });

@@ -141,16 +141,7 @@ export class CodexCommandSession implements AgentSession {
 
   async start(): Promise<SessionStartup> {
     if (this.started) throw new Error('Codex command session 已启动');
-    let existing = this.store.getSession(this.conversation.id);
-    if (existing) {
-      if (existing.lifecycle !== 'ready'
-        || existing.runtimeId !== this.config.runtime.id
-        || existing.protocolFingerprint !== this.identity.fingerprint
-        || existing.runtimeCwd !== this.config.runtime.cwd) {
-        this.store.rotateConversationSession(this.conversation.id, 'runtime-incompatible');
-        existing = null;
-      }
-    }
+    const existing = this.store.getSession(this.conversation.id);
     if (existing) {
       this.providerSessionId = existing.providerSessionId;
     }
