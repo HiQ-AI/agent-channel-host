@@ -247,7 +247,7 @@ agent-channel conversation worker `
 
 自然讨论过程由各 runtime 的固定 session 保存，并由 runtime 自己 resume 与自动压缩。Host 不猜测何时发生压缩，也不安装 provider 专用 hook。Conversation 职责非空时，Host 在当前 Worker 的首个 turn、职责变更后的首个 turn，以及按该会话配置的间隔在新增消息前增加一份 `# 会话职责提醒`；间隔默认 15，可设为 1–99，设为 0 时关闭按已完成 turn 数量触发的周期提醒。失败或被抢占的 turn 不推进周期。Worker/Host 重启后恢复固定 session 的首个 turn 会再次提醒。需要更强长期约束的身份、安全和权限规则仍应放在 Agent 自己的工作目录、skill 或 runtime 原生配置中。
 
-除上述低频职责提醒外，每次消息 prompt 只有一份可直接回复的 Channel 消息来源，以及一组重复的“发送者、时间、内容”；不包含 Host 内部 Conversation UUID、成员资料或历史摘要。该周期由 RuntimeAdapter 的 session 对象维护，不依赖 Codex 专用压缩事件，Claude Code、Gemini CLI、Qwen CLI adapter 可复用同一语义。
+除上述低频职责提醒外，每次消息 prompt 只有一份可直接回复的 Channel 消息来源，以及一组重复的“发送者、发送者 ID（事件可用时）、时间、内容”；不包含 Host 内部 Conversation UUID、成员资料或历史摘要。群聊事件提供发送者 ID 时，prompt 会明确要求 Agent 在需要 `@` 时调用 Channel 的实际 `@` 能力，不能只在正文拼接 `@姓名`。该周期由 RuntimeAdapter 的 session 对象维护，不依赖 Codex 专用压缩事件，Claude Code、Gemini CLI、Qwen CLI adapter 可复用同一语义。
 
 ## 前台启动与管理视图
 
