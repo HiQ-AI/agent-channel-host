@@ -7,7 +7,7 @@ import { configPath, discoverInstances, statePath } from './paths.js';
 import { Store } from './store.js';
 import { dwsDoctor, resolveExactGroup, searchDwsGroups } from './dws.js';
 import { CodexAppServerSession, verifyCodexAppServer } from './codex-app-server.js';
-import { runHost } from './host.js';
+import { runHost, type HostControl } from './host.js';
 import {
   installUserService, removeUserService, removeUserServiceIfInstalled, windowsServicePlan,
 } from './service.js';
@@ -284,10 +284,11 @@ program.command('view')
       for (const instance of instances) instance.store.close();
       throw error;
     }
-    const startedHosts = new Map<string, { instance: ViewInstance; abort: AbortController; promise: Promise<void> }>();
+    const startedHosts = new Map<string, { instance: ViewInstance; abort: AbortController; promise: Promise<void>; control: HostControl | null }>();
     const hostFailures: Array<{ instance: string; error: Error }> = [];
     const startManagedHost = (instance: ViewInstance) => {
       const abort = new AbortController();
+      const managed = { instance, abort, promise: null as unknown as Promise<void>, control: null as HostControl | null };
       const promise = runHost(instance.config, {
         signal: abort.signal,
         handleProcessSignals: false,
@@ -295,6 +296,7 @@ program.command('view')
           instance.notices.push(hostNotice(record));
           if (instance.notices.length > 50) instance.notices.shift();
         },
+        onControlReady: (control) => { managed.control = control; },
       }).catch((error) => {
         if (!abort.signal.aborted) {
           hostFailures.push({ instance: instance.name, error: error as Error });
@@ -304,7 +306,8 @@ program.command('view')
         if (startedHosts.get(instance.name)?.promise === promise) startedHosts.delete(instance.name);
       });
       instance.hostOwnership = 'view';
-      startedHosts.set(instance.name, { instance, abort, promise });
+      managed.promise = promise;
+      startedHosts.set(instance.name, managed);
     };
     const stopManagedHost = async (instance: ViewInstance) => {
       const current = startedHosts.get(instance.name);
@@ -356,6 +359,12 @@ program.command('view')
           .map((group) => ({ title: group.title, externalId: group.openConversationId })),
         deleteConversation: async (instance, conversationId) => {
           await deleteConversationWithLifecycle(instance, conversationId, stopManagedHost, startManagedHost);
+        },
+        sendToAgent: async (instance, conversationId, text) => {
+          const host = startedHosts.get(instance.name);
+          if (!host) throw new Error('当前 Instance Host 未运行');
+          if (!host.control) throw new Error('当前 Instance Host 正在启动，请稍后重试');
+          host.control.submitConversationInput(conversationId, text);
         },
         deleteInstance: async (instance) => {
           await deleteInstanceWithLifecycle(instance, stopManagedHost, removeUserServiceIfInstalled);

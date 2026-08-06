@@ -9,6 +9,11 @@ import { CodexRuntimeAdapter } from './codex-runtime.js';
 import { ConversationWorker } from './actor.js';
 import type { AdmittedEvent, Conversation, NormalizedEvent } from './types.js';
 import { anonymousConversationTitle, discoveredConversationTitle, isGeneratedConversationTitle } from './conversation-title.js';
+import { randomUUID } from 'node:crypto';
+
+export interface HostControl {
+  submitConversationInput(conversationId: string, text: string): void;
+}
 
 interface WorkerHandle {
   worker: ConversationWorker;
@@ -22,6 +27,7 @@ export interface HostRunOptions {
   channel?: ChannelAdapter;
   runtime?: RuntimeAdapter;
   ownerLock?: { ownerId: string; acquire(): Promise<void>; release(): Promise<void> };
+  onControlReady?: (control: HostControl) => void;
 }
 
 export interface ConversationResolution {
@@ -143,10 +149,6 @@ export class EventDrivenScheduler {
 
     const runtime = this.runtimes.get(conversation.runtimeId);
     if (!runtime) return Promise.reject(new Error(`没有 runtime adapter：${conversation.runtimeId}`));
-    const channel = this.channels.get(channelKey(conversation.channelId, conversation.channelProfileId));
-    if (!channel) {
-      return Promise.reject(new Error(`没有 channel adapter：${conversation.channelId}/${conversation.channelProfileId}`));
-    }
     const session = runtime.createSession(conversation);
     const worker = new ConversationWorker(
       this.config,
@@ -425,6 +427,38 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     const recovered = scheduler.reconcile();
     startupRecoveryComplete = true;
     for (const conversationId of startupSignals) scheduler.signal(conversationId);
+    options.onControlReady?.({
+      submitConversationInput: (conversationId, text) => {
+        const conversation = store.getConversation(conversationId);
+        if (!conversation) throw new Error('Conversation 已不存在');
+        if (!conversation.enabled) throw new Error('Conversation 已停用，不能发送给 Agent');
+        const content = text.trim();
+        if (!content) throw new Error('发送内容不能为空');
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        const admitted = store.admitEvent(conversation, {
+          channelId: conversation.channelId,
+          channelProfileId: conversation.channelProfileId,
+          fingerprint: `view:${id}`,
+          eventId: `view:${id}`,
+          messageId: null,
+          conversationExternalId: conversation.externalId,
+          conversationTitle: conversation.title,
+          kind: conversation.kind,
+          senderId: null,
+          senderName: 'View 用户（本人）',
+          content,
+          quotedMessage: null,
+          forwardedMessages: null,
+          occurredAt: now,
+          receivedAt: now,
+          source: { type: 'view_manual_input' },
+        });
+        if (!admitted.admitted) throw new Error('本地输入重复，未再次投递');
+        scheduler?.signal(conversation.id);
+        log({ type: 'VIEW_INPUT_ADMITTED', conversationId: conversation.id, sequence: admitted.event?.sequence });
+      },
+    });
     if (recovered.length > 0) log({ type: 'PENDING_RECONCILED', conversations: recovered.length });
     log({
       type: 'HOST_READY', pid: process.pid, channels: channels.size, runtimes: runtimes.size,

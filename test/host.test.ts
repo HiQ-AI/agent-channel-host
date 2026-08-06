@@ -4,7 +4,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { defaultConfig } from '../src/config.js';
 import type { AgentSession, ChannelAdapter, ChannelHandlers, RuntimeAdapter } from '../src/contracts.js';
-import { EventDrivenScheduler, resolveEventConversation, runHost } from '../src/host.js';
+import { EventDrivenScheduler, resolveEventConversation, runHost, type HostControl } from '../src/host.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { Store } from '../src/store.js';
 import type { Conversation, DeliveryRun, NormalizedEvent } from '../src/types.js';
@@ -462,6 +462,43 @@ test('Host 先建立实时订阅再补拉，补拉完成前不启动 Worker，�
     await waitFor(() => runtime.sessions[0]?.prompts.length === 1);
     assert.match(runtime.sessions[0]!.prompts[0]!, /订阅建立后实时到达/);
     assert.match(runtime.sessions[0]!.prompts[0]!, /离线期间历史消息/);
+    abort.abort();
+    await running;
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+    else process.env.AGENT_CHANNEL_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('View 本地输入写入同一 Conversation inbox 并唤醒固定 session', async () => {
+  const root = resolve('.test-host-view-input');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const previous = process.env.AGENT_CHANNEL_HOME;
+  process.env.AGENT_CHANNEL_HOME = root;
+  const config = defaultConfig('view-input', '.', 'Agent');
+  config.channel.enabled = false;
+  const setup = new Store(resolve(root, 'instances', 'view-input', 'state.sqlite3'));
+  const conversation = setup.addConversation({
+    kind: 'direct', externalId: 'view-user', title: 'View 私聊', responsibility: '', mode: 'shadow',
+  });
+  setup.close();
+  const runtime = new FakeRuntime();
+  const abort = new AbortController();
+  let control: HostControl | null = null;
+  try {
+    const running = runHost(config, {
+      signal: abort.signal, handleProcessSignals: false,
+      runtime,
+      ownerLock: new FakeOwnerLock('view-input-owner'), log: () => undefined,
+      onControlReady: (ready) => { control = ready; },
+    });
+    await waitFor(() => control !== null);
+    (control as unknown as HostControl).submitConversationInput(conversation.id, '请处理这条\n本地输入');
+    await waitFor(() => runtime.sessions[0]?.prompts.length === 1);
+    assert.match(runtime.sessions[0]!.prompts[0]!, /发送者：View 用户（本人）/);
+    assert.match(runtime.sessions[0]!.prompts[0]!, /请处理这条\n本地输入/);
     abort.abort();
     await running;
   } finally {
