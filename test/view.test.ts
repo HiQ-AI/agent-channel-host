@@ -927,17 +927,47 @@ test('会话详情可输入多行消息并发送给当前固定 Agent session', 
       sent.push(text);
     },
   };
+  const transcript = {
+    state: 'ready' as const,
+    sessionIdPrefix: 'fixed-session',
+    revision: '1:1',
+    message: null,
+    entries: Array.from({ length: 12 }, (_, index) => ({
+      id: String(index + 1),
+      kind: index % 3 === 0 ? 'reasoning' as const : index % 3 === 1 ? 'tool' as const : 'assistant' as const,
+      at: `2026-08-07T01:00:${String(index).padStart(2, '0')}.000Z`,
+      label: index % 3 === 0 ? '思考' : index % 3 === 1 ? 'exec_command' : 'Agent',
+      content: `${index === 0 ? '\u001b[2J' : ''}历史执行记录 ${index + 1}`,
+      ...(index % 3 === 1 ? { result: '关键结果' } : {}),
+    })),
+  };
   try {
     await handleManagementViewInput('i', state, [instance], () => undefined, actions);
     assert.equal(state.editing?.purpose, 'agent-input');
+    const inputView = renderManagementView(
+      [instance], state, store.conversationDetail(conversation.id), [], 100, true, false, 28, [], transcript,
+    );
+    assert.match(inputView, /真人介入 \/ View 输入群/);
+    assert.match(inputView, /执行记录（历史 \+ 实时，session=fixed-session…）/);
+    assert.match(inputView, /历史执行记录 12/);
+    assert.equal(inputView.includes('\u001b[2J'), false);
+    assert.ok(inputView.indexOf('执行记录') < inputView.indexOf('输入消息'));
+    await handleManagementViewInput('\u001b[5~', state, [instance], () => undefined, actions);
+    assert.equal(state.editing?.timelineScroll, 6);
+    await handleManagementViewInput('\u001b[6~', state, [instance], () => undefined, actions);
+    assert.equal(state.editing?.timelineScroll, 0);
     await handleManagementViewInput('第一行', state, [instance], () => undefined, actions);
     await handleManagementViewInput('\n', state, [instance], () => undefined, actions);
     await handleManagementViewInput('第二行', state, [instance], () => undefined, actions);
     assert.equal(state.editing?.value, '第一行\n第二行');
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     assert.deepEqual(sent, ['第一行\n第二行']);
-    assert.equal(state.editing, null);
+    assert.equal(state.editing?.purpose, 'agent-input');
+    assert.equal(state.editing?.value, '');
     assert.equal(state.notice, '消息已进入当前会话的 Agent inbox');
+    await handleManagementViewInput('\u001b', state, [instance], () => undefined, actions);
+    assert.equal(state.editing, null);
+    assert.equal(state.notice, '已关闭真人介入页面');
   } finally {
     store.close();
   }
