@@ -33,6 +33,7 @@ flowchart LR
 - 每个 turn 在批次头只附带一次 `渠道 / 类型 / 目标ID / 群名称或对方名称`，其中目标 ID 是 Runtime 可直接回复的 Channel 外部地址，不是 Host 内部 Conversation UUID；随后各条消息仍只转发“发送者、时间、内容”，引用和合并转发折叠进内容。Host 不附带成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息来源前增加一份短提醒。
 - Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不覆盖 provider 的 developer/system 指令；Agent 的长期规则由 runtime 工作目录自行维护。
 - 每条消息先写 SQLite WAL，提交后才发进程内 ready signal；静默窗口内已到达的消息按 `maxBatchMessages` 合成一次 runtime 输入。Host 启动时释放中断的 claim，并重新投递未转发及未达 3 次上限的失败消息。Runtime `turn.completed` 只转换为 inbox `forwarded` 凭据，不产生 Host `completed/processed/decision`；它不代表 Agent 已逐条处理、已回复或业务已完成。
+- DWS 订阅若收到严格匹配“处理中/进行中/生成中/思考中”的短机器人占位消息，Channel 会用同一 `messageId` 在最多 15 秒内有界回查；非占位正文连续两次相同后才进入 inbox。普通消息不回查、不增加延迟；查询失败或到期时使用最后取得的正文，始终不丢弃原事件。
 - quiet window 用于合并短时间内连续到达的消息。活动 turn 开始后才到达的新消息在 `turn/started` 确认后通过 `turn/steer` 追加到同一 turn，不打断、不排队到下一 turn，也不并发 resume 同一 session；steer 失败时 Worker fail closed，重启恢复后重试，绝不静默改投下一 turn。
 - Host 不配置 turn 超时，也不会因运行时长或新消息终止活动 turn。Host 停止或 runtime 自身退出造成的未完成 claim 在下次启动时恢复。
 - Host 启动时先建立群聊/私聊实时 consumer，再以每个已启用 Conversation 的最后消息时间为起点补拉至 consumer ready 时刻；没有本地消息时从 Conversation 创建时间开始。补拉起点向前重叠 2 秒，历史与实时交叠消息按同一 Conversation 的消息 ID 或 fingerprint 去重。补拉完成前不启动 Worker，任一会话补拉失败则 Host fail closed，不伪装 ready。

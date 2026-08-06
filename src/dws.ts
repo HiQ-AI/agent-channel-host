@@ -48,6 +48,64 @@ export interface DwsGroupSearchResult {
   openConversationId: string;
 }
 
+const BOT_MESSAGE_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
+
+export function isProvisionalBotMessage(content: unknown): boolean {
+  if (typeof content !== 'string') return false;
+  const value = content.trim();
+  if (!value || value.length > 120) return false;
+  return /^(?:机器人)?(?:消息|回复)?\s*(?:正在)?(?:处理|进行|生成|思考)中(?:[，,。.!！…\s]*(?:请稍候|请稍后(?:查看|再试)?))?[。.！!…\s]*$/.test(value);
+}
+
+export function parseDwsMessageLookup(value: unknown, messageId: string): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const messages = (value as Record<string, unknown>).messages;
+  if (!Array.isArray(messages)) return null;
+  for (const item of messages) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const message = item as Record<string, unknown>;
+    if (text(firstValue(message, ['messageId', 'openMessageId', 'message_id'])) !== messageId) continue;
+    return text(firstValue(message, ['text', 'content', 'message']));
+  }
+  return null;
+}
+
+export async function stabilizeDwsBotMessage(
+  config: HostConfig,
+  event: NormalizedEvent,
+  runner: typeof runDwsJson = runDwsJson,
+  sleep: (milliseconds: number) => Promise<void> = delay,
+  delays: readonly number[] = BOT_MESSAGE_REFRESH_DELAYS_MS,
+  signal?: AbortSignal,
+): Promise<NormalizedEvent> {
+  if (!event.messageId || !isProvisionalBotMessage(event.content)) return event;
+  let latest = typeof event.content === 'string' ? event.content : '';
+  let previousFinal: string | null = null;
+  for (const milliseconds of delays) {
+    await sleep(milliseconds);
+    if (signal?.aborted) return latest === event.content ? event : refreshedEvent(event, latest);
+    try {
+      const value = await runner(config, ['chat', '+messages-mget', '--msg-ids', event.messageId]);
+      const refreshed = parseDwsMessageLookup(value, event.messageId);
+      if (!refreshed) continue;
+      latest = refreshed;
+      if (isProvisionalBotMessage(refreshed)) {
+        previousFinal = null;
+        continue;
+      }
+      if (previousFinal === refreshed) return refreshedEvent(event, refreshed);
+      previousFinal = refreshed;
+    } catch {
+      // 有界回查失败不影响原消息进入 durable inbox。
+    }
+  }
+  return latest === event.content ? event : refreshedEvent(event, latest);
+}
+
+function refreshedEvent(event: NormalizedEvent, content: string): NormalizedEvent {
+  return { ...event, content, source: { ...event.source, stabilizedBy: 'messages-mget' } };
+}
+
 export async function runDwsJson(config: HostConfig, args: string[], timeoutMs = 30_000): Promise<unknown> {
   const fullArgs = [...args, '--format', 'json', ...profileArgs(config)];
   const command = await resolveCommand(config.channel.command);
@@ -496,6 +554,8 @@ export class DwsEventOwner {
 export class DwsChannelAdapter implements ChannelAdapter {
   readonly descriptor;
   private owner: DwsEventOwner | null = null;
+  private readonly eventQueues = new Map<string, Promise<void>>();
+  private stabilizationAbort = new AbortController();
 
   constructor(private readonly config: HostConfig) {
     this.descriptor = {
@@ -507,6 +567,7 @@ export class DwsChannelAdapter implements ChannelAdapter {
 
   async start(handlers: ChannelHandlers): Promise<void> {
     if (this.owner) throw new Error('DWS ChannelAdapter 已启动');
+    this.stabilizationAbort = new AbortController();
     const command = await resolveCommand(this.config.channel.command);
     const version = await execResolved(command, ['--version'], {
       cwd: this.config.runtime.cwd, encoding: 'utf8', timeout: 10_000, windowsHide: true,
@@ -517,7 +578,22 @@ export class DwsChannelAdapter implements ChannelAdapter {
       (raw) => {
         const event = normalizeDwsEvent(raw, this.descriptor.channelId, this.descriptor.profileId);
         if (!event) return;
-        handlers.onEvent(event);
+        const key = `${event.kind}:${event.conversationExternalId}`;
+        const previous = this.eventQueues.get(key) ?? Promise.resolve();
+        const current = previous
+          .then(async () => handlers.onEvent(await stabilizeDwsBotMessage(
+            this.config,
+            event,
+            runDwsJson,
+            (milliseconds) => delayUntilAbort(milliseconds, this.stabilizationAbort.signal),
+            BOT_MESSAGE_REFRESH_DELAYS_MS,
+            this.stabilizationAbort.signal,
+          )))
+          .catch(handlers.onFatal)
+          .finally(() => {
+            if (this.eventQueues.get(key) === current) this.eventQueues.delete(key);
+          });
+        this.eventQueues.set(key, current);
       },
       handlers.onFatal,
     );
@@ -525,7 +601,10 @@ export class DwsChannelAdapter implements ChannelAdapter {
   }
 
   async stop(): Promise<void> {
+    this.stabilizationAbort.abort();
     await this.owner?.stop();
+    await Promise.allSettled(this.eventQueues.values());
+    this.eventQueues.clear();
     this.owner = null;
   }
 
@@ -550,6 +629,19 @@ export class DwsChannelAdapter implements ChannelAdapter {
     return count;
   }
 
+}
+
+function delayUntilAbort(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, milliseconds);
+    function done(): void {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+    signal.addEventListener('abort', done, { once: true });
+  });
 }
 
 function profileArgs(config: HostConfig): string[] {

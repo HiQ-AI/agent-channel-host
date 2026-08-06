@@ -12,12 +12,71 @@ import {
   fetchConversationBackfill,
   fetchRecentGroupHistory,
   inspectDwsBusStatus,
+  isProvisionalBotMessage,
   normalizeDwsEvent,
   parseDwsCommandFailure,
+  parseDwsMessageLookup,
   searchDwsGroups,
   subscribedEventKeys,
+  stabilizeDwsBotMessage,
 } from '../src/dws.js';
 import { defaultConfig } from '../src/config.js';
+
+test('只将严格短占位文案识别为机器人未完成消息', () => {
+  for (const value of ['处理中', '消息正在处理中，请稍候', '回复生成中……', '机器人消息思考中，请稍后查看']) {
+    assert.equal(isProvisionalBotMessage(value), true, value);
+  }
+  for (const value of ['这个需求正在处理中，预计明天完成', '处理中断', '进行中的任务有哪些？', '', null]) {
+    assert.equal(isProvisionalBotMessage(value), false, String(value));
+  }
+});
+
+test('按 messageId 解析回查正文，并等待非占位内容连续两次稳定', async () => {
+  const config = defaultConfig('bot-stabilization', '.', 'Agent');
+  const event = normalizeDwsEvent({
+    type: GROUP_EVENT, event_id: 'bot-event', message_id: 'bot-message', conversation_id: 'bot-group',
+    sender: '测试机器人', content: '消息正在处理中，请稍候',
+  })!;
+  const responses = ['回复第一段', '最终完整回复', '最终完整回复'];
+  const calls: string[][] = [];
+  const stabilized = await stabilizeDwsBotMessage(config, event, async (_config, args) => {
+    calls.push(args);
+    const text = responses.shift()!;
+    return { foundCount: 1, messages: [{ messageId: 'bot-message', text }] };
+  }, async () => undefined, [0, 0, 0, 0]);
+  assert.equal(stabilized.content, '最终完整回复');
+  assert.equal(stabilized.source.stabilizedBy, 'messages-mget');
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0], ['chat', '+messages-mget', '--msg-ids', 'bot-message']);
+  assert.equal(parseDwsMessageLookup({ messages: [{ messageId: 'other', text: '错误消息' }] }, 'bot-message'), null);
+});
+
+test('机器人回查失败或未稳定时不丢消息，并使用最后取得的正文', async () => {
+  const config = defaultConfig('bot-stabilization-fallback', '.', 'Agent');
+  const event = normalizeDwsEvent({
+    type: DIRECT_EVENT, event_id: 'bot-event-fallback', message_id: 'bot-message-fallback',
+    sender_open_dingtalk_id: 'bot-user', sender: '测试机器人', content: '进行中…',
+  })!;
+  let call = 0;
+  const stabilized = await stabilizeDwsBotMessage(config, event, async () => {
+    call++;
+    if (call === 1) throw new Error('temporary');
+    return { messages: [{ messageId: 'bot-message-fallback', text: call === 2 ? '处理中' : '目前可取得的正文' }] };
+  }, async () => undefined, [0, 0, 0]);
+  assert.equal(stabilized.content, '目前可取得的正文');
+
+  const fallback = await stabilizeDwsBotMessage(config, event, async () => { throw new Error('unavailable'); }, async () => undefined, [0]);
+  assert.equal(fallback, event);
+
+  const abort = new AbortController();
+  let queried = false;
+  const stopped = await stabilizeDwsBotMessage(config, event, async () => {
+    queried = true;
+    return null;
+  }, async () => { abort.abort(); }, [1_000], abort.signal);
+  assert.equal(stopped, event);
+  assert.equal(queried, false);
+});
 
 test('授权会话才可持久化，事件按会话单调编号并去重', () => {
   const store = new Store(':memory:');
