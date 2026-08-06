@@ -142,6 +142,7 @@ const BRACKETED_PASTE_START = '\u001b[200~';
 const BRACKETED_PASTE_END = '\u001b[201~';
 const CTRL_C = '\u0003';
 const CTRL_V_KEY = '\u0016';
+const SHIFT_ENTER_IN_BRACKETED = /^\u001b\[(\d+);(\d+)u$/;
 const EDITING_COPY_NOTICE = '已复制输入内容到剪贴板，可用 Ctrl+V 粘贴';
 let editingClipboard = '';
 
@@ -523,12 +524,13 @@ export async function handleManagementViewInput(
   const forward = key === '\r' || key === '\n' || key === '\u001b[C';
   if (state.editing) {
     const isMultiline = Boolean(state.editing.multiline);
+    const normalized = normalizeEditingKey(key);
     if (key === '\u001b') {
       state.editing = null;
       state.notice = '已取消修改';
       return;
     }
-    if (isSaveKey(key, isMultiline)) {
+    if (isSaveKey(normalized, isMultiline)) {
       const editingInstance = settingsInstance ?? detailInstance;
       if (!editingInstance) throw new Error('没有可配置的 instance');
       const selectedId = state.detailConversationId;
@@ -548,7 +550,7 @@ export async function handleManagementViewInput(
       state.editing = null;
       return;
     }
-    if (key === CTRL_C) {
+    if (normalized === CTRL_C) {
       if (isMultiline) {
         state.notice = copyEditingValue(state.editing.value);
       } else {
@@ -556,7 +558,7 @@ export async function handleManagementViewInput(
       }
       return;
     }
-    if (isMultiline && key === CTRL_V_KEY) {
+    if (isMultiline && normalized === CTRL_V_KEY) {
       if (editingClipboard === '') {
         state.notice = '剪贴板为空，无法粘贴';
         return;
@@ -565,12 +567,12 @@ export async function handleManagementViewInput(
       state.notice = '已粘贴';
       return;
     }
-    const insertedText = extractInsertedText(key);
+    const insertedText = extractInsertedText(normalized);
     if (insertedText !== null) {
       editSingleLine(state.editing, insertedText, { multiline: isMultiline });
       return;
     }
-    editSingleLine(state.editing, key, { multiline: isMultiline });
+    editSingleLine(state.editing, normalized, { multiline: isMultiline });
     return;
   }
   if (key === CTRL_C) {
@@ -1437,7 +1439,7 @@ export function renderManagementView(
     : state.editing
       ? ansi(
         `编辑 ${state.editing.label}  方向键移动  Home/End 行首尾  Ctrl+Home/End 全文首尾  Backspace/Delete 删除  Enter 保存  ${state.editing.multiline
-          ? 'Esc 取消  Ctrl+V 粘贴  Ctrl+C 复制'
+          ? 'Esc 取消  Shift+Enter 换行  Ctrl+V 粘贴  Ctrl+C 复制'
           : 'Esc 取消'}`,
         'cyan-bold',
         color,
@@ -2405,6 +2407,16 @@ function normalizeLineEndings(value: string): string {
 
 function isSingleLine(value: string): boolean {
   return /^[\r\n]+$/.test(value);
+}
+
+function normalizeEditingKey(key: string): string {
+  const csiMatch = SHIFT_ENTER_IN_BRACKETED.exec(key);
+  if (!csiMatch) return key;
+  const keyCode = Number(csiMatch[1] ?? NaN);
+  const modifier = Number(csiMatch[2] ?? NaN);
+  if (keyCode !== 13 || !Number.isFinite(modifier)) return key;
+  const hasShift = ((modifier - 1) & 1) === 1;
+  return hasShift ? '\n' : '\r';
 }
 
 function extractBracketedPasteText(key: string): string | null {

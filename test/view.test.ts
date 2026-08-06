@@ -1031,6 +1031,10 @@ test('长文本设置页支持粘贴换行内容、复制与粘贴快捷键', as
     state.editing.cursor = 2;
     await handleManagementViewInput('\n', state, [instance], () => undefined);
     assert.equal(state.editing?.value, '清空\n');
+    state.editing.value = '清空';
+    state.editing.cursor = 2;
+    await handleManagementViewInput('\u001b[13;2u', state, [instance], () => undefined);
+    assert.equal(state.editing?.value, '清空\n');
     await handleManagementViewInput('\u0016', state, [instance], () => undefined);
     assert.equal(state.editing?.value, '清空\n旧职责第一段\n第二段');
     await handleManagementViewInput('\r', state, [instance], () => undefined);
