@@ -1060,6 +1060,24 @@ test('多行文本编辑按视觉行上下移动并保持显示列', async () =>
     assert.equal(state.editing.cursor, 0);
     await handleManagementViewInput('\u001b[1;5F', state, [instance], () => undefined);
     assert.equal(state.editing.cursor, 10);
+
+    for (const sample of [
+      { value: 'abcd\nx\nwxyz', middleEnd: 6, firstEnd: 4, lastEnd: 11 },
+      { value: 'abcd\r\nx\r\nwxyz', middleEnd: 7, firstEnd: 4, lastEnd: 13 },
+    ]) {
+      state.editing.value = sample.value;
+      state.editing.cursor = sample.lastEnd;
+      state.editing.preferredColumn = null;
+      renderManagementView([instance], state, null, [], 11);
+      await handleManagementViewInput('\u001b[A', state, [instance], () => undefined);
+      assert.equal(state.editing.cursor, sample.middleEnd);
+      await handleManagementViewInput('\u001b[A', state, [instance], () => undefined);
+      assert.equal(state.editing.cursor, sample.firstEnd, '短行末尾不应阻断继续向上移动');
+      await handleManagementViewInput('\u001b[B', state, [instance], () => undefined);
+      assert.equal(state.editing.cursor, sample.middleEnd);
+      await handleManagementViewInput('\u001b[B', state, [instance], () => undefined);
+      assert.equal(state.editing.cursor, sample.lastEnd, '短行末尾不应阻断继续向下移动');
+    }
   } finally {
     store.close();
   }

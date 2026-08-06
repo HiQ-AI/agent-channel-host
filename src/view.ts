@@ -2499,10 +2499,11 @@ function visualLineLayout(value: string, width: number): VisualLine[] {
   for (let index = 0; index < characters.length; index += 1) {
     const character = characters[index]!;
     if (character === '\r') {
+      const end = index;
       if (index + 1 < characters.length && characters[index + 1] === '\n') {
         index += 1;
       }
-      lines.push({ start, end: index, width: used });
+      lines.push({ start, end, width: used });
       start = index + 1;
       used = 0;
       continue;
@@ -2526,9 +2527,12 @@ function visualLineLayout(value: string, width: number): VisualLine[] {
 }
 
 function visualLineAtCursor(lines: VisualLine[], cursor: number): number {
-  const index = lines.findIndex((line, lineIndex) => (
-    cursor < line.end || (cursor === line.end && lineIndex === lines.length - 1)
-  ));
+  const index = lines.findIndex((line, lineIndex) => {
+    const next = lines[lineIndex + 1];
+    if (!next) return cursor <= line.end;
+    if (cursor < line.end) return true;
+    return next.start > line.end && cursor < next.start;
+  });
   return index < 0 ? lines.length - 1 : index;
 }
 
