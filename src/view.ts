@@ -1768,14 +1768,13 @@ function renderConversationDetail(
   const conversationId = text(conversation.id);
   const conversationSettings = conversationId ? conversationSettingEntries(instance, conversationId) : [];
   state.selectedSetting = clamp(state.selectedSetting, 0, Math.max(0, conversationSettings.length - 1));
-  const pageSize = clamp(height - 26, 1, 8);
+  const pageSize = clamp(height - 25, 1, 8);
   const memberWindow = viewportRows(members, state.selectedMember, pageSize);
   const messageWindow = viewportRows(messages, state.selectedMessage, pageSize);
   const lines = [
     heading(`会话详情 / ${text(conversation.title) ?? '-'}`, color),
     `Channel ${text(conversation.channelId)}/${text(conversation.channelProfileId)}  kind=${text(conversation.kind)}  enabled=${statusText(text(conversation.enabled) ?? 'false', color)}`,
     `mode=${statusText(text(conversation.mode) ?? 'unknown', color)}  runtime=${text(conversation.runtimeId)}  policy=v${text(conversation.policyVersion)}  warm=${text(conversation.workerWarmSeconds)}s`,
-    `职责：${displayResponsibility(conversation.responsibility)}`,
     `Session ${statusText(text(session.lifecycle) ?? 'unprovisioned', color)}  id=${text(session.providerSessionPrefix) ?? '-'}  generation=${text(session.generation) ?? '-'}`,
     `Worker ${statusText(text(worker.state) ?? 'stopped', color)}  pid=${text(worker.processId) ?? '-'}  error=${errorText(text(worker.error) ?? '-', color)}`,
     ansi(`Checkpoint v${text(context.version) ?? '0'} @ seq ${text(context.throughSequence) ?? '0'}  facts=${text(context.facts) ?? '0'} decisions=${text(context.decisions) ?? '0'} commitments=${text(context.commitments) ?? '0'} open=${text(context.openQuestions) ?? '0'}`, 'cyan', color),

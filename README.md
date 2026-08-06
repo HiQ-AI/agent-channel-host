@@ -267,7 +267,7 @@ agent-channel view
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 - 在群聊或私聊的 Conversation 详情页按 `i`，可直接把本地输入投递给该会话的 Agent。内容进入同一持久化 inbox 并唤醒原固定 session，不会先发到钉钉，也不依赖 DWS 能否订阅到本人消息或 Channel 是否启用。编辑时 `Shift+Enter` 换行、`Enter` 提交、`Esc` 取消；Agent 收到的发送者标记为“View 用户（本人）”，同时保留当前钉钉目标上下文。
 
-Instance 详情在 `CHANNELS` 上方直接展示并编辑 `INSTANCE` 设置，不再跳转到独立设置页；`s` 只把焦点定位到该区域。这里可修改仅供本地展示的 Agent 名称、Runtime cwd、runtime model/effort 和合批参数，不再维护 Agent 默认角色、回复签名或成员资料。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；交互式 View 管理的 Host 随配置重启，但已有 Conversation 仍恢复原 provider session。Conversation 详情可直接修改本地显示名称、enabled、会话职责、职责周期提醒间隔、mode 和 warm TTL；提醒间隔为 0 时关闭按 turn 数量触发的周期提醒。已观察成员资料只在 Conversation 详情中只读展示。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
+Instance 详情在 `CHANNELS` 上方直接展示并编辑 `INSTANCE` 设置，不再跳转到独立设置页；`s` 只把焦点定位到该区域。这里可修改仅供本地展示的 Agent 名称、Runtime cwd、runtime model/effort 和合批参数，不再维护 Agent 默认角色、回复签名或成员资料。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；交互式 View 管理的 Host 随配置重启，但已有 Conversation 仍恢复原 provider session。Conversation 详情可直接修改本地显示名称、enabled、会话职责、职责周期提醒间隔、mode 和 warm TTL；提醒间隔为 0 时关闭按 turn 数量触发的周期提醒。会话职责只在 `CONVERSATION` 设置表中展示和编辑，不再在详情头部重复展开长文本。已观察成员资料只在 Conversation 详情中只读展示。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
 
 ### 删除 Instance 与 Conversation
 
