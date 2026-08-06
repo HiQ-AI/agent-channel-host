@@ -908,6 +908,40 @@ test('大表格按终端高度建立内部视口，并以 sequence 保持消息�
   }
 });
 
+test('会话详情可输入多行消息并发送给当前固定 Agent session', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('view-agent-input', '.', 'Agent');
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'view-input-group', title: 'View 输入群', responsibility: '', mode: 'shadow',
+  });
+  const instance = viewInstance('view-agent-input', config, store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.detailConversationId = conversation.id;
+  state.selectedConversationId = conversation.id;
+  const sent: string[] = [];
+  const actions = {
+    sendToAgent: async (_instance: ViewInstance, conversationId: string, text: string) => {
+      assert.equal(conversationId, conversation.id);
+      sent.push(text);
+    },
+  };
+  try {
+    await handleManagementViewInput('i', state, [instance], () => undefined, actions);
+    assert.equal(state.editing?.purpose, 'agent-input');
+    await handleManagementViewInput('第一行', state, [instance], () => undefined, actions);
+    await handleManagementViewInput('\n', state, [instance], () => undefined, actions);
+    await handleManagementViewInput('第二行', state, [instance], () => undefined, actions);
+    assert.equal(state.editing?.value, '第一行\n第二行');
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.deepEqual(sent, ['第一行\n第二行']);
+    assert.equal(state.editing, null);
+    assert.equal(state.notice, '消息已进入当前会话的 Agent inbox');
+  } finally {
+    store.close();
+  }
+});
+
 test('设置、群搜索和 Instance 向导支持光标移动、Home End 及前后删除', async () => {
   const store = new Store(':memory:');
   const config = defaultConfig('cursor-edit', '.', 'Agent');

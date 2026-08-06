@@ -60,6 +60,8 @@ export interface ManagementViewState {
     multiline?: boolean;
     wrapWidth?: number;
     preferredColumn?: number | null;
+    purpose?: 'setting' | 'agent-input';
+    conversationId?: string;
   } | null;
   creatingInstance: InstanceCreationDraft | null;
   groupSearch: GroupSearchDraft | null;
@@ -108,6 +110,7 @@ export interface ManagementViewActions {
   searchGroups?(instance: ViewInstance, query: string): Promise<ChannelGroupCandidate[]>;
   deleteInstance?(instance: ViewInstance): Promise<void>;
   deleteConversation?(instance: ViewInstance, conversationId: string): Promise<void>;
+  sendToAgent?(instance: ViewInstance, conversationId: string, text: string): Promise<void>;
 }
 
 interface DestructiveConfirmation {
@@ -531,6 +534,20 @@ export async function handleManagementViewInput(
     if (isSaveKey(key, isMultiline)) {
       const editingInstance = settingsInstance ?? detailInstance;
       if (!editingInstance) throw new Error('没有可配置的 instance');
+      if (state.editing.purpose === 'agent-input') {
+        if (!actions.sendToAgent || !state.editing.conversationId) {
+          throw new Error('当前 View 入口未提供发送给 Agent 的能力');
+        }
+        const text = state.editing.value;
+        await withPendingOperation(
+          state,
+          `发送消息给 ${state.editing.label}`,
+          () => actions.sendToAgent!(editingInstance, state.editing!.conversationId!, text),
+        );
+        state.editing = null;
+        state.notice = '消息已进入当前会话的 Agent inbox';
+        return;
+      }
       const selectedId = state.detailConversationId;
       const entry = createSettingEntries(
         editingInstance.config,
@@ -649,6 +666,21 @@ export async function handleManagementViewInput(
   if (state.tab === 'overview' && state.detailConversationId && detailInstance && key.toLowerCase() === 'e') {
     state.conversationDetailFocus = 'settings';
     state.selectedSetting = 0;
+    state.notice = null;
+    return;
+  }
+  if (state.tab === 'overview' && state.detailConversationId && detailInstance && key.toLowerCase() === 'i') {
+    const conversation = detailInstance.store.getConversation(state.detailConversationId);
+    if (!conversation) throw new Error('Conversation 已不存在');
+    state.editing = {
+      key: `agent-input:${conversation.id}`,
+      label: `发送给 Agent · ${conversation.title}`,
+      value: '',
+      cursor: 0,
+      multiline: true,
+      purpose: 'agent-input',
+      conversationId: conversation.id,
+    };
     state.notice = null;
     return;
   }
@@ -1447,7 +1479,7 @@ export function renderManagementView(
         : state.settingsInstanceName
           ? ansi('↑/↓ 选择  →/Enter 编辑或选择下一项  ←/Esc 返回  q 退出', 'dim', color)
           : state.detailConversationId
-            ? ansi('Tab 切换 CONVERSATION/MESSAGES/MEMBERS  ↑/↓ 选择或滚动  →/Enter 编辑设置  e/s 定位设置  d 删除  ←/Esc 返回  q 退出', 'dim', color)
+            ? ansi('i 发送给 Agent  Tab 切换 CONVERSATION/MESSAGES/MEMBERS  ↑/↓ 选择或滚动  →/Enter 编辑设置  e/s 定位设置  d 删除  ←/Esc 返回  q 退出', 'dim', color)
             : state.detailChannel
               ? ansi('↑/↓ 选择  →/Enter 操作、选择下一项或下钻  d 删除会话  ←/Esc 返回 Instance  q 退出', 'dim', color)
           : state.detailInstanceName
