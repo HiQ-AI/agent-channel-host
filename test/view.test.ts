@@ -498,7 +498,8 @@ test('management view 从会话详情直接编辑内嵌 Conversation 设置', as
     const expandedFrame = renderManagementView(
       instances, state, store.conversationDetail(conversation.id), [], 120, false, false, 60,
     );
-    assert.match(expandedFrame, /耗时操作放后台；$/m, '长职责应显式换行完整展示，不能被帧出口截断');
+    assert.doesNotMatch(expandedFrame, /^职责：/m, '详情头部不应重复展开长会话职责');
+    assert.match(expandedFrame, /会话职责/, '会话职责仍保留在 CONVERSATION 设置表中');
     await handleManagementViewInput('q', state, instances, () => { stopped = true; });
     assert.equal(stopped, false);
     assert.equal(state.exitConfirmation, true);
@@ -883,7 +884,7 @@ test('大表格按终端高度建立内部视口，并以 sequence 保持消息�
     assert.match(detailView, /CONTENT/);
     assert.match(detailView, /用于视口验证的消息内容/);
     assert.match(detailView, /RECENT MESSAGES.*MEMBERS/);
-    assert.match(detailView, /显示 1-3 \/ 共 10 条/);
+    assert.match(detailView, /显示 1-4 \/ 共 10 条/);
     await handleManagementViewInput('\u001b[6~', state, [instance], () => undefined);
     const selectedSequence = state.selectedMessageSequence;
     assert.ok(selectedSequence !== null);
