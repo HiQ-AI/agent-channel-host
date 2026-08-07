@@ -3,6 +3,7 @@ import type { RecentMessage } from './dws.js';
 
 interface MessageEnvelope {
   sender: string;
+  senderId?: string | null;
   time: string;
   content: string;
 }
@@ -37,6 +38,7 @@ export function nextResponsibilityReminderCount(current: number, injected: boole
 export function batchPrompt(conversation: Conversation, events: AdmittedEvent[]): string {
   return messagePrompt(conversation, events.map((event) => ({
     sender: event.senderName ?? event.senderId ?? '未知',
+    senderId: event.senderId,
     time: event.occurredAt ?? event.receivedAt,
     content: messageContent(event.content, event.quotedMessage, event.forwardedMessages),
   })));
@@ -55,10 +57,19 @@ function messagePrompt(conversation: Conversation, messages: MessageEnvelope[]):
     `目标ID：${conversation.externalId}`,
     `${targetName}：${conversation.title}`,
   ].join('\n');
+  const mentionHint = conversation.kind === 'group' && messages.some((message) => message.senderId)
+    ? '\n\n如需 @ 发送者，必须使用对应的发送者ID调用 Channel 的实际 @ 能力；仅在正文写 @姓名 不会产生实际 @。'
+    : '';
   const rendered = messages
-    .map((message, index) => `消息 ${index + 1}\n发送者：${message.sender}\n时间：${message.time}\n内容：${message.content}`)
+    .map((message, index) => [
+      `消息 ${index + 1}`,
+      `发送者：${message.sender}`,
+      ...(message.senderId ? [`发送者ID：${message.senderId}`] : []),
+      `时间：${message.time}`,
+      `内容：${message.content}`,
+    ].join('\n'))
     .join('\n\n');
-  return `${source}\n\n以下是收到的消息：\n\n${rendered}`;
+  return `${source}${mentionHint}\n\n以下是收到的消息：\n\n${rendered}`;
 }
 
 export function messageContent(content: unknown, quoted: unknown, forwarded: unknown): string {
