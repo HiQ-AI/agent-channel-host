@@ -274,7 +274,7 @@ export class ConversationWorker {
   }
 }
 
-function historyEvent(conversation: Conversation, message: { sender: string; time: string; content: string }): NormalizedEvent {
+function historyEvent(conversation: Conversation, message: { sender: string; senderId: string | null; time: string; content: string }): NormalizedEvent {
   const fingerprint = createHash('sha256').update(
     `history\0${conversation.channelProfileId}\0${conversation.externalId}\0${message.sender}\0${message.time}\0${message.content}`,
   ).digest('hex');
@@ -287,7 +287,7 @@ function historyEvent(conversation: Conversation, message: { sender: string; tim
     conversationExternalId: conversation.externalId,
     conversationTitle: conversation.title,
     kind: 'group',
-    senderId: null,
+    senderId: message.senderId,
     senderName: message.sender,
     content: message.content,
     quotedMessage: null,

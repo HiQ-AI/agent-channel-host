@@ -31,7 +31,7 @@ flowchart LR
 - 新 Codex 会话执行 `thread/start`，已有会话执行 `thread/resume` 并校验必须精确恢复原 ID，否则 fail closed，不创建第二条 session。Host 不配置 output schema，也不解析 Agent final text。
 - Host 启动 Runtime adapter 时会为已登记 Conversation 创建或恢复固定 Codex session，并通过 `thread/name/set` 写入桌面端可见名称：群聊为 `群聊 · <会话名称>`，私聊为 `私聊 · <会话名称>`。这里只完成 session 登记和命名，不启动 turn，也不改变消息到达后才按需启动 Worker 的资源模型。
 - Codex App Server 是纯后台 Runtime：新建和恢复 thread 都显式固定 `approvalPolicy=never`、`sandbox=danger-full-access`，不提供本地审批入口。若 Runtime 仍发出 command/file/permissions/MCP elicitation/requestUserInput 等交互请求，Host 立即终止该 Worker turn并保留消息供恢复，绝不等待人工输入或让 claim 永久悬挂。
-- 每个 turn 在批次头只附带一次 `渠道 / 类型 / 目标ID / 群名称或对方名称`，其中目标 ID 是 Runtime 可直接回复的 Channel 外部地址，不是 Host 内部 Conversation UUID；随后各条消息仍只转发“发送者、时间、内容”，引用和合并转发折叠进内容。Host 不附带成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息来源前增加一份短提醒。
+- 每个 turn 在批次头只附带一次 `渠道 / 类型 / 目标ID / 群名称或对方名称`，其中目标 ID 是 Runtime 可直接回复的 Channel 外部地址，不是 Host 内部 Conversation UUID；钉钉群消息还携带每条消息的发送者 `openDingTalkId` 和结构化 @ 规则，Agent 需要同时使用正文 `<@openDingTalkId>` 占位符与 DWS `--at-open-dingtalk-ids` 参数，不能只输出 `@姓名` 纯文字。引用和合并转发折叠进内容。Host 不附带成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息来源前增加一份短提醒。
 - Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不覆盖 provider 的 developer/system 指令；Agent 的长期规则由 runtime 工作目录自行维护。
 - 每条消息先写 SQLite WAL，提交后才发进程内 ready signal；静默窗口内已到达的消息按 `maxBatchMessages` 合成一次 runtime 输入。Host 启动时释放中断的 claim，并重新投递未转发及未达 3 次上限的失败消息。Runtime `turn.completed` 只转换为 inbox `forwarded` 凭据，不产生 Host `completed/processed/decision`；它不代表 Agent 已逐条处理、已回复或业务已完成。
 - DWS 订阅若收到严格匹配“处理中/进行中/生成中/思考中”的短机器人占位消息，Channel 会用同一 `messageId` 在最多 15 秒内有界回查；非占位正文连续两次相同后才进入 inbox。普通消息不回查、不增加延迟；查询失败或到期时使用最后取得的正文，始终不丢弃原事件。
@@ -248,7 +248,7 @@ agent-channel conversation worker `
 
 自然讨论过程由各 runtime 的固定 session 保存，并由 runtime 自己 resume 与自动压缩。Host 不猜测何时发生压缩，也不安装 provider 专用 hook。Conversation 职责非空时，Host 在当前 Worker 的首个 turn、职责变更后的首个 turn，以及按该会话配置的间隔在新增消息前增加一份 `# 会话职责提醒`；间隔默认 15，可设为 1–99，设为 0 时关闭按已完成 turn 数量触发的周期提醒。失败或被抢占的 turn 不推进周期。Worker/Host 重启后恢复固定 session 的首个 turn 会再次提醒。需要更强长期约束的身份、安全和权限规则仍应放在 Agent 自己的工作目录、skill 或 runtime 原生配置中。
 
-除上述低频职责提醒外，每次消息 prompt 只有一份可直接回复的 Channel 消息来源，以及一组重复的“发送者、时间、内容”；不包含 Host 内部 Conversation UUID、成员资料或历史摘要。该周期由 RuntimeAdapter 的 session 对象维护，不依赖 Codex 专用压缩事件，Claude Code、Gemini CLI、Qwen CLI adapter 可复用同一语义。
+除上述低频职责提醒外，每次消息 prompt 只有一份可直接回复的 Channel 消息来源，以及一组重复的“发送者、发送者 ID（事件可用时）、时间、内容”；不包含 Host 内部 Conversation UUID、成员资料或历史摘要。群聊事件提供发送者 ID 时，prompt 会明确要求 Agent 在需要 `@` 时调用 Channel 的实际 `@` 能力，不能只在正文拼接 `@姓名`。该周期由 RuntimeAdapter 的 session 对象维护，不依赖 Codex 专用压缩事件，Claude Code、Gemini CLI、Qwen CLI adapter 可复用同一语义。
 
 ## 前台启动与管理视图
 
