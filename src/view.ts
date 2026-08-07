@@ -8,7 +8,6 @@ import { CONVERSATION_MODES, MAX_RESPONSIBILITY_REMINDER_INTERVAL, MAX_WORKER_WA
 import { safeName } from './paths.js';
 import { displayConversationTitle } from './conversation-title.js';
 import { execResolved, resolveCommand } from './command.js';
-import type { AgentTranscript, AgentTranscriptEntry } from './codex-transcript.js';
 
 type Json = Record<string, unknown>;
 type TaggedJson = Json & { instance: string };
@@ -63,7 +62,6 @@ export interface ManagementViewState {
     preferredColumn?: number | null;
     purpose?: 'setting' | 'agent-input';
     conversationId?: string;
-    timelineScroll?: number;
   } | null;
   creatingInstance: InstanceCreationDraft | null;
   groupSearch: GroupSearchDraft | null;
@@ -113,7 +111,6 @@ export interface ManagementViewActions {
   deleteInstance?(instance: ViewInstance): Promise<void>;
   deleteConversation?(instance: ViewInstance, conversationId: string): Promise<void>;
   sendToAgent?(instance: ViewInstance, conversationId: string, text: string): Promise<void>;
-  readAgentTranscript?(instance: ViewInstance, conversationId: string): AgentTranscript;
 }
 
 interface DestructiveConfirmation {
@@ -308,9 +305,6 @@ export async function runView(
         settingsInstance.configFile,
       )
       : [];
-    const agentTranscript = state.editing?.purpose === 'agent-input' && detailInstance && state.editing.conversationId
-      ? actions.readAgentTranscript?.(detailInstance, state.editing.conversationId) ?? null
-      : null;
     return renderManagementView(
       instances,
       state,
@@ -321,7 +315,6 @@ export async function runView(
       color,
       process.stdout.rows ?? 30,
       requiredTools,
-      agentTranscript,
     );
   };
   const writeFrame = (frame: string) => {
@@ -539,11 +532,6 @@ export async function handleManagementViewInput(
       state.notice = wasAgentInput ? '已关闭真人介入页面' : '已取消修改';
       return;
     }
-    if (state.editing.purpose === 'agent-input' && (key === '\u001b[5~' || key === '\u001b[6~')) {
-      const direction = key === '\u001b[5~' ? 6 : -6;
-      state.editing.timelineScroll = Math.max(0, (state.editing.timelineScroll ?? 0) + direction);
-      return;
-    }
     if (isSaveKey(key, isMultiline)) {
       const editingInstance = settingsInstance ?? detailInstance;
       if (!editingInstance) throw new Error('没有可配置的 instance');
@@ -559,7 +547,6 @@ export async function handleManagementViewInput(
         );
         state.editing.value = '';
         state.editing.cursor = 0;
-        state.editing.timelineScroll = 0;
         state.notice = '消息已进入当前会话的 Agent inbox';
         return;
       }
@@ -695,7 +682,6 @@ export async function handleManagementViewInput(
       multiline: true,
       purpose: 'agent-input',
       conversationId: conversation.id,
-      timelineScroll: 0,
     };
     state.notice = null;
     return;
@@ -1411,7 +1397,6 @@ export function renderManagementView(
   color = false,
   height = 30,
   requiredTools: RequiredToolStatus[] = [],
-  agentTranscript: AgentTranscript | null = null,
 ): string {
   normalizeSelection(state, instances);
   const selectedInstance = instances[state.selectedInstance] ?? null;
@@ -1435,7 +1420,7 @@ export function renderManagementView(
     ansi('─'.repeat(Math.min(width, 120)), 'dim', color),
   ];
   if (state.editing?.purpose === 'agent-input') {
-    lines.push(...renderAgentInputPanel(state.editing, agentTranscript, width, Math.max(10, height - 6), color));
+    lines.push(...renderAgentInputPanel(state.editing, width, Math.max(10, height - 6), color));
   }
   else if (state.editing) lines.push(...renderEditingPanel(state.editing, width, color));
   else if (state.tab === 'settings') lines.push(...renderGlobalSettings(instances, width, color));
@@ -1489,7 +1474,7 @@ export function renderManagementView(
     : state.editing
       ? ansi(
         `${state.editing.purpose === 'agent-input' ? '真人介入' : `编辑 ${state.editing.label}`}  方向键移动  Home/End 行首尾  Ctrl+Home/End 全文首尾  Backspace/Delete 删除  Enter ${state.editing.purpose === 'agent-input' ? '发送' : '保存'}  ${state.editing.multiline
-          ? `${state.editing.purpose === 'agent-input' ? 'PageUp/PageDown 浏览历史  ' : ''}Shift+Enter 换行  Esc ${state.editing.purpose === 'agent-input' ? '返回' : '取消'}  Ctrl+V 粘贴  Ctrl+C 复制`
+          ? `Shift+Enter 换行  Esc ${state.editing.purpose === 'agent-input' ? '返回' : '取消'}  Ctrl+V 粘贴  Ctrl+C 复制`
           : 'Esc 取消'}`,
         'cyan-bold',
         color,
@@ -2558,7 +2543,6 @@ function renderTextCursor(value: string, cursor: number): string {
 
 function renderAgentInputPanel(
   editing: NonNullable<ManagementViewState['editing']>,
-  transcript: AgentTranscript | null,
   width: number,
   panelHeight: number,
   color: boolean,
@@ -2567,70 +2551,19 @@ function renderAgentInputPanel(
   const contentWidth = Math.max(1, innerWidth - 1);
   editing.wrapWidth = contentWidth;
   const allInputRows = wrapAnsiLine(renderTextCursor(editing.value, editing.cursor), contentWidth);
-  const inputCapacity = Math.max(1, Math.min(5, panelHeight - 9));
+  const inputCapacity = Math.max(1, panelHeight - 6);
   const cursorRow = Math.max(0, allInputRows.findIndex((line) => line.includes('█')));
   const inputStart = clamp(cursorRow - inputCapacity + 1, 0, Math.max(0, allInputRows.length - inputCapacity));
   const inputRows = allInputRows.slice(inputStart, inputStart + inputCapacity);
-  const timelineCapacity = Math.max(1, panelHeight - inputRows.length - 8);
-  const timelineRows = transcript?.entries.flatMap((entry) => renderTranscriptEntry(entry, contentWidth)) ?? [];
-  if (timelineRows.length === 0) {
-    timelineRows.push(safeTranscriptText(transcript?.message ?? '正在读取固定 Agent session 的执行记录…'));
-  }
-  const maxScroll = Math.max(0, timelineRows.length - timelineCapacity);
-  const scroll = clamp(editing.timelineScroll ?? 0, 0, maxScroll);
-  editing.timelineScroll = scroll;
-  const timelineStart = Math.max(0, timelineRows.length - timelineCapacity - scroll);
-  const visibleTimeline = timelineRows.slice(timelineStart, timelineStart + timelineCapacity);
-  const session = transcript?.sessionIdPrefix ? `session=${transcript.sessionIdPrefix}…` : 'session=尚未创建';
-  const status = transcript?.state === 'ready' ? '历史 + 实时' : '等待记录';
   return [
     heading(`真人介入 / ${editing.label.replace(/^发送给 Agent · /, '')}`, color),
-    ansi(`执行记录（${status}，${session}）`, transcript?.state === 'error' ? 'red-bold' : 'dim', color),
-    `┌${'─'.repeat(innerWidth + 2)}┐`,
-    ...visibleTimeline.map((line) => `│ ${pad(line, innerWidth)} │`),
-    `└${'─'.repeat(innerWidth + 2)}┘`,
-    ansi(
-      `记录 ${transcript?.entries.length ?? 0} 项 · 显示行 ${timelineStart + 1}-${timelineStart + visibleTimeline.length}/${timelineRows.length}${scroll > 0 ? ' · 已离开最新位置' : ' · 跟随最新'}`,
-      'dim',
-      color,
-    ),
+    ansi('输入内容将直接进入当前 Conversation 的 Agent inbox；发送后可继续输入。', 'dim', color),
+    '',
     ansi('输入消息', 'cyan-bold', color),
     `┌${'─'.repeat(innerWidth + 2)}┐`,
     ...inputRows.map((line) => `│ ${pad(line, innerWidth)} │`),
     `└${'─'.repeat(innerWidth + 2)}┘`,
   ];
-}
-
-function renderTranscriptEntry(entry: AgentTranscriptEntry, width: number): string[] {
-  const symbol = ({ user: '›', assistant: '●', reasoning: '✻', tool: '⚙' })[entry.kind];
-  const clock = transcriptClock(entry.at);
-  const content = safeTranscriptText(entry.content);
-  const lines = wrapAnsiLine(`${clock} ${symbol} ${entry.label}：${content}`, width);
-  if (entry.kind === 'tool' && entry.result !== undefined) {
-    const result = compactTranscriptText(entry.result, 240);
-    lines.push(...wrapAnsiLine(`  └ ${entry.error ? '失败' : '结果'}：${result}`, width));
-  }
-  return lines;
-}
-
-function transcriptClock(value: string | null): string {
-  if (!value) return '--:--:--';
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return value.slice(11, 19) || '--:--:--';
-  const p = (part: number): string => String(part).padStart(2, '0');
-  return `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
-}
-
-function safeTranscriptText(value: string): string {
-  return value
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '')
-    .replace(/\t/g, '  ');
-}
-
-function compactTranscriptText(value: string, max: number): string {
-  const compact = safeTranscriptText(value).replace(/\s+/g, ' ').trim();
-  return compact.length <= max ? compact : `${compact.slice(0, max)}…`;
 }
 
 function renderEditingPanel(
