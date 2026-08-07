@@ -29,7 +29,7 @@ flowchart LR
 - 常驻的是 Host、DWS 长连接和 SQLite 状态，不是每个 conversation 的 provider 进程。消息到达后才启动一轮 runtime CLI；该轮完成后进程退出。
 - 每个群聊/私聊持久化自己的 `(channel, profile, conversation) → runtime + provider session ID + generation`，彼此不共享 transcript。
 - 新 Codex 会话执行 `thread/start`，已有会话执行 `thread/resume` 并校验必须精确恢复原 ID，否则 fail closed，不创建第二条 session。Host 不配置 output schema，也不解析 Agent final text。
-- Host 启动 Runtime adapter 时会为已登记 Conversation 创建或恢复固定 Codex session，并通过 `thread/name/set` 写入桌面端可见名称：群聊为 `群聊 · <会话名称>`，私聊为 `私聊 · <会话名称>`。这里只完成 session 登记和命名，不启动 turn，也不改变消息到达后才按需启动 Worker 的资源模型。
+- Host 不再为了在 Codex 桌面端展示而预建、恢复或命名全部 Conversation thread。固定 Codex session 只在消息触发 Worker 时创建或恢复，避免桌面端低频刷新内容形成误导性的旁路查看入口。
 - Codex App Server 是纯后台 Runtime：新建和恢复 thread 都显式固定 `approvalPolicy=never`、`sandbox=danger-full-access`，不提供本地审批入口。若 Runtime 仍发出 command/file/permissions/MCP elicitation/requestUserInput 等交互请求，Host 立即终止该 Worker turn并保留消息供恢复，绝不等待人工输入或让 claim 永久悬挂。
 - 每个 turn 在批次头只附带一次 `渠道 / 类型 / 目标ID / 群名称或对方名称`，其中目标 ID 是 Runtime 可直接回复的 Channel 外部地址，不是 Host 内部 Conversation UUID；钉钉群消息还携带每条消息的发送者 `openDingTalkId` 和结构化 @ 规则，Agent 需要同时使用正文 `<@openDingTalkId>` 占位符与 DWS `--at-open-dingtalk-ids` 参数，不能只输出 `@姓名` 纯文字。引用和合并转发折叠进内容。Host 不附带成员资料、历史摘要或 checkpoint。Conversation 配置了职责时，仅按下述周期在消息来源前增加一份短提醒。
 - Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不覆盖 provider 的 developer/system 指令；Agent 的长期规则由 runtime 工作目录自行维护。

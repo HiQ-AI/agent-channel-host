@@ -13,9 +13,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   static async create(config: HostConfig, store: Store): Promise<CodexRuntimeAdapter> {
     const identity = await verifyCodexAppServer(config);
-    const adapter = new CodexRuntimeAdapter(config, store, identity);
-    await provisionCodexConversationThreads(config, store, identity);
-    return adapter;
+    return new CodexRuntimeAdapter(config, store, identity);
   }
 
   get descriptor() {
@@ -33,21 +31,5 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       throw new Error(`conversation runtime=${conversation.runtimeId}，当前 adapter=${this.descriptor.runtimeId}`);
     }
     return new CodexAppServerSession(this.config, conversation, this.identity, this.store);
-  }
-}
-
-export async function provisionCodexConversationThreads(
-  config: HostConfig,
-  store: Store,
-  identity: CodexAppServerIdentity,
-): Promise<void> {
-  for (const conversation of store.listConversations()) {
-    if (conversation.runtimeId !== config.runtime.id) continue;
-    const session = new CodexAppServerSession(config, conversation, identity, store);
-    try {
-      await session.start();
-    } finally {
-      await session.stop();
-    }
   }
 }
