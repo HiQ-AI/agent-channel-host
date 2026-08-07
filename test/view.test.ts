@@ -930,14 +930,25 @@ test('会话详情可输入多行消息并发送给当前固定 Agent session', 
   try {
     await handleManagementViewInput('i', state, [instance], () => undefined, actions);
     assert.equal(state.editing?.purpose, 'agent-input');
+    const inputView = renderManagementView(
+      [instance], state, store.conversationDetail(conversation.id), [], 100, true, false, 28,
+    );
+    assert.match(inputView, /真人介入 \/ View 输入群/);
+    assert.match(inputView, /输入内容将直接进入当前 Conversation 的 Agent inbox/);
+    assert.match(inputView, /输入消息/);
+    assert.doesNotMatch(inputView, /执行记录|历史 \+ 实时|session=/);
     await handleManagementViewInput('第一行', state, [instance], () => undefined, actions);
     await handleManagementViewInput('\n', state, [instance], () => undefined, actions);
     await handleManagementViewInput('第二行', state, [instance], () => undefined, actions);
     assert.equal(state.editing?.value, '第一行\n第二行');
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     assert.deepEqual(sent, ['第一行\n第二行']);
-    assert.equal(state.editing, null);
+    assert.equal(state.editing?.purpose, 'agent-input');
+    assert.equal(state.editing?.value, '');
     assert.equal(state.notice, '消息已进入当前会话的 Agent inbox');
+    await handleManagementViewInput('\u001b', state, [instance], () => undefined, actions);
+    assert.equal(state.editing, null);
+    assert.equal(state.notice, '已关闭真人介入页面');
   } finally {
     store.close();
   }
@@ -1030,6 +1041,24 @@ test('多行文本编辑按视觉行上下移动并保持显示列', async () =>
     assert.equal(state.editing.cursor, 0);
     await handleManagementViewInput('\u001b[1;5F', state, [instance], () => undefined);
     assert.equal(state.editing.cursor, 10);
+
+    for (const sample of [
+      { value: 'abcd\nx\nwxyz', middleEnd: 6, firstEnd: 4, lastEnd: 11 },
+      { value: 'abcd\r\nx\r\nwxyz', middleEnd: 7, firstEnd: 4, lastEnd: 13 },
+    ]) {
+      state.editing.value = sample.value;
+      state.editing.cursor = sample.lastEnd;
+      state.editing.preferredColumn = null;
+      renderManagementView([instance], state, null, [], 11);
+      await handleManagementViewInput('\u001b[A', state, [instance], () => undefined);
+      assert.equal(state.editing.cursor, sample.middleEnd);
+      await handleManagementViewInput('\u001b[A', state, [instance], () => undefined);
+      assert.equal(state.editing.cursor, sample.firstEnd, '短行末尾不应阻断继续向上移动');
+      await handleManagementViewInput('\u001b[B', state, [instance], () => undefined);
+      assert.equal(state.editing.cursor, sample.middleEnd);
+      await handleManagementViewInput('\u001b[B', state, [instance], () => undefined);
+      assert.equal(state.editing.cursor, sample.lastEnd, '短行末尾不应阻断继续向下移动');
+    }
   } finally {
     store.close();
   }

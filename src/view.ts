@@ -527,8 +527,9 @@ export async function handleManagementViewInput(
   if (state.editing) {
     const isMultiline = Boolean(state.editing.multiline);
     if (key === '\u001b') {
+      const wasAgentInput = state.editing.purpose === 'agent-input';
       state.editing = null;
-      state.notice = '已取消修改';
+      state.notice = wasAgentInput ? '已关闭真人介入页面' : '已取消修改';
       return;
     }
     if (isSaveKey(key, isMultiline)) {
@@ -544,7 +545,8 @@ export async function handleManagementViewInput(
           `发送消息给 ${state.editing.label}`,
           () => actions.sendToAgent!(editingInstance, state.editing!.conversationId!, text),
         );
-        state.editing = null;
+        state.editing.value = '';
+        state.editing.cursor = 0;
         state.notice = '消息已进入当前会话的 Agent inbox';
         return;
       }
@@ -1417,7 +1419,10 @@ export function renderManagementView(
     tabs,
     ansi('─'.repeat(Math.min(width, 120)), 'dim', color),
   ];
-  if (state.editing) lines.push(...renderEditingPanel(state.editing, width, color));
+  if (state.editing?.purpose === 'agent-input') {
+    lines.push(...renderAgentInputPanel(state.editing, width, Math.max(10, height - 6), color));
+  }
+  else if (state.editing) lines.push(...renderEditingPanel(state.editing, width, color));
   else if (state.tab === 'settings') lines.push(...renderGlobalSettings(instances, width, color));
   else if (state.groupSearch && detailInstance) lines.push(...renderGroupSearch(detailInstance, state.groupSearch, width, color));
   else if (settingsInstance) {
@@ -1468,8 +1473,8 @@ export function renderManagementView(
         ? ansi('↑/↓ 选择  →/Enter 绑定或打开  ←/Esc 修改关键词  q 退出', 'dim', color)
     : state.editing
       ? ansi(
-        `编辑 ${state.editing.label}  方向键移动  Home/End 行首尾  Ctrl+Home/End 全文首尾  Backspace/Delete 删除  Enter 保存  ${state.editing.multiline
-          ? 'Esc 取消  Ctrl+V 粘贴  Ctrl+C 复制'
+        `${state.editing.purpose === 'agent-input' ? '真人介入' : `编辑 ${state.editing.label}`}  方向键移动  Home/End 行首尾  Ctrl+Home/End 全文首尾  Backspace/Delete 删除  Enter ${state.editing.purpose === 'agent-input' ? '发送' : '保存'}  ${state.editing.multiline
+          ? `Shift+Enter 换行  Esc ${state.editing.purpose === 'agent-input' ? '返回' : '取消'}  Ctrl+V 粘贴  Ctrl+C 复制`
           : 'Esc 取消'}`,
         'cyan-bold',
         color,
@@ -2479,10 +2484,11 @@ function visualLineLayout(value: string, width: number): VisualLine[] {
   for (let index = 0; index < characters.length; index += 1) {
     const character = characters[index]!;
     if (character === '\r') {
+      const end = index;
       if (index + 1 < characters.length && characters[index + 1] === '\n') {
         index += 1;
       }
-      lines.push({ start, end: index, width: used });
+      lines.push({ start, end, width: used });
       start = index + 1;
       used = 0;
       continue;
@@ -2506,9 +2512,12 @@ function visualLineLayout(value: string, width: number): VisualLine[] {
 }
 
 function visualLineAtCursor(lines: VisualLine[], cursor: number): number {
-  const index = lines.findIndex((line, lineIndex) => (
-    cursor < line.end || (cursor === line.end && lineIndex === lines.length - 1)
-  ));
+  const index = lines.findIndex((line, lineIndex) => {
+    const next = lines[lineIndex + 1];
+    if (!next) return cursor <= line.end;
+    if (cursor < line.end) return true;
+    return next.start > line.end && cursor < next.start;
+  });
   return index < 0 ? lines.length - 1 : index;
 }
 
@@ -2530,6 +2539,31 @@ function renderTextCursor(value: string, cursor: number): string {
   const characters = Array.from(value);
   const index = clamp(cursor, 0, characters.length);
   return `${characters.slice(0, index).join('')}█${characters.slice(index).join('')}`;
+}
+
+function renderAgentInputPanel(
+  editing: NonNullable<ManagementViewState['editing']>,
+  width: number,
+  panelHeight: number,
+  color: boolean,
+): string[] {
+  const innerWidth = Math.max(10, width - 4);
+  const contentWidth = Math.max(1, innerWidth - 1);
+  editing.wrapWidth = contentWidth;
+  const allInputRows = wrapAnsiLine(renderTextCursor(editing.value, editing.cursor), contentWidth);
+  const inputCapacity = Math.max(1, panelHeight - 6);
+  const cursorRow = Math.max(0, allInputRows.findIndex((line) => line.includes('█')));
+  const inputStart = clamp(cursorRow - inputCapacity + 1, 0, Math.max(0, allInputRows.length - inputCapacity));
+  const inputRows = allInputRows.slice(inputStart, inputStart + inputCapacity);
+  return [
+    heading(`真人介入 / ${editing.label.replace(/^发送给 Agent · /, '')}`, color),
+    ansi('输入内容将直接进入当前 Conversation 的 Agent inbox；发送后可继续输入。', 'dim', color),
+    '',
+    ansi('输入消息', 'cyan-bold', color),
+    `┌${'─'.repeat(innerWidth + 2)}┐`,
+    ...inputRows.map((line) => `│ ${pad(line, innerWidth)} │`),
+    `└${'─'.repeat(innerWidth + 2)}┘`,
+  ];
 }
 
 function renderEditingPanel(
