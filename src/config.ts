@@ -34,6 +34,7 @@ const configSchema = z.object({
       groups: z.enum(CONVERSATION_MODES).default('shadow'),
       directs: z.enum(CONVERSATION_MODES).default('shadow'),
     }).default({ groups: 'shadow', directs: 'shadow' }),
+    selfMessagePollSeconds: z.number().int().min(1).max(300).default(5),
   }),
   runtime: z.object({
     id: z.literal('codex'),
@@ -76,6 +77,7 @@ export function defaultConfig(instance: string, cwd: string, name: string): Host
         groups: 'shadow',
         directs: 'shadow',
       },
+      selfMessagePollSeconds: 5,
     },
     runtime: {
       id: 'codex',

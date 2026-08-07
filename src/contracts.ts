@@ -19,6 +19,11 @@ export interface ChannelAdapter {
     until: Date,
     onEvent: (event: NormalizedEvent) => void,
   ): Promise<number>;
+  pollSelfMessages?(
+    targets: Array<{ conversation: Conversation; start: Date }>,
+    until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<number>;
   stop(): Promise<void>;
 }
 
