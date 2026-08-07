@@ -18,7 +18,6 @@ import type {
   OutboxRecord,
   RuntimeWorkerRecord,
   SessionRecord,
-  SelfMessagePollState,
 } from './types.js';
 import { safeName } from './paths.js';
 import { displayConversationTitle } from './conversation-title.js';
@@ -539,63 +538,6 @@ export class Store {
         PRAGMA user_version=13;
       `);
     }
-    const selfMessagePollVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
-    if (selfMessagePollVersion < 14) {
-      this.db.exec(`
-        CREATE TABLE self_message_poll_state (
-          conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
-          scanned_through_at TEXT NOT NULL,
-          last_success_at TEXT,
-          last_error TEXT
-        );
-        PRAGMA user_version=14;
-      `);
-    }
-  }
-
-  selfMessagePollStart(conversation: Conversation): Date {
-    const row = this.db.prepare(
-      'SELECT scanned_through_at FROM self_message_poll_state WHERE conversation_id=?',
-    ).get(conversation.id) as Row | undefined;
-    if (typeof row?.scanned_through_at === 'string') {
-      return new Date(new Date(row.scanned_through_at).getTime() - 2_000);
-    }
-    return this.conversationBackfillStart(conversation);
-  }
-
-  completeSelfMessagePoll(conversationId: string, scannedThroughAt: Date): void {
-    const now = new Date().toISOString();
-    this.db.prepare(`
-      INSERT INTO self_message_poll_state(conversation_id,scanned_through_at,last_success_at,last_error)
-      VALUES(?,?,?,NULL)
-      ON CONFLICT(conversation_id) DO UPDATE SET
-        scanned_through_at=excluded.scanned_through_at,
-        last_success_at=excluded.last_success_at,
-        last_error=NULL
-    `).run(conversationId, scannedThroughAt.toISOString(), now);
-  }
-
-  failSelfMessagePoll(conversationId: string, error: string): void {
-    const conversation = this.getConversation(conversationId);
-    if (!conversation) return;
-    const start = this.selfMessagePollStart(conversation);
-    const scannedThroughAt = new Date(start.getTime() + 2_000).toISOString();
-    this.db.prepare(`
-      INSERT INTO self_message_poll_state(conversation_id,scanned_through_at,last_success_at,last_error)
-      VALUES(?,?,?,?)
-      ON CONFLICT(conversation_id) DO UPDATE SET last_error=excluded.last_error
-    `).run(conversationId, scannedThroughAt, null, error);
-  }
-
-  getSelfMessagePollState(conversationId: string): SelfMessagePollState | null {
-    const row = this.db.prepare('SELECT * FROM self_message_poll_state WHERE conversation_id=?')
-      .get(conversationId) as Row | undefined;
-    return row ? {
-      conversationId: String(row.conversation_id),
-      scannedThroughAt: String(row.scanned_through_at),
-      lastSuccessAt: row.last_success_at === null ? null : String(row.last_success_at),
-      lastError: row.last_error === null ? null : String(row.last_error),
-    } : null;
   }
 
   addConversation(input: {

@@ -218,7 +218,6 @@ channel:
   defaultModes:
     groups: shadow
     directs: shadow
-  selfMessagePollSeconds: 5
 ```
 
 `none/selected/all` 是唯一共享事件流上的 Host 准入策略，`shadow/reply` 是新 Conversation 的默认发言权限，两者互不替代。DingTalk 始终只有一个 Channel owner 和一个 bus；群聊或私聊配置为 `none` 时不启动该类共享 consumer，两类都为 `none` 时 Channel 保持空闲且不启动 DWS 事件流。不会为每个群或私聊创建接收服务。交互式 `view` 可在 Instance 的 Channel 页面逐项选择，并管理全部 Instance Host 的重启。
@@ -330,9 +329,7 @@ agent-channel service remove --instance triss
 ## 可靠性与安全边界
 
 - SQLite WAL 保证 Host 收到事件后的本地 admission 与投递状态持久化。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
-- 离线补拉使用 `dws chat message list --direction newer`：群聊按 `--group`、私聊按 `--open-dingtalk-id` 分页读取。DWS 时间参数只有秒级且无时区，Host 固定按 `Asia/Shanghai` 解释，因此采用 2 秒重叠窗口。
-- 实时订阅建立后，Host 默认在上一轮完成 5 秒后再次扫描已启用会话，只保留当前 DWS profile 用户发送且未带 AI 发送标记的历史消息，按 `openMessageId` 去重后直接写入同一 inbox。`self_message_poll_state` 只保存外部历史源的扫描进度；单会话全部分页成功才推进，失败则保留原水位重试。可通过 `channel.selfMessagePollSeconds` 设置 1–300 秒间隔。
-- DWS 历史结果必须提供 `aiTag`/`isAi` 一类来源字段，Host 才能严格排除“通过 AI 发送”的本人消息；不能用正文和时间猜测来源。当前接口若不返回该字段，真人与 AI 发送无法从历史结果严格区分，详见 `docs/spec/self-message-poll.md`。
+- 离线补拉使用 `dws chat message list --direction newer`：群聊按 `--group`、私聊按 `--open-dingtalk-id` 分页读取。DWS 时间参数只有秒级且无时区，Host 固定按 `Asia/Shanghai` 解释，因此采用 2 秒重叠窗口；本地 durable inbox 是唯一水位事实源，不另维护双写 cursor。
 - Host 启动只恢复未转发及未达 3 次上限的 failed inbox，不恢复或发送历史 outbox。schema v13 会把旧 `completed` 原位迁移为 `forwarded`、删除旧 decision 表，并为已有 Conversation 补上默认职责提醒间隔 5；遗留 outbox 不进入新运行路径。
 - Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner、一个 bus，以及按群聊/私聊订阅范围启停的共享 consumer。
 - Host 仅在 `dws event status` 同时返回 `state=running` 和可用 live RPC 时认定 bus ready；只有存活 PID、没有 IPC 的状态会明确报告为 stale bus/PID 复用。DWS 子进程退出时保留经脱敏且有界的 stderr 根因，不再只显示 `code=5`。

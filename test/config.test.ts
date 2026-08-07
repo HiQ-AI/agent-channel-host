@@ -13,7 +13,6 @@ test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
     id: 'dingtalk', enabled: true, profileId: 'default', command: 'dws',
     subscriptions: { groups: 'selected', directs: 'selected' },
     defaultModes: { groups: 'shadow', directs: 'shadow' },
-    selfMessagePollSeconds: 5,
   });
   assert.equal(current.runtime.id, 'codex');
   assert.equal(current.runtime.command, 'codex');
