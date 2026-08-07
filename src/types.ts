@@ -76,7 +76,14 @@ export interface AdmittedEvent extends NormalizedEvent {
   id: string;
   conversationId: string;
   sequence: number;
-  ingress: 'live' | 'history';
+  ingress: 'live' | 'history' | 'self_poll';
+}
+
+export interface SelfMessagePollState {
+  conversationId: string;
+  scannedThroughAt: string;
+  lastSuccessAt: string | null;
+  lastError: string | null;
 }
 
 export interface SessionRecord {

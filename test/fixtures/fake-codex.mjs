@@ -32,7 +32,6 @@ function complete(echo = null) {
 }
 
 function runAppServer() {
-  let threadName = null;
   const input = createInterface({ input: process.stdin });
   input.on('line', (line) => {
     const message = JSON.parse(line);
@@ -45,12 +44,7 @@ function runAppServer() {
       const id = message.params.threadId ?? 'fake-app-server-session';
       return respond(message.id, { thread: { id } });
     }
-    if (message.method === 'thread/name/set') {
-      threadName = message.params?.name ?? null;
-      return respond(message.id, {});
-    }
     if (message.method === 'turn/start') {
-      if (!threadName) return fail(message.id, 'missing thread name');
       const turnId = 'fake-turn';
       respond(message.id, { turn: { id: turnId } });
       notify('turn/started', { turn: { id: turnId } });
