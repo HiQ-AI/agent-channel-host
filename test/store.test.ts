@@ -8,12 +8,15 @@ import {
   DIRECT_EVENT,
   GROUP_EVENT,
   consumerArgs,
+  currentProfileUserName,
   dwsProcessExitError,
   fetchConversationBackfill,
   fetchRecentGroupHistory,
   inspectDwsBusStatus,
+  isCurrentUserHistoryMessage,
   isProvisionalBotMessage,
   normalizeDwsEvent,
+  normalizeDwsHistoryMessage,
   parseDwsCommandFailure,
   parseDwsMessageLookup,
   searchDwsGroups,
@@ -124,6 +127,46 @@ test('离线补拉起点取 durable inbox 最新消息并回退两秒，无消�
     sender_open_dingtalk_id: conversation.externalId, timestamp: 1912035660000, content: '较晚',
   })!);
   assert.equal(store.conversationBackfillStart(conversation).toISOString(), '2030-08-04T01:00:58.000Z');
+  store.close();
+});
+
+test('本人消息补拉持久化独立扫描水位并固定回退两秒', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'group', externalId: 'self-poll-group', title: '本人补拉群', responsibility: '', mode: 'shadow',
+  });
+  store.completeSelfMessagePoll(conversation.id, new Date('2030-08-04T01:02:03.000Z'));
+  assert.equal(store.selfMessagePollStart(conversation).toISOString(), '2030-08-04T01:02:01.000Z');
+  assert.deepEqual(store.getSelfMessagePollState(conversation.id), {
+    conversationId: conversation.id,
+    scannedThroughAt: '2030-08-04T01:02:03.000Z',
+    lastSuccessAt: store.getSelfMessagePollState(conversation.id)?.lastSuccessAt,
+    lastError: null,
+  });
+  store.failSelfMessagePoll(conversation.id, '临时失败');
+  assert.equal(store.getSelfMessagePollState(conversation.id)?.scannedThroughAt, '2030-08-04T01:02:03.000Z');
+  assert.equal(store.getSelfMessagePollState(conversation.id)?.lastError, '临时失败');
+  store.close();
+});
+
+test('本人身份取当前 profile，补拉保留本人的所有历史消息', () => {
+  assert.equal(currentProfileUserName({
+    currentProfile: 'corp:user',
+    profiles: [{ profile: 'other', userName: '其他' }, { profile: 'corp:user', userName: '本人' }],
+  }), '本人');
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'peer', title: '私聊', responsibility: '', mode: 'shadow',
+  });
+  const human = normalizeDwsHistoryMessage(conversation, {
+    openMessageId: 'human', senderName: '本人', createTime: '2030-08-04 09:00:00', content: '真人消息',
+  });
+  const ai = normalizeDwsHistoryMessage(conversation, {
+    openMessageId: 'ai', senderName: '本人', createTime: '2030-08-04 09:00:01', content: 'AI消息', aiTag: true,
+  });
+  assert.equal(isCurrentUserHistoryMessage(human, '本人'), true);
+  assert.equal(isCurrentUserHistoryMessage(ai, '本人'), true);
+  assert.equal(isCurrentUserHistoryMessage(human, '其他'), false);
   store.close();
 });
 
@@ -654,7 +697,7 @@ test('v1 会话迁移后补 onboarding 和每类生命周期默认值', () => {
     assert.equal(migrated.getConversation('group-v1')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v1')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v1')?.workerWarmSeconds, 300);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
     assert.equal(migrated.getConversation('group-v1')?.responsibilityReminderInterval, 15);
     assert.equal(migrated.getConversation('group-v1')?.policyVersion, 1);
     migrated.close();
@@ -689,7 +732,7 @@ test('v2 会话迁移到当前 schema 时得到固定逻辑 session 和按需 Wo
     assert.equal(migrated.getConversation('group-v2')?.channelId, 'dingtalk');
     assert.equal(migrated.getConversation('direct-v2')?.runtimeId, 'codex');
     assert.equal(migrated.getConversation('direct-v2')?.workerWarmSeconds, 300);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -754,7 +797,7 @@ test('v3 Codex thread 迁移为中立 runtime session 且完整 provider ID 不�
     assert.equal(onboarding?.introUuid, null);
     assert.equal(migrated.getGroupOnboarding('group-v3-submitted')?.state, 'submitted');
     assert.deepEqual(migrated.db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+    assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
     migrated.close();
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
@@ -796,7 +839,7 @@ test('v5 Channel 状态表迁移后保留旧记录并允许 disabled', () => {
       `).get() as { state: string; label: string };
       assert.equal(row.state, 'disabled');
       assert.equal(row.label, 'DingTalk DWS');
-      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
     } finally {
       migrated.close();
     }
@@ -860,7 +903,7 @@ test('v11 completed 与空 decision 迁移为纯 forwarded 凭据', () => {
       assert.equal(migrated.db.prepare(
         "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='decisions'",
       ).get()!.count, 0);
-      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+      assert.equal((migrated.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
     } finally {
       migrated.close();
     }

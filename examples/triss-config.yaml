@@ -13,6 +13,7 @@ channel:
   defaultModes:
     groups: shadow
     directs: shadow
+  selfMessagePollSeconds: 5
 runtime:
   id: codex
   command: codex
