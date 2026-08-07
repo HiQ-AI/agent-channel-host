@@ -18,6 +18,13 @@ test('后台 App Server 新建与恢复 thread 均固定完全访问且永不询
   const first = new CodexAppServerSession(config, conversation, identity, store);
   await first.start();
   assert.equal((await first.deliver('普通消息')).status, 'completed');
+  const activity = first.readActivity();
+  assert.deepEqual(activity.entries.map(({ kind, label }) => ({ kind, label })), [
+    { kind: 'status', label: '状态' }, { kind: 'reasoning', label: '思考摘要' },
+    { kind: 'tool', label: '命令' }, { kind: 'assistant', label: 'Agent' },
+    { kind: 'status', label: '状态' },
+  ]);
+  assert.equal(activity.entries[2]?.result, 'tests passed');
   const sessionId = first.currentSessionId;
   await first.stop();
 

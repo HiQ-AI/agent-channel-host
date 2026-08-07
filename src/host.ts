@@ -1,6 +1,6 @@
 import { MINIMUM_NODE_VERSION, type HostConfig } from './config.js';
 import { assertMinimumToolVersion } from './tool-version.js';
-import type { ChannelAdapter, RuntimeAdapter } from './contracts.js';
+import type { AgentActivitySnapshot, ChannelAdapter, RuntimeAdapter } from './contracts.js';
 import { statePath } from './paths.js';
 import { Store } from './store.js';
 import { OwnerLock } from './owner-lock.js';
@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 
 export interface HostControl {
   submitConversationInput(conversationId: string, text: string): void;
+  readAgentActivity(conversationId: string): AgentActivitySnapshot;
 }
 
 interface WorkerHandle {
@@ -137,6 +138,14 @@ export class EventDrivenScheduler {
 
   activeWorkerCount(): number {
     return this.workers.size + this.starts.size;
+  }
+
+  readAgentActivity(conversationId: string): AgentActivitySnapshot {
+    const worker = this.workers.get(conversationId)?.worker ?? this.startingWorkers.get(conversationId);
+    return worker?.readActivity() ?? {
+      state: 'idle', revision: 0,
+      message: '当前 Worker 未运行；发送消息后会启动并显示本次执行过程', entries: [],
+    };
   }
 
   private ensureWorker(conversation: Conversation): Promise<WorkerHandle> {
@@ -428,6 +437,7 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     startupRecoveryComplete = true;
     for (const conversationId of startupSignals) scheduler.signal(conversationId);
     options.onControlReady?.({
+      readAgentActivity: (conversationId) => scheduler!.readAgentActivity(conversationId),
       submitConversationInput: (conversationId, text) => {
         const conversation = store.getConversation(conversationId);
         if (!conversation) throw new Error('Conversation 已不存在');

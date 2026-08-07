@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
 import type { HostConfig } from './config.js';
 import { assertMinimumToolVersion } from './tool-version.js';
-import type { AgentSession } from './contracts.js';
+import type { AgentActivityEntry, AgentActivitySnapshot, AgentSession } from './contracts.js';
 import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from './command.js';
 import { stopChild, withTimeout } from './process-utils.js';
 import type { Store } from './store.js';
@@ -61,6 +61,8 @@ export class CodexAppServerSession implements AgentSession {
   private stderrTail: string[] = [];
   private completedTurnsSinceResponsibilityReminder = 0;
   private lastCompletedResponsibility: string | null = null;
+  private activity: AgentActivityEntry[] = [];
+  private activityRevision = 0;
 
   constructor(
     private readonly config: HostConfig,
@@ -72,6 +74,9 @@ export class CodexAppServerSession implements AgentSession {
   get currentSessionId(): string | null { return this.providerSessionId; }
   get processId(): number | null { return this.child?.pid ?? null; }
   hasBackgroundWork(): boolean { return this.activeTurnId !== null; }
+  readActivity(): AgentActivitySnapshot {
+    return { state: 'ready', revision: this.activityRevision, message: null, entries: [...this.activity] };
+  }
 
   async start(): Promise<void> {
     if (this.child) throw new Error('Codex App Server session 已启动');
@@ -249,12 +254,17 @@ export class CodexAppServerSession implements AgentSession {
       else pending.resolve(message.result);
       return;
     }
+    if (message.method === 'item/completed') {
+      this.recordCompletedItem(message.params as JsonObject);
+      return;
+    }
     if (message.method === 'turn/started') {
       const params = message.params as JsonObject;
       const turnId = typeof (params.turn as JsonObject | undefined)?.id === 'string'
         ? String((params.turn as JsonObject).id) : null;
       if (!turnId) return;
       this.startedTurns.add(turnId);
+      this.appendActivity({ id: `turn:${turnId}:started`, kind: 'status', at: new Date().toISOString(), label: '状态', content: 'Agent 开始处理' });
       for (const waiter of this.startedWaiters.get(turnId) ?? []) waiter.resolve(undefined);
       this.startedWaiters.delete(turnId);
       return;
@@ -265,12 +275,57 @@ export class CodexAppServerSession implements AgentSession {
       ? String((params.turn as JsonObject).id) : null;
     if (!turnId) return;
     this.completedTurns.add(turnId);
+    const status = String((params.turn as JsonObject).status ?? 'completed');
+    this.appendActivity({ id: `turn:${turnId}:completed`, kind: 'status', at: new Date().toISOString(), label: '状态', content: status === 'completed' ? 'Agent 处理完成' : `Agent ${status}` });
     this.startedTurns.delete(turnId);
     for (const waiter of this.startedWaiters.get(turnId) ?? []) waiter.reject(new Error('Codex turn 已结束，无法引导'));
     this.startedWaiters.delete(turnId);
     const index = this.waiters.findIndex((waiter) => waiter.turnId === turnId);
     if (index >= 0) this.waiters.splice(index, 1)[0]!.resolve(params);
     else this.notifications.set(turnId, params);
+  }
+
+  private recordCompletedItem(params: JsonObject): void {
+    const item = params.item as JsonObject | undefined;
+    if (!item || typeof item.type !== 'string') return;
+    const id = typeof item.id === 'string' ? item.id : `${item.type}:${this.activityRevision + 1}`;
+    const atMs = typeof params.completedAtMs === 'number' ? params.completedAtMs : Date.now();
+    const at = new Date(atMs).toISOString();
+    const text = (value: unknown): string => typeof value === 'string' ? value : '';
+    let entry: AgentActivityEntry | null = null;
+    switch (item.type) {
+      case 'agentMessage':
+        entry = { id, kind: 'assistant', at, label: 'Agent', content: text(item.text) };
+        break;
+      case 'reasoning': {
+        const summary = Array.isArray(item.summary) ? item.summary.filter((value): value is string => typeof value === 'string').join('\n') : '';
+        if (summary) entry = { id, kind: 'reasoning', at, label: '思考摘要', content: summary };
+        break;
+      }
+      case 'commandExecution':
+        entry = { id, kind: 'tool', at, label: '命令', content: text(item.command), result: text(item.aggregatedOutput), error: item.status === 'failed' || (typeof item.exitCode === 'number' && item.exitCode !== 0) };
+        break;
+      case 'fileChange':
+        entry = { id, kind: 'tool', at, label: '文件修改', content: summarizeValue(item.changes), result: text(item.status), error: item.status === 'failed' };
+        break;
+      case 'mcpToolCall':
+      case 'dynamicToolCall':
+        entry = { id, kind: 'tool', at, label: item.type === 'mcpToolCall' ? `${text(item.server)}/${text(item.tool)}` : text(item.tool), content: summarizeValue(item.arguments), result: summarizeValue(item.result ?? item.error), error: Boolean(item.error) || item.status === 'failed' };
+        break;
+      case 'webSearch':
+        entry = { id, kind: 'tool', at, label: '网页搜索', content: text(item.query), result: text(item.action) };
+        break;
+      case 'plan':
+        entry = { id, kind: 'reasoning', at, label: '计划', content: text(item.text) };
+        break;
+    }
+    if (entry && (entry.content || entry.result)) this.appendActivity(entry);
+  }
+
+  private appendActivity(entry: AgentActivityEntry): void {
+    this.activity.push(entry);
+    if (this.activity.length > 200) this.activity.splice(0, this.activity.length - 200);
+    this.activityRevision += 1;
   }
 
   private rejectUnexpectedServerRequest(message: JsonObject): void {
@@ -303,6 +358,12 @@ export class CodexAppServerSession implements AgentSession {
     }
     this.startedWaiters.clear();
   }
+}
+
+function summarizeValue(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  try { return JSON.stringify(value); } catch { return String(value); }
 }
 
 function threadIdFrom(result: JsonObject): string | null {

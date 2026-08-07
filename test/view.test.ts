@@ -927,17 +927,16 @@ test('会话详情可输入多行消息并发送给当前固定 Agent session', 
       sent.push(text);
     },
   };
-  const transcript = {
+  const activity = {
     state: 'ready' as const,
-    sessionIdPrefix: 'fixed-session',
-    revision: '1:1',
+    revision: 1,
     message: null,
     entries: Array.from({ length: 12 }, (_, index) => ({
       id: String(index + 1),
       kind: index % 3 === 0 ? 'reasoning' as const : index % 3 === 1 ? 'tool' as const : 'assistant' as const,
       at: `2026-08-07T01:00:${String(index).padStart(2, '0')}.000Z`,
       label: index % 3 === 0 ? '思考' : index % 3 === 1 ? 'exec_command' : 'Agent',
-      content: `${index === 0 ? '\u001b[2J' : ''}历史执行记录 ${index + 1}`,
+      content: `${index === 0 ? '\u001b[2J' : ''}实时执行输出 ${index + 1}`,
       ...(index % 3 === 1 ? { result: '关键结果' } : {}),
     })),
   };
@@ -945,13 +944,14 @@ test('会话详情可输入多行消息并发送给当前固定 Agent session', 
     await handleManagementViewInput('i', state, [instance], () => undefined, actions);
     assert.equal(state.editing?.purpose, 'agent-input');
     const inputView = renderManagementView(
-      [instance], state, store.conversationDetail(conversation.id), [], 100, true, false, 28, [], transcript,
+      [instance], state, store.conversationDetail(conversation.id), [], 100, true, false, 28, [], activity,
     );
     assert.match(inputView, /真人介入 \/ View 输入群/);
-    assert.match(inputView, /执行记录（历史 \+ 实时，session=fixed-session…）/);
-    assert.match(inputView, /历史执行记录 12/);
+    assert.match(inputView, /当前 Worker 实时输出（已连接）/);
+    assert.match(inputView, /实时执行输出 12/);
+    assert.doesNotMatch(inputView, /session=|历史 \+ 实时/);
     assert.equal(inputView.includes('\u001b[2J'), false);
-    assert.ok(inputView.indexOf('执行记录') < inputView.indexOf('输入消息'));
+    assert.ok(inputView.indexOf('实时输出') < inputView.indexOf('输入消息'));
     await handleManagementViewInput('\u001b[5~', state, [instance], () => undefined, actions);
     assert.equal(state.editing?.timelineScroll, 6);
     await handleManagementViewInput('\u001b[6~', state, [instance], () => undefined, actions);

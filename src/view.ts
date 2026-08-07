@@ -8,7 +8,7 @@ import { CONVERSATION_MODES, MAX_RESPONSIBILITY_REMINDER_INTERVAL, MAX_WORKER_WA
 import { safeName } from './paths.js';
 import { displayConversationTitle } from './conversation-title.js';
 import { execResolved, resolveCommand } from './command.js';
-import type { AgentTranscript, AgentTranscriptEntry } from './codex-transcript.js';
+import type { AgentActivityEntry, AgentActivitySnapshot } from './contracts.js';
 
 type Json = Record<string, unknown>;
 type TaggedJson = Json & { instance: string };
@@ -113,7 +113,7 @@ export interface ManagementViewActions {
   deleteInstance?(instance: ViewInstance): Promise<void>;
   deleteConversation?(instance: ViewInstance, conversationId: string): Promise<void>;
   sendToAgent?(instance: ViewInstance, conversationId: string, text: string): Promise<void>;
-  readAgentTranscript?(instance: ViewInstance, conversationId: string): AgentTranscript;
+  readAgentActivity?(instance: ViewInstance, conversationId: string): AgentActivitySnapshot;
 }
 
 interface DestructiveConfirmation {
@@ -308,8 +308,8 @@ export async function runView(
         settingsInstance.configFile,
       )
       : [];
-    const agentTranscript = state.editing?.purpose === 'agent-input' && detailInstance && state.editing.conversationId
-      ? actions.readAgentTranscript?.(detailInstance, state.editing.conversationId) ?? null
+    const agentActivity = state.editing?.purpose === 'agent-input' && detailInstance && state.editing.conversationId
+      ? actions.readAgentActivity?.(detailInstance, state.editing.conversationId) ?? null
       : null;
     return renderManagementView(
       instances,
@@ -321,7 +321,7 @@ export async function runView(
       color,
       process.stdout.rows ?? 30,
       requiredTools,
-      agentTranscript,
+      agentActivity,
     );
   };
   const writeFrame = (frame: string) => {
@@ -1411,7 +1411,7 @@ export function renderManagementView(
   color = false,
   height = 30,
   requiredTools: RequiredToolStatus[] = [],
-  agentTranscript: AgentTranscript | null = null,
+  agentActivity: AgentActivitySnapshot | null = null,
 ): string {
   normalizeSelection(state, instances);
   const selectedInstance = instances[state.selectedInstance] ?? null;
@@ -1435,7 +1435,7 @@ export function renderManagementView(
     ansi('─'.repeat(Math.min(width, 120)), 'dim', color),
   ];
   if (state.editing?.purpose === 'agent-input') {
-    lines.push(...renderAgentInputPanel(state.editing, agentTranscript, width, Math.max(10, height - 6), color));
+    lines.push(...renderAgentInputPanel(state.editing, agentActivity, width, Math.max(10, height - 6), color));
   }
   else if (state.editing) lines.push(...renderEditingPanel(state.editing, width, color));
   else if (state.tab === 'settings') lines.push(...renderGlobalSettings(instances, width, color));
@@ -2558,7 +2558,7 @@ function renderTextCursor(value: string, cursor: number): string {
 
 function renderAgentInputPanel(
   editing: NonNullable<ManagementViewState['editing']>,
-  transcript: AgentTranscript | null,
+  activity: AgentActivitySnapshot | null,
   width: number,
   panelHeight: number,
   color: boolean,
@@ -2572,25 +2572,23 @@ function renderAgentInputPanel(
   const inputStart = clamp(cursorRow - inputCapacity + 1, 0, Math.max(0, allInputRows.length - inputCapacity));
   const inputRows = allInputRows.slice(inputStart, inputStart + inputCapacity);
   const timelineCapacity = Math.max(1, panelHeight - inputRows.length - 8);
-  const timelineRows = transcript?.entries.flatMap((entry) => renderTranscriptEntry(entry, contentWidth)) ?? [];
+  const timelineRows = activity?.entries.flatMap((entry) => renderActivityEntry(entry, contentWidth)) ?? [];
   if (timelineRows.length === 0) {
-    timelineRows.push(safeTranscriptText(transcript?.message ?? '正在读取固定 Agent session 的执行记录…'));
+    timelineRows.push(safeActivityText(activity?.message ?? '当前 Host 尚未提供 Worker 状态'));
   }
   const maxScroll = Math.max(0, timelineRows.length - timelineCapacity);
   const scroll = clamp(editing.timelineScroll ?? 0, 0, maxScroll);
   editing.timelineScroll = scroll;
   const timelineStart = Math.max(0, timelineRows.length - timelineCapacity - scroll);
   const visibleTimeline = timelineRows.slice(timelineStart, timelineStart + timelineCapacity);
-  const session = transcript?.sessionIdPrefix ? `session=${transcript.sessionIdPrefix}…` : 'session=尚未创建';
-  const status = transcript?.state === 'ready' ? '历史 + 实时' : '等待记录';
   return [
     heading(`真人介入 / ${editing.label.replace(/^发送给 Agent · /, '')}`, color),
-    ansi(`执行记录（${status}，${session}）`, transcript?.state === 'error' ? 'red-bold' : 'dim', color),
+    ansi(`当前 Worker 实时输出（${activity?.state === 'ready' ? '已连接' : '未运行'}）`, 'dim', color),
     `┌${'─'.repeat(innerWidth + 2)}┐`,
     ...visibleTimeline.map((line) => `│ ${pad(line, innerWidth)} │`),
     `└${'─'.repeat(innerWidth + 2)}┘`,
     ansi(
-      `记录 ${transcript?.entries.length ?? 0} 项 · 显示行 ${timelineStart + 1}-${timelineStart + visibleTimeline.length}/${timelineRows.length}${scroll > 0 ? ' · 已离开最新位置' : ' · 跟随最新'}`,
+      `输出 ${activity?.entries.length ?? 0} 项 · 显示行 ${timelineStart + 1}-${timelineStart + visibleTimeline.length}/${timelineRows.length}${scroll > 0 ? ' · 已离开最新位置' : ' · 跟随最新'}`,
       'dim',
       color,
     ),
@@ -2601,10 +2599,10 @@ function renderAgentInputPanel(
   ];
 }
 
-function renderTranscriptEntry(entry: AgentTranscriptEntry, width: number): string[] {
-  const symbol = ({ user: '›', assistant: '●', reasoning: '✻', tool: '⚙' })[entry.kind];
+function renderActivityEntry(entry: AgentActivityEntry, width: number): string[] {
+  const symbol = ({ assistant: '●', reasoning: '✻', tool: '⚙', status: '·' })[entry.kind];
   const clock = transcriptClock(entry.at);
-  const content = safeTranscriptText(entry.content);
+  const content = safeActivityText(entry.content);
   const lines = wrapAnsiLine(`${clock} ${symbol} ${entry.label}：${content}`, width);
   if (entry.kind === 'tool' && entry.result !== undefined) {
     const result = compactTranscriptText(entry.result, 240);
@@ -2621,7 +2619,7 @@ function transcriptClock(value: string | null): string {
   return `${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
 }
 
-function safeTranscriptText(value: string): string {
+function safeActivityText(value: string): string {
   return value
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '')
@@ -2629,7 +2627,7 @@ function safeTranscriptText(value: string): string {
 }
 
 function compactTranscriptText(value: string, max: number): string {
-  const compact = safeTranscriptText(value).replace(/\s+/g, ' ').trim();
+  const compact = safeActivityText(value).replace(/\s+/g, ' ').trim();
   return compact.length <= max ? compact : `${compact.slice(0, max)}…`;
 }
 

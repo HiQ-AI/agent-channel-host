@@ -55,6 +55,9 @@ function runAppServer() {
           params: { threadId: message.params.threadId, turnId, itemId: 'command-1' },
         })}\n`);
       } else {
+        notify('item/completed', { threadId: message.params.threadId, turnId, completedAtMs: Date.now(), item: { id: 'reasoning-1', type: 'reasoning', summary: ['检查当前实现'], content: [] } });
+        notify('item/completed', { threadId: message.params.threadId, turnId, completedAtMs: Date.now(), item: { id: 'command-1', type: 'commandExecution', command: 'npm test', cwd: '.', status: 'completed', aggregatedOutput: 'tests passed', exitCode: 0 } });
+        notify('item/completed', { threadId: message.params.threadId, turnId, completedAtMs: Date.now(), item: { id: 'agent-1', type: 'agentMessage', text: '处理完成', phase: 'final' } });
         notify('turn/completed', { turn: { id: turnId, status: 'completed' } });
       }
       return;

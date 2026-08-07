@@ -265,7 +265,7 @@ agent-channel view
 - 指定私聊继续使用稳定 `openDingTalkId` 登记，不按姓名猜测 ID；事件提供人员姓名时以姓名作为显示标题，确实拿不到时显示不泄露原始 ID 的稳定占位。通过 `conversation add --open-dingtalk-id` 添加后会出现在 Channel 的 DIRECTS 分区，并可下钻修改或删除。
 - `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
-- 在群聊或私聊的 Conversation 详情页按 `i`，进入真人介入控制台：上方从固定 Codex session 的 rollout JSONL 加载既有历史并持续刷新关键 Agent 内容、reasoning 摘要及配对后的工具步骤/结果，下方为多行输入框。输入内容进入同一持久化 inbox 并唤醒或 steer 原固定 session，不会先发到钉钉，也不依赖 DWS 能否订阅到本人消息或 Channel 是否启用。发送后页面保持打开，便于继续观察并追加引导；`PageUp/PageDown` 浏览历史、`Shift+Enter` 换行、`Enter` 发送、`Esc` 返回。Agent 收到的发送者标记为“View 用户（本人）”，同时保留当前钉钉目标上下文。
+- 在群聊或私聊的 Conversation 详情页按 `i`，进入真人介入控制台：上方展示当前 Worker 从现有 Codex App Server 连接收到的重点实时输出，下方为多行输入框。页面不读取固定 session 的 rollout 历史；Worker 未运行或保温结束后不保留输出。输入内容进入同一持久化 inbox 并唤醒或 steer 原固定 session，不会先发到钉钉，也不依赖 DWS 能否订阅到本人消息或 Channel 是否启用。发送后页面保持打开，便于继续观察并追加引导；`PageUp/PageDown` 浏览本次输出、`Shift+Enter` 换行、`Enter` 发送、`Esc` 返回。Agent 收到的发送者标记为“View 用户（本人）”，同时保留当前钉钉目标上下文。
 
 Instance 详情在 `CHANNELS` 上方直接展示并编辑 `INSTANCE` 设置，不再跳转到独立设置页；`s` 只把焦点定位到该区域。这里可修改仅供本地展示的 Agent 名称、Runtime cwd、runtime model/effort 和合批参数，不再维护 Agent 默认角色、回复签名或成员资料。Runtime cwd 保存前会解析为绝对路径并复用启动配置 schema 校验；交互式 View 管理的 Host 随配置重启，但已有 Conversation 仍恢复原 provider session。Conversation 详情可直接修改本地显示名称、enabled、会话职责、职责周期提醒间隔、mode 和 warm TTL；提醒间隔为 0 时关闭按 turn 数量触发的周期提醒。会话职责只在 `CONVERSATION` 设置表中展示和编辑，不再在详情头部重复展开长文本。已观察成员资料只在 Conversation 详情中只读展示。`mode`、推理强度、订阅范围等固定枚举由 Enter 逐项选择，不进入文本编辑。Channel 开关、订阅范围、默认模式与绑定统一放在 Instance 下钻后的 Channel 页面。TUI 新建 Instance 时 DingTalk 默认 `disabled`，避免未确认 DWS profile 就抢占现有 owner。
 

@@ -30,6 +30,25 @@ export interface RuntimeDescriptor {
   contextRecovery: 'runtime-native' | 'adapter-managed' | 'unavailable';
 }
 
+export type AgentActivityKind = 'assistant' | 'reasoning' | 'tool' | 'status';
+
+export interface AgentActivityEntry {
+  id: string;
+  kind: AgentActivityKind;
+  at: string | null;
+  label: string;
+  content: string;
+  result?: string;
+  error?: boolean;
+}
+
+export interface AgentActivitySnapshot {
+  state: 'idle' | 'ready';
+  revision: number;
+  message: string | null;
+  entries: AgentActivityEntry[];
+}
+
 export interface AgentSession {
   start(): Promise<unknown>;
   deliver(prompt: string): Promise<DeliveryRun>;
@@ -39,6 +58,7 @@ export interface AgentSession {
   readonly currentSessionId: string | null;
   readonly processId: number | null;
   hasBackgroundWork?(): boolean;
+  readActivity?(): AgentActivitySnapshot;
 }
 
 export interface RuntimeAdapter {

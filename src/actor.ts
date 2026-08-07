@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { HostConfig } from './config.js';
-import type { AgentSession } from './contracts.js';
+import type { AgentActivitySnapshot, AgentSession } from './contracts.js';
 import type { AdmittedEvent, Conversation, NormalizedEvent } from './types.js';
 import type { Store } from './store.js';
 import { delay } from './process-utils.js';
@@ -32,6 +32,9 @@ export class ConversationWorker {
   ) {}
 
   get processId(): number | null { return this.session.processId; }
+  readActivity(): AgentActivitySnapshot {
+    return this.session.readActivity?.() ?? { state: 'ready', revision: 0, message: '当前 Runtime 未提供实时输出', entries: [] };
+  }
 
   async start(): Promise<void> {
     if (this.started) return;
