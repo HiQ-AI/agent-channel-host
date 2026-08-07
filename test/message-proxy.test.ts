@@ -100,6 +100,8 @@ test('首次群聊最近消息使用同一来源头且同批只注入一次', ()
   assert.equal(prompt.includes('replyText'), false);
   assert.equal(prompt.includes('自我介绍'), false);
   assert.equal(prompt.includes('职责'), false);
+  assert.equal(prompt.includes('发送者ID：'), false);
+  assert.equal(prompt.includes('实际 @'), false);
   store.close();
 });
 
