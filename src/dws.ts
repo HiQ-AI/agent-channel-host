@@ -313,29 +313,6 @@ export function normalizeDwsHistoryMessage(conversation: Conversation, value: un
   };
 }
 
-export function currentProfileUserName(value: unknown): string {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS profile list 返回结构无效');
-  const body = value as Record<string, unknown>;
-  const currentProfile = text(body.currentProfile);
-  const profiles = Array.isArray(body.profiles) ? body.profiles : [];
-  const current = profiles.find((profile) => {
-    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return false;
-    const entry = profile as Record<string, unknown>;
-    return entry.isCurrent === true || (currentProfile && text(entry.profile) === currentProfile);
-  }) as Record<string, unknown> | undefined;
-  const userName = text(current?.userName);
-  if (!userName) throw new Error('DWS 当前 profile 缺少 userName，无法识别本人消息');
-  return userName;
-}
-
-export function isAiSentHistoryMessage(event: NormalizedEvent): boolean {
-  const source = event.source;
-  return ['aiTag', 'ai_tag', 'isAi', 'is_ai', 'isAigc'].some((key) => {
-    const value = source[key];
-    return value === true || value === 1 || (typeof value === 'string' && /^(true|1)$/i.test(value.trim()));
-  });
-}
-
 export async function dwsDoctor(config: HostConfig): Promise<Record<string, unknown>> {
   const command = await resolveCommand(config.channel.command);
   const version = await execResolved(command, ['--version'], {
@@ -580,7 +557,6 @@ export class DwsChannelAdapter implements ChannelAdapter {
   private owner: DwsEventOwner | null = null;
   private readonly eventQueues = new Map<string, Promise<void>>();
   private stabilizationAbort = new AbortController();
-  private selfUserName: string | null = null;
 
   constructor(private readonly config: HostConfig) {
     this.descriptor = {
@@ -598,7 +574,6 @@ export class DwsChannelAdapter implements ChannelAdapter {
       cwd: this.config.runtime.cwd, encoding: 'utf8', timeout: 10_000, windowsHide: true,
     });
     assertMinimumToolVersion('DWS', MINIMUM_DWS_VERSION, version.stdout.trim());
-    this.selfUserName = currentProfileUserName(await runDwsJson(this.config, ['profile', 'list'], 15_000));
     this.owner = new DwsEventOwner(
       this.config,
       (raw) => {
@@ -648,24 +623,6 @@ export class DwsChannelAdapter implements ChannelAdapter {
         until,
       );
       for (const event of events) {
-        onEvent(event);
-        count++;
-      }
-    }
-    return count;
-  }
-
-  async pollSelfMessages(
-    targets: Array<{ conversation: Conversation; start: Date }>,
-    until: Date,
-    onEvent: (event: NormalizedEvent) => void,
-  ): Promise<number> {
-    if (!this.selfUserName) throw new Error('DWS 当前用户尚未解析');
-    let count = 0;
-    for (const { conversation, start } of targets) {
-      const events = await fetchConversationBackfill(this.config, conversation, start, until);
-      for (const event of events) {
-        if (event.senderName !== this.selfUserName || isAiSentHistoryMessage(event)) continue;
         onEvent(event);
         count++;
       }
