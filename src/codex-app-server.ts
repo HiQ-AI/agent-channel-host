@@ -100,6 +100,7 @@ export class CodexAppServerSession implements AgentSession {
       }) as JsonObject;
       this.providerSessionId = threadIdFrom(result);
       if (this.providerSessionId !== existing.providerSessionId) throw new Error('thread/resume 未精确恢复原 session');
+      await this.setThreadName();
       return;
     }
     const result = await this.request('thread/start', {
@@ -110,6 +111,7 @@ export class CodexAppServerSession implements AgentSession {
     }) as JsonObject;
     this.providerSessionId = threadIdFrom(result);
     if (!this.providerSessionId) throw new Error('thread/start 未返回 thread id');
+    await this.setThreadName();
     const now = new Date().toISOString();
     this.store.saveSession(this.sessionRecord('provisioning', now, now));
   }
@@ -193,6 +195,15 @@ export class CodexAppServerSession implements AgentSession {
       lifecycle, protocolFingerprint: this.identity.fingerprint, runtimeCwd: this.config.runtime.cwd,
       bootstrapTurnId: null, createdAt, updatedAt,
     };
+  }
+
+  private async setThreadName(): Promise<void> {
+    if (!this.providerSessionId) throw new Error('Codex App Server session 尚未 start');
+    const conversation = this.store.getConversation(this.conversation.id) ?? this.conversation;
+    await this.request('thread/name/set', {
+      threadId: this.providerSessionId,
+      name: codexThreadName(conversation),
+    });
   }
 
   private request(method: string, params: JsonObject): Promise<unknown> {
@@ -303,6 +314,10 @@ export class CodexAppServerSession implements AgentSession {
     }
     this.startedWaiters.clear();
   }
+}
+
+export function codexThreadName(conversation: Pick<Conversation, 'kind' | 'title'>): string {
+  return `${conversation.kind === 'group' ? '群聊' : '私聊'} · ${conversation.title.trim()}`;
 }
 
 function threadIdFrom(result: JsonObject): string | null {
