@@ -34,6 +34,7 @@ export interface RecentGroupHistory {
 
 export interface RecentMessage {
   sender: string;
+  senderId: string | null;
   time: string;
   content: string;
 }
@@ -734,7 +735,7 @@ function dwsStderrSuffix(lines: string[]): string {
 
 function projectHistoryMessage(value: unknown): RecentMessage {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return { sender: '未知', time: '未知', content: safeJson(value) || '[空消息]' };
+    return { sender: '未知', senderId: null, time: '未知', content: safeJson(value) || '[空消息]' };
   }
   const source = value as Record<string, unknown>;
   const quoted = firstValue(source, ['quotedMessage', 'quoted_message']);
@@ -747,6 +748,7 @@ function projectHistoryMessage(value: unknown): RecentMessage {
   if (forwardedText) parts.push(`合并转发内容：${forwardedText}`);
   return {
     sender: text(firstValue(source, ['senderName', 'sender_name', 'sender', 'nickName', 'nickname'])) ?? '未知',
+    senderId: text(firstValue(source, ['senderOpenDingTalkId', 'sender_open_dingtalk_id', 'senderId', 'sender_id'])),
     time: text(firstValue(source, ['createTime', 'create_time', 'sendTime', 'timestamp'])) ?? '未知',
     content: parts.join('\n'),
   };

@@ -88,8 +88,8 @@ test('首次群历史合成一次引导传入 runtime，不接收决定也不发
     async () => ({
       count: 2,
       messages: [
-        { sender: '同事甲', time: '2026-08-03 10:00:00', content: '历史一' },
-        { sender: '同事乙', time: '2026-08-03 10:01:00', content: '历史二' },
+        { sender: '同事甲', senderId: 'open-id-a', time: '2026-08-03 10:00:00', content: '历史一' },
+        { sender: '同事乙', senderId: 'open-id-b', time: '2026-08-03 10:01:00', content: '历史二' },
       ],
     }),
   );
