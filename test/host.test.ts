@@ -4,10 +4,17 @@ import { mkdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { defaultConfig } from '../src/config.js';
 import type { AgentSession, ChannelAdapter, ChannelHandlers, RuntimeAdapter } from '../src/contracts.js';
-import { EventDrivenScheduler, resolveEventConversation, runHost, type HostControl } from '../src/host.js';
 import { normalizeDwsEvent } from '../src/dws.js';
+import { EventDrivenScheduler, resolveEventConversation, runHost, selfMessagePollUntil, type HostControl } from '../src/host.js';
 import { Store } from '../src/store.js';
 import type { Conversation, DeliveryRun, NormalizedEvent } from '../src/types.js';
+
+test('本人历史补拉给实时订阅预留 5 秒窗口', () => {
+  assert.equal(
+    selfMessagePollUntil(new Date('2030-08-07T01:02:08.000Z')).toISOString(),
+    '2030-08-07T01:02:03.000Z',
+  );
+});
 
 class FakeChannel implements ChannelAdapter {
   readonly descriptor = { channelId: 'dingtalk', profileId: 'default', label: 'Fake Channel' };

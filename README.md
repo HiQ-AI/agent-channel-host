@@ -218,6 +218,7 @@ channel:
   defaultModes:
     groups: shadow
     directs: shadow
+  selfMessagePollSeconds: 5
 ```
 
 `none/selected/all` 是唯一共享事件流上的 Host 准入策略，`shadow/reply` 是新 Conversation 的默认发言权限，两者互不替代。DingTalk 始终只有一个 Channel owner 和一个 bus；群聊或私聊配置为 `none` 时不启动该类共享 consumer，两类都为 `none` 时 Channel 保持空闲且不启动 DWS 事件流。不会为每个群或私聊创建接收服务。交互式 `view` 可在 Instance 的 Channel 页面逐项选择，并管理全部 Instance Host 的重启。
@@ -329,7 +330,9 @@ agent-channel service remove --instance triss
 ## 可靠性与安全边界
 
 - SQLite WAL 保证 Host 收到事件后的本地 admission 与投递状态持久化。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
-- 离线补拉使用 `dws chat message list --direction newer`：群聊按 `--group`、私聊按 `--open-dingtalk-id` 分页读取。DWS 时间参数只有秒级且无时区，Host 固定按 `Asia/Shanghai` 解释，因此采用 2 秒重叠窗口；本地 durable inbox 是唯一水位事实源，不另维护双写 cursor。
+- 离线补拉使用 `dws chat message list --direction newer`：群聊按 `--group`、私聊按 `--open-dingtalk-id` 分页读取。DWS 时间参数只有秒级且无时区，Host 固定按 `Asia/Shanghai` 解释，因此采用 2 秒重叠窗口。
+- 实时订阅建立后，Host 默认在上一轮完成 5 秒后再次串行扫描已启用会话，只保留当前 DWS profile 用户发送的历史消息。每轮截止到当前时间前 5 秒，让实时订阅优先准入；随后按 `openMessageId` 复用 inbox 唯一约束去重，因此实时已收到的 AI 发送不会重复，订阅漏掉的本人真人消息会被补入。`self_message_poll_state` 只保存每个会话成功扫描到的水位；失败保留原水位重试。可通过 `channel.selfMessagePollSeconds` 设置 1–300 秒轮间等待。
+- 本人补拉不会并发启动多个会话查询，也不会使用固定周期重叠执行：一轮中逐会话、逐页读取，整轮结束后才开始下一次等待。会话越多时同一会话的实际扫描周期会相应变长，以限制 DWS 子进程和历史接口压力。
 - Host 启动只恢复未转发及未达 3 次上限的 failed inbox，不恢复或发送历史 outbox。schema v13 会把旧 `completed` 原位迁移为 `forwarded`、删除旧 decision 表，并为已有 Conversation 补上默认职责提醒间隔 5；遗留 outbox 不进入新运行路径。
 - Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner、一个 bus，以及按群聊/私聊订阅范围启停的共享 consumer。
 - Host 仅在 `dws event status` 同时返回 `state=running` 和可用 live RPC 时认定 bus ready；只有存活 PID、没有 IPC 的状态会明确报告为 stale bus/PID 复用。DWS 子进程退出时保留经脱敏且有界的 stderr 根因，不再只显示 `code=5`。

@@ -30,6 +30,12 @@ export interface HostRunOptions {
   onControlReady?: (control: HostControl) => void;
 }
 
+export const SELF_MESSAGE_REALTIME_SETTLE_MILLISECONDS = 5_000;
+
+export function selfMessagePollUntil(now = new Date()): Date {
+  return new Date(now.getTime() - SELF_MESSAGE_REALTIME_SETTLE_MILLISECONDS);
+}
+
 export interface ConversationResolution {
   conversation: Conversation | null;
   created: boolean;
@@ -293,6 +299,8 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
   let leaseAcquired = false;
   let channelOwned = false;
   let channelFatal: Error | null = null;
+  let selfMessagePollTimer: NodeJS.Timeout | null = null;
+  let selfMessagePollingStopped = false;
   const channel = config.channel.enabled ? options.channel ?? new DwsChannelAdapter(config) : null;
   const channels = new Map<string, ChannelAdapter>();
   if (channel) channels.set(channelKey(channel.descriptor.channelId, channel.descriptor.profileId), channel);
@@ -423,6 +431,34 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
         const loaded = await channel.backfill(targets, until, (event) => admitNormalized(event, 'history'));
         log({ type: 'OFFLINE_BACKFILL_COMPLETED', conversations: targets.length, loaded, until: until.toISOString() });
       }
+      if (channel.pollSelfMessages) {
+        const poll = async (): Promise<void> => {
+          if (selfMessagePollingStopped || options.signal?.aborted) return;
+          const until = selfMessagePollUntil();
+          let loaded = 0;
+          for (const conversation of store.listConversations(true)) {
+            try {
+              loaded += await channel.pollSelfMessages!([
+                { conversation, start: store.selfMessagePollStart(conversation) },
+              ], until, (event) => admitNormalized(event, 'self_poll'));
+              store.completeSelfMessagePoll(conversation.id, until);
+            } catch (error) {
+              const message = (error as Error).message;
+              store.failSelfMessagePoll(conversation.id, message);
+              log({ type: 'SELF_MESSAGE_POLL_FAILED', conversationId: conversation.id, error: message });
+            }
+          }
+          if (selfMessagePollingStopped || options.signal?.aborted) return;
+          log({ type: 'SELF_MESSAGE_POLL_COMPLETED', loaded, until: until.toISOString() });
+          selfMessagePollTimer = setTimeout(
+            () => void poll(),
+            config.channel.selfMessagePollSeconds * 1_000,
+          );
+          selfMessagePollTimer.unref();
+        };
+        selfMessagePollTimer = setTimeout(() => void poll(), config.channel.selfMessagePollSeconds * 1_000);
+        selfMessagePollTimer.unref();
+      }
     }
     const recovered = scheduler.reconcile();
     startupRecoveryComplete = true;
@@ -474,6 +510,8 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     fatal = error instanceof Error ? error : new Error(String(error));
     log({ type: 'HOST_FATAL', error: fatal.message });
   } finally {
+    selfMessagePollingStopped = true;
+    if (selfMessagePollTimer) clearTimeout(selfMessagePollTimer);
     const fatalError = fatal as Error | null;
     if (leaseTimer) clearInterval(leaseTimer);
     await scheduler?.stop();
