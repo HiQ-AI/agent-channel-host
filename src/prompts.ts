@@ -3,6 +3,7 @@ import type { RecentMessage } from './dws.js';
 
 interface MessageEnvelope {
   sender: string;
+  senderId: string | null;
   time: string;
   content: string;
 }
@@ -37,6 +38,7 @@ export function nextResponsibilityReminderCount(current: number, injected: boole
 export function batchPrompt(conversation: Conversation, events: AdmittedEvent[]): string {
   return messagePrompt(conversation, events.map((event) => ({
     sender: event.senderName ?? event.senderId ?? '未知',
+    senderId: event.senderId,
     time: event.occurredAt ?? event.receivedAt,
     content: messageContent(event.content, event.quotedMessage, event.forwardedMessages),
   })));
@@ -55,10 +57,21 @@ function messagePrompt(conversation: Conversation, messages: MessageEnvelope[]):
     `目标ID：${conversation.externalId}`,
     `${targetName}：${conversation.title}`,
   ].join('\n');
+  const mentionGuide = conversation.channelId === 'dingtalk' && conversation.kind === 'group'
+    ? '\n群聊实际 @ 规则：需要 @ 某位发送者时，仅使用消息中非“未知”的发送者OpenDingTalkId；正文必须包含 <@openDingTalkId>，并在 dws chat message send 中同时传 --at-open-dingtalk-ids openDingTalkId。不要只写 @姓名，也不要猜测 ID。'
+    : '';
   const rendered = messages
-    .map((message, index) => `消息 ${index + 1}\n发送者：${message.sender}\n时间：${message.time}\n内容：${message.content}`)
+    .map((message, index) => [
+      `消息 ${index + 1}`,
+      `发送者：${message.sender}`,
+      ...(conversation.channelId === 'dingtalk' && conversation.kind === 'group'
+        ? [`发送者OpenDingTalkId：${message.senderId ?? '未知'}`]
+        : []),
+      `时间：${message.time}`,
+      `内容：${message.content}`,
+    ].join('\n'))
     .join('\n\n');
-  return `${source}\n\n以下是收到的消息：\n\n${rendered}`;
+  return `${source}${mentionGuide}\n\n以下是收到的消息：\n\n${rendered}`;
 }
 
 export function messageContent(content: unknown, quoted: unknown, forwarded: unknown): string {
