@@ -17,7 +17,6 @@ import {
   assertInteractiveView, bindHostToInteractiveView, runView, type SettingEntry, type ViewInstance,
 } from './view.js';
 import { CLI_NAME, PRODUCT_VERSION } from './product.js';
-import { readCodexTranscript } from './codex-transcript.js';
 import {
   deleteConversationWithLifecycle, deleteInstanceWithLifecycle, initializeInstance, stopExternalHost,
 } from './instance.js';
@@ -367,9 +366,6 @@ program.command('view')
           if (!host.control) throw new Error('当前 Instance Host 正在启动，请稍后重试');
           host.control.submitConversationInput(conversationId, text);
         },
-        readAgentTranscript: (instance, conversationId) => (
-          readCodexTranscript(instance.store.getSession(conversationId)?.providerSessionId ?? null)
-        ),
         deleteInstance: async (instance) => {
           await deleteInstanceWithLifecycle(instance, stopManagedHost, removeUserServiceIfInstalled);
         },
