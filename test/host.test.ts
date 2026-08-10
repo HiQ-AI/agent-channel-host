@@ -608,6 +608,11 @@ test('Channel 订阅范围与新会话默认模式独立，名称优先取群名
     assert.equal(resolveEventConversation(config, store, groupEvent).reason, 'conversation-not-authorized');
     assert.equal(store.listConversations().length, 0);
 
+    config.channel.subscriptions.groups = 'wake-word';
+    const wakeWordConversation = resolveEventConversation(config, store, groupEvent);
+    assert.equal(wakeWordConversation.reason, 'auto-created');
+    store.deleteConversation(wakeWordConversation.conversation!.id);
+
     config.channel.subscriptions.groups = 'all';
     config.channel.defaultModes.groups = 'reply';
     const auto = resolveEventConversation(config, store, groupEvent);

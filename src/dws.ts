@@ -332,6 +332,35 @@ export function isCurrentUserHistoryMessage(event: NormalizedEvent, currentUserN
   return event.senderName === currentUserName;
 }
 
+export function isCurrentUserHumanMessage(event: NormalizedEvent, currentUserName: string): boolean {
+  if (!isCurrentUserHistoryMessage(event, currentUserName)) return false;
+  const aiTag = firstValue(event.source, ['aiTag', 'ai_tag', 'isAi', 'is_ai']);
+  return aiTag !== true && aiTag !== 'true';
+}
+
+export function applyWakeWordSubscription(
+  config: HostConfig,
+  event: NormalizedEvent,
+  currentUserName: string,
+): NormalizedEvent | null {
+  const subscription = event.kind === 'group'
+    ? config.channel.subscriptions.groups
+    : config.channel.subscriptions.directs;
+  if (subscription !== 'wake-word') return event;
+  if (!isCurrentUserHumanMessage(event, currentUserName)) return null;
+  const content = wakeWordContent(event.content);
+  if (content === null || !content.startsWith(config.channel.wakeWord)) return null;
+  const instruction = content.slice(config.channel.wakeWord.length).replace(/^[\s:：,，、]+/u, '');
+  if (!instruction) return null;
+  return { ...event, content: instruction };
+}
+
+function wakeWordContent(value: unknown): string | null {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return text(firstValue(value as Record<string, unknown>, ['text', 'content']));
+}
+
 export async function dwsDoctor(config: HostConfig): Promise<Record<string, unknown>> {
   const command = await resolveCommand(config.channel.command);
   const version = await execResolved(command, ['--version'], {
@@ -603,14 +632,18 @@ export class DwsChannelAdapter implements ChannelAdapter {
         const key = `${event.kind}:${event.conversationExternalId}`;
         const previous = this.eventQueues.get(key) ?? Promise.resolve();
         const current = previous
-          .then(async () => handlers.onEvent(await stabilizeDwsBotMessage(
-            this.config,
-            event,
-            runDwsJson,
-            (milliseconds) => delayUntilAbort(milliseconds, this.stabilizationAbort.signal),
-            BOT_MESSAGE_REFRESH_DELAYS_MS,
-            this.stabilizationAbort.signal,
-          )))
+          .then(async () => {
+            const stabilized = await stabilizeDwsBotMessage(
+              this.config,
+              event,
+              runDwsJson,
+              (milliseconds) => delayUntilAbort(milliseconds, this.stabilizationAbort.signal),
+              BOT_MESSAGE_REFRESH_DELAYS_MS,
+              this.stabilizationAbort.signal,
+            );
+            const accepted = applyWakeWordSubscription(this.config, stabilized, this.selfUserName!);
+            if (accepted) handlers.onEvent(accepted);
+          })
           .catch(handlers.onFatal)
           .finally(() => {
             if (this.eventQueues.get(key) === current) this.eventQueues.delete(key);
@@ -644,7 +677,9 @@ export class DwsChannelAdapter implements ChannelAdapter {
         until,
       );
       for (const event of events) {
-        onEvent(event);
+        const accepted = applyWakeWordSubscription(this.config, event, this.selfUserName!);
+        if (!accepted) continue;
+        onEvent(accepted);
         count++;
       }
     }
@@ -662,7 +697,9 @@ export class DwsChannelAdapter implements ChannelAdapter {
       const events = await fetchConversationBackfill(this.config, conversation, start, until);
       for (const event of events) {
         if (!isCurrentUserHistoryMessage(event, this.selfUserName)) continue;
-        onEvent(event);
+        const accepted = applyWakeWordSubscription(this.config, event, this.selfUserName);
+        if (!accepted) continue;
+        onEvent(accepted);
         count++;
       }
     }

@@ -11,7 +11,7 @@ export const MINIMUM_CODEX_VERSION = 'codex-cli 0.145.0';
 export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
 export const DEFAULT_CODEX_EFFORT = 'low';
 export const CODEX_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
-export const CHANNEL_SUBSCRIPTION_MODES = ['none', 'selected', 'all'] as const;
+export const CHANNEL_SUBSCRIPTION_MODES = ['none', 'selected', 'all', 'wake-word'] as const;
 export type ChannelSubscriptionMode = typeof CHANNEL_SUBSCRIPTION_MODES[number];
 
 const configSchema = z.object({
@@ -30,6 +30,10 @@ const configSchema = z.object({
       groups: z.enum(CHANNEL_SUBSCRIPTION_MODES).default('selected'),
       directs: z.enum(CHANNEL_SUBSCRIPTION_MODES).default('selected'),
     }).default({ groups: 'selected', directs: 'selected' }),
+    wakeWord: z.string().trim().min(1).refine(
+      (value) => Array.from(value).length <= 32,
+      { message: '唤醒词长度不能超过 32 个字符' },
+    ).optional(),
     defaultModes: z.object({
       groups: z.enum(CONVERSATION_MODES).default('shadow'),
       directs: z.enum(CONVERSATION_MODES).default('shadow'),
@@ -49,7 +53,13 @@ const configSchema = z.object({
     quietWindowMilliseconds: z.number().int().min(0).max(60_000).default(300),
     maxBatchMessages: z.number().int().positive().max(200).default(20),
   }),
-});
+}).transform((config) => ({
+  ...config,
+  channel: {
+    ...config.channel,
+    wakeWord: config.channel.wakeWord ?? inferredWakeWord(config.identity.name),
+  },
+}));
 
 export type HostConfig = z.infer<typeof configSchema>;
 
@@ -73,6 +83,7 @@ export function defaultConfig(instance: string, cwd: string, name: string): Host
         groups: 'selected',
         directs: 'selected',
       },
+      wakeWord: inferredWakeWord(name),
       defaultModes: {
         groups: 'shadow',
         directs: 'shadow',
@@ -93,6 +104,10 @@ export function defaultConfig(instance: string, cwd: string, name: string): Host
       maxBatchMessages: 20,
     },
   };
+}
+
+function inferredWakeWord(identityName: string): string {
+  return Array.from(identityName.trim()).slice(0, 32).join('') || 'Agent';
 }
 
 export function configuredChannels(config: HostConfig): HostConfig['channel'][] {
