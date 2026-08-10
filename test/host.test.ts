@@ -67,6 +67,31 @@ class BackfillChannel extends FakeChannel {
   }
 }
 
+class SelfChatChannel extends FakeChannel {
+  polls = 0;
+  private externalId: string | null = null;
+
+  async pollSelfChat(
+    _start: Date,
+    _until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<number> {
+    this.polls += 1;
+    if (this.polls > 1) return 0;
+    this.externalId = 'self-open-id';
+    onEvent({
+      ...normalizeDwsEvent({
+        type: 'user_im_message_receive_o2o_all', event_id: 'self-chat-event', message_id: 'self-chat-message',
+        sender_open_dingtalk_id: this.externalId, sender_name: '本人', content: '小小鹏：检查自聊',
+      })!,
+      wakeWordInstruction: '检查自聊',
+    });
+    return 1;
+  }
+
+  selfChatExternalId(): string | null { return this.externalId; }
+}
+
 class FakeOwnerLock {
   acquired = 0;
   released = 0;
@@ -469,6 +494,41 @@ test('Host 先建立实时订阅再补拉，补拉完成前不启动 Worker，�
     await waitFor(() => runtime.sessions[0]?.prompts.length === 1);
     assert.match(runtime.sessions[0]!.prompts[0]!, /订阅建立后实时到达/);
     assert.match(runtime.sessions[0]!.prompts[0]!, /离线期间历史消息/);
+    abort.abort();
+    await running;
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+    else process.env.AGENT_CHANNEL_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('唤醒词模式轮询资料页自聊并自动建立固定私聊 Conversation', async () => {
+  const root = resolve('.test-host-self-chat');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const previous = process.env.AGENT_CHANNEL_HOME;
+  process.env.AGENT_CHANNEL_HOME = root;
+  const config = defaultConfig('self-chat-host', '.', '小小鹏');
+  config.channel.wakeWordEnabled = true;
+  config.channel.selfMessagePollSeconds = 1;
+  const channel = new SelfChatChannel();
+  const runtime = new FakeRuntime();
+  const abort = new AbortController();
+  try {
+    const running = runHost(config, {
+      signal: abort.signal, handleProcessSignals: false, channel, runtime,
+      ownerLock: new FakeOwnerLock('self-chat-owner'), log: () => undefined,
+    });
+    await waitFor(() => runtime.sessions[0]?.prompts.length === 1);
+    assert.match(runtime.sessions[0]!.prompts[0]!, /检查自聊/);
+    assert.doesNotMatch(runtime.sessions[0]!.prompts[0]!, /小小鹏：检查自聊/);
+    const observer = new Store(resolve(root, 'instances', 'self-chat-host', 'state.sqlite3'));
+    try {
+      const conversation = observer.listConversations().find((item) => item.externalId === 'self-open-id');
+      assert.equal(conversation?.kind, 'direct');
+      assert.equal(conversation?.title, '本人');
+    } finally { observer.close(); }
     abort.abort();
     await running;
   } finally {
