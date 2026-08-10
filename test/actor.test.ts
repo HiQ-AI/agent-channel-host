@@ -173,7 +173,7 @@ test('活动 turn 中的新消息立即 steer，不等待当前 Agent 处理完�
   }
 });
 
-test('活动 turn 引导失败时 fail closed，不把新消息静默排队成下一 turn', async () => {
+test('活动 turn 已结束导致引导失败时，把新消息补送到下一 turn', async () => {
   const config = defaultConfig('steer-fail', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
   const store = new Store(':memory:');
@@ -195,9 +195,12 @@ test('活动 turn 引导失败时 fail closed，不把新消息静默排队成�
     worker.signal();
     await waitFor(() => session.steered.length === 1);
     session.finish();
-    await waitFor(() => store.status().failed_messages === 1);
-    assert.equal(session.prompts.length, 1);
-    assert.equal(store.pendingEventCount(conversation.id), 1);
+    await waitFor(() => session.prompts.length === 2);
+    assert.match(session.prompts[1]!, /内容：必须引导/);
+    session.finish();
+    await waitFor(() => store.status().forwarded_messages === 2);
+    assert.equal(store.status().failed_messages, 0);
+    assert.equal(store.pendingEventCount(conversation.id), 0);
   } finally {
     await worker.stop();
     store.close();

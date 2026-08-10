@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 修复新消息到达时活动 turn 恰好结束、`steer` 失败后 Worker 被永久封死的问题；未引导成功的消息会保留在 inbox，并自动补送到下一 turn。
+
 ## [1.2.0] - 2026-08-10
 
 ### Changed
