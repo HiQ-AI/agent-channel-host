@@ -262,6 +262,47 @@ export async function fetchConversationBackfill(
   return events.sort((left, right) => Date.parse(left.occurredAt!) - Date.parse(right.occurredAt!));
 }
 
+export async function fetchSelfChatHistory(
+  config: HostConfig,
+  userId: string,
+  userName: string,
+  start: Date,
+  until: Date,
+  runner: typeof runDwsJson = runDwsJson,
+): Promise<NormalizedEvent[]> {
+  let pageTime = start;
+  const events: NormalizedEvent[] = [];
+  while (true) {
+    const value = await runner(config, [
+      'chat', 'message', 'list', '--user', userId,
+      '--time', formatDwsLocalTime(pageTime), '--direction', 'newer', '--limit', '50',
+    ], 45_000);
+    const page = parseHistoryPage(value);
+    let boundary = pageTime.getTime();
+    for (const raw of page.messages) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('DWS 自聊历史消息结构无效');
+      const source = raw as Record<string, unknown>;
+      const externalId = text(firstValue(source, ['senderOpenDingTalkId', 'sender_open_dingtalk_id']));
+      if (!externalId) throw new Error('DWS 自聊历史消息缺少 senderOpenDingTalkId');
+      const event = normalizeDwsHistoryMessage({
+        channelId: config.channel.id,
+        channelProfileId: config.channel.profileId,
+        externalId,
+        title: userName,
+        kind: 'direct',
+      }, raw);
+      const occurred = event.occurredAt ? Date.parse(event.occurredAt) : Number.NaN;
+      if (!Number.isFinite(occurred)) throw new Error('DWS 自聊历史消息缺少有效 createTime');
+      boundary = Math.max(boundary, occurred);
+      if (occurred <= until.getTime()) events.push(event);
+    }
+    if (!page.hasMore) break;
+    if (boundary <= pageTime.getTime()) throw new Error('DWS 自聊历史分页边界未推进');
+    pageTime = new Date(boundary);
+  }
+  return events.sort((left, right) => Date.parse(left.occurredAt!) - Date.parse(right.occurredAt!));
+}
+
 export function parseHistoryPage(value: unknown): HistoryPage {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS 历史返回结构无效');
   const body = value as Record<string, unknown>;
@@ -283,7 +324,10 @@ export function parseHistoryPage(value: unknown): HistoryPage {
   return { messages, hasMore: body.hasMore === true || nested?.hasMore === true };
 }
 
-export function normalizeDwsHistoryMessage(conversation: Conversation, value: unknown): NormalizedEvent {
+export function normalizeDwsHistoryMessage(
+  conversation: Pick<Conversation, 'channelId' | 'channelProfileId' | 'externalId' | 'title' | 'kind'>,
+  value: unknown,
+): NormalizedEvent {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS 历史消息结构无效');
   const source = value as Record<string, unknown>;
   const messageId = text(firstValue(source, ['openMessageId', 'messageId', 'message_id', 'msgId', 'msg_id']));
@@ -314,6 +358,21 @@ export function normalizeDwsHistoryMessage(conversation: Conversation, value: un
 }
 
 export function currentProfileUserName(value: unknown): string {
+  const current = currentProfileEntry(value);
+  const userName = text(current?.userName);
+  if (!userName) throw new Error('DWS 当前 profile 缺少 userName，无法识别本人消息');
+  return userName;
+}
+
+export function currentProfileIdentity(value: unknown): { userId: string; userName: string } {
+  const current = currentProfileEntry(value);
+  const userId = text(current?.userId);
+  const userName = text(current?.userName);
+  if (!userId || !userName) throw new Error('DWS 当前 profile 缺少 userId/userName，无法识别本人消息');
+  return { userId, userName };
+}
+
+function currentProfileEntry(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS profile list 返回结构无效');
   const body = value as Record<string, unknown>;
   const currentProfile = text(body.currentProfile);
@@ -323,9 +382,7 @@ export function currentProfileUserName(value: unknown): string {
     const entry = profile as Record<string, unknown>;
     return entry.isCurrent === true || (currentProfile && text(entry.profile) === currentProfile);
   }) as Record<string, unknown> | undefined;
-  const userName = text(current?.userName);
-  if (!userName) throw new Error('DWS 当前 profile 缺少 userName，无法识别本人消息');
-  return userName;
+  return current;
 }
 
 export function isCurrentUserHistoryMessage(event: NormalizedEvent, currentUserName: string): boolean {
@@ -602,6 +659,8 @@ export class DwsChannelAdapter implements ChannelAdapter {
   private readonly eventQueues = new Map<string, Promise<void>>();
   private stabilizationAbort = new AbortController();
   private selfUserName: string | null = null;
+  private selfUserId: string | null = null;
+  private discoveredSelfChatExternalId: string | null = null;
 
   constructor(private readonly config: HostConfig) {
     this.descriptor = {
@@ -619,7 +678,9 @@ export class DwsChannelAdapter implements ChannelAdapter {
       cwd: this.config.runtime.cwd, encoding: 'utf8', timeout: 10_000, windowsHide: true,
     });
     assertMinimumToolVersion('DWS', MINIMUM_DWS_VERSION, version.stdout.trim());
-    this.selfUserName = currentProfileUserName(await runDwsJson(this.config, ['profile', 'list'], 15_000));
+    const identity = currentProfileIdentity(await runDwsJson(this.config, ['profile', 'list'], 15_000));
+    this.selfUserName = identity.userName;
+    this.selfUserId = identity.userId;
     this.owner = new DwsEventOwner(
       this.config,
       (raw) => {
@@ -700,6 +761,30 @@ export class DwsChannelAdapter implements ChannelAdapter {
       }
     }
     return count;
+  }
+
+  async pollSelfChat(
+    start: Date,
+    until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<number> {
+    if (!this.selfUserId || !this.selfUserName) throw new Error('DWS 当前用户尚未解析');
+    const events = await fetchSelfChatHistory(
+      this.config, this.selfUserId, this.selfUserName, start, until,
+    );
+    let count = 0;
+    for (const event of events) {
+      this.discoveredSelfChatExternalId = event.conversationExternalId;
+      const accepted = applyWakeWordSubscription(this.config, event, this.selfUserName);
+      if (!accepted?.wakeWordInstruction) continue;
+      onEvent(accepted);
+      count++;
+    }
+    return count;
+  }
+
+  selfChatExternalId(): string | null {
+    return this.discoveredSelfChatExternalId;
   }
 
 }

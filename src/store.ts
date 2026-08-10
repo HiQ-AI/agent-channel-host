@@ -551,6 +551,20 @@ export class Store {
         PRAGMA user_version=14;
       `);
     }
+    const selfChatPollVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (selfChatPollVersion < 15) {
+      this.db.exec(`
+        CREATE TABLE self_chat_poll_state (
+          channel_id TEXT NOT NULL,
+          profile_id TEXT NOT NULL,
+          scanned_through_at TEXT NOT NULL,
+          last_success_at TEXT,
+          last_error TEXT,
+          PRIMARY KEY(channel_id,profile_id)
+        );
+        PRAGMA user_version=15;
+      `);
+    }
   }
 
   selfMessagePollStart(conversation: Conversation): Date {
@@ -596,6 +610,36 @@ export class Store {
       lastSuccessAt: row.last_success_at === null ? null : String(row.last_success_at),
       lastError: row.last_error === null ? null : String(row.last_error),
     } : null;
+  }
+
+  selfChatPollStart(channelId: string, profileId: string, fallback: Date): Date {
+    const row = this.db.prepare(
+      'SELECT scanned_through_at FROM self_chat_poll_state WHERE channel_id=? AND profile_id=?',
+    ).get(channelId, profileId) as Row | undefined;
+    return typeof row?.scanned_through_at === 'string'
+      ? new Date(new Date(row.scanned_through_at).getTime() - 2_000)
+      : fallback;
+  }
+
+  completeSelfChatPoll(channelId: string, profileId: string, scannedThroughAt: Date): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO self_chat_poll_state(channel_id,profile_id,scanned_through_at,last_success_at,last_error)
+      VALUES(?,?,?,?,NULL)
+      ON CONFLICT(channel_id,profile_id) DO UPDATE SET
+        scanned_through_at=excluded.scanned_through_at,
+        last_success_at=excluded.last_success_at,
+        last_error=NULL
+    `).run(channelId, profileId, scannedThroughAt.toISOString(), now);
+  }
+
+  failSelfChatPoll(channelId: string, profileId: string, fallback: Date, error: string): void {
+    const start = this.selfChatPollStart(channelId, profileId, fallback);
+    this.db.prepare(`
+      INSERT INTO self_chat_poll_state(channel_id,profile_id,scanned_through_at,last_success_at,last_error)
+      VALUES(?,?,?,NULL,?)
+      ON CONFLICT(channel_id,profile_id) DO UPDATE SET last_error=excluded.last_error
+    `).run(channelId, profileId, start.toISOString(), error);
   }
 
   addConversation(input: {

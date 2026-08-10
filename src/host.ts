@@ -438,12 +438,33 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
         const loaded = await channel.backfill(targets, until, (event) => admitNormalized(event, 'history'));
         log({ type: 'OFFLINE_BACKFILL_COMPLETED', conversations: targets.length, loaded, until: until.toISOString() });
       }
-      if (channel.pollSelfMessages) {
+      if (channel.pollSelfMessages || (config.channel.wakeWordEnabled && channel.pollSelfChat)) {
         const poll = async (): Promise<void> => {
           if (selfMessagePollingStopped || options.signal?.aborted) return;
           const until = selfMessagePollUntil();
           let loaded = 0;
-          for (const conversation of store.listConversations(true)) {
+          if (config.channel.wakeWordEnabled && channel.pollSelfChat) {
+            const fallback = new Date(connectedAt);
+            try {
+              loaded += await channel.pollSelfChat(
+                store.selfChatPollStart(descriptor.channelId, descriptor.profileId, fallback),
+                until,
+                (event) => admitNormalized(event, 'self_poll'),
+              );
+              store.completeSelfChatPoll(descriptor.channelId, descriptor.profileId, until);
+            } catch (error) {
+              const message = (error as Error).message;
+              store.failSelfChatPoll(descriptor.channelId, descriptor.profileId, fallback, message);
+              log({ type: 'SELF_CHAT_POLL_FAILED', channelId: descriptor.channelId, profileId: descriptor.profileId, error: message });
+            }
+          }
+          const selfChatExternalId = channel.selfChatExternalId?.() ?? null;
+          const conversations = channel.pollSelfMessages
+            ? store.listConversations(true).filter(
+              (item) => item.kind !== 'direct' || item.externalId !== selfChatExternalId,
+            )
+            : [];
+          for (const conversation of conversations) {
             try {
               loaded += await channel.pollSelfMessages!([
                 { conversation, start: store.selfMessagePollStart(conversation) },

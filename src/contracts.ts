@@ -24,6 +24,12 @@ export interface ChannelAdapter {
     until: Date,
     onEvent: (event: NormalizedEvent) => void,
   ): Promise<number>;
+  pollSelfChat?(
+    start: Date,
+    until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<number>;
+  selfChatExternalId?(): string | null;
   stop(): Promise<void>;
 }
 
