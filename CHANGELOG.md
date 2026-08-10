@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-10
+
 ### Changed
 
 - 移除 Host 启动时为 Codex 桌面端自动预建、恢复和命名全部会话的逻辑；固定 session 改回仅在消息触发 Worker 时创建或恢复。
@@ -48,6 +50,7 @@
 
 - 首次发布 `@zzusp/agent-channel-host`，提供 DingTalk DWS Channel、每会话固定 Codex session、持久化 inbox、按需 Worker 和交互式管理 View。
 
-[Unreleased]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/HiQ-AI/agent-channel-host/releases/tag/v1.0.0
