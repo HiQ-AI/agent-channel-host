@@ -10,6 +10,7 @@ channel:
   subscriptions:
     groups: selected
     directs: selected
+  wakeWordEnabled: false
   wakeWord: Triss
   defaultModes:
     groups: shadow

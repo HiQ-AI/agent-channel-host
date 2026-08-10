@@ -12,6 +12,7 @@ test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   assert.deepEqual(current.channel, {
     id: 'dingtalk', enabled: true, profileId: 'default', command: 'dws',
     subscriptions: { groups: 'selected', directs: 'selected' },
+    wakeWordEnabled: false,
     wakeWord: 'Agent',
     defaultModes: { groups: 'shadow', directs: 'shadow' },
     selfMessagePollSeconds: 5,
@@ -26,7 +27,7 @@ test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   assert.equal(current.scheduling.maxBatchMessages, 20);
 });
 
-test('既有 v2 配置缺少 Channel 新字段时保持启用并默认 selected', async () => {
+test('既有 v2 配置缺少 Channel 新字段时保持启用且唤醒词模式默认关闭', async () => {
   const root = resolve('.test-config-v2-channel-default');
   const path = resolve(root, 'config.yaml');
   await rm(root, { recursive: true, force: true });
@@ -42,11 +43,13 @@ test('既有 v2 配置缺少 Channel 新字段时保持启用并默认 selected'
     delete legacy.channel.subscriptions;
     delete legacy.channel.defaultModes;
     delete legacy.channel.wakeWord;
+    delete legacy.channel.wakeWordEnabled;
     await writeFile(path, YAML.stringify(legacy), 'utf8');
     const loaded = await loadConfig('legacy-v2', path);
     assert.deepEqual(loaded.identity, { name: 'Agent' });
     assert.equal(loaded.channel.enabled, true);
     assert.deepEqual(loaded.channel.subscriptions, { groups: 'selected', directs: 'selected' });
+    assert.equal(loaded.channel.wakeWordEnabled, false);
     assert.deepEqual(loaded.channel.defaultModes, { groups: 'shadow', directs: 'shadow' });
     assert.equal(loaded.channel.wakeWord, 'Agent');
     await writeConfig(loaded, path);
@@ -58,9 +61,9 @@ test('既有 v2 配置缺少 Channel 新字段时保持启用并默认 selected'
   }
 });
 
-test('唤醒词订阅模式要求 1-32 个字符', () => {
+test('唤醒词模式要求 1-32 个字符', () => {
   const config = defaultConfig('wake-word-validation', '.', 'Agent');
-  config.channel.subscriptions.groups = 'wake-word';
+  config.channel.wakeWordEnabled = true;
   assert.equal(validateConfig(config).channel.wakeWord, 'Agent');
   assert.throws(() => validateConfig({ ...config, channel: { ...config.channel, wakeWord: ' ' } }));
   assert.throws(() => validateConfig({ ...config, channel: { ...config.channel, wakeWord: 'x'.repeat(33) } }));

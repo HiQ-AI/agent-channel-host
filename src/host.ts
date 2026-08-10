@@ -39,7 +39,8 @@ export function selfMessagePollUntil(now = new Date()): Date {
 export interface ConversationResolution {
   conversation: Conversation | null;
   created: boolean;
-  reason: 'authorized' | 'auto-created' | 'subscription-none' | 'conversation-disabled' | 'conversation-not-authorized';
+  wakeWordFallback: boolean;
+  reason: 'authorized' | 'auto-created' | 'wake-word' | 'subscription-none' | 'conversation-disabled' | 'conversation-not-authorized';
 }
 
 export function resolveEventConversation(
@@ -50,9 +51,7 @@ export function resolveEventConversation(
   const subscription = event.kind === 'group'
     ? config.channel.subscriptions.groups
     : config.channel.subscriptions.directs;
-  if (subscription === 'none') {
-    return { conversation: null, created: false, reason: 'subscription-none' };
-  }
+  const wakeWordFallback = config.channel.wakeWordEnabled && Boolean(event.wakeWordInstruction);
   const existing = store.findConversation(
     event.channelId,
     event.channelProfileId,
@@ -60,16 +59,21 @@ export function resolveEventConversation(
     event.conversationExternalId,
   );
   if (existing) {
-    if (!existing.enabled) return { conversation: null, created: false, reason: 'conversation-disabled' };
+    if (!existing.enabled) return { conversation: null, created: false, wakeWordFallback: false, reason: 'conversation-disabled' };
+    if (subscription === 'none' && !wakeWordFallback) {
+      return { conversation: null, created: false, wakeWordFallback: false, reason: 'subscription-none' };
+    }
     const discoveredTitle = discoveredConversationTitle(event);
     if (discoveredTitle && isGeneratedConversationTitle(existing.title, event.kind, event.conversationExternalId)) {
       store.setConversationTitle(existing.id, discoveredTitle);
-      return { conversation: store.getConversation(existing.id) ?? existing, created: false, reason: 'authorized' };
+      return { conversation: store.getConversation(existing.id) ?? existing, created: false, wakeWordFallback: subscription === 'none', reason: subscription === 'none' ? 'wake-word' : 'authorized' };
     }
-    return { conversation: existing, created: false, reason: 'authorized' };
+    return { conversation: existing, created: false, wakeWordFallback: subscription === 'none', reason: subscription === 'none' ? 'wake-word' : 'authorized' };
   }
-  if (subscription === 'selected') {
-    return { conversation: null, created: false, reason: 'conversation-not-authorized' };
+  if (subscription !== 'all' && !wakeWordFallback) {
+    return subscription === 'none'
+      ? { conversation: null, created: false, wakeWordFallback: false, reason: 'subscription-none' }
+      : { conversation: null, created: false, wakeWordFallback: false, reason: 'conversation-not-authorized' };
   }
   let created: Conversation;
   try {
@@ -92,10 +96,10 @@ export function resolveEventConversation(
     );
     if (!concurrent) throw error;
     return concurrent.enabled
-      ? { conversation: concurrent, created: false, reason: 'authorized' }
-      : { conversation: null, created: false, reason: 'conversation-disabled' };
+      ? { conversation: concurrent, created: false, wakeWordFallback: subscription !== 'all', reason: subscription === 'all' ? 'authorized' : 'wake-word' }
+      : { conversation: null, created: false, wakeWordFallback: false, reason: 'conversation-disabled' };
   }
-  return { conversation: created, created: true, reason: 'auto-created' };
+  return { conversation: created, created: true, wakeWordFallback: subscription !== 'all', reason: subscription === 'all' ? 'auto-created' : 'wake-word' };
 }
 
 export class EventDrivenScheduler {
@@ -384,7 +388,10 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
           channelId: normalized.channelId, kind: normalized.kind, mode: conversation.mode,
         });
       }
-      const admitted = store.admitEvent(conversation, normalized, ingress);
+      const eventForAdmission = resolution.wakeWordFallback
+        ? { ...normalized, content: normalized.wakeWordInstruction }
+        : normalized;
+      const admitted = store.admitEvent(conversation, eventForAdmission, ingress);
       if (!admitted.admitted || !admitted.event) {
         log({
           type: 'EVENT_DUPLICATE', conversationId: conversation.id,
