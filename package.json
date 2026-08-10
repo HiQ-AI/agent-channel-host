@@ -1,6 +1,6 @@
 {
   "name": "@zzusp/agent-channel-host",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "An event-driven Channel host for isolated, resumable agent runtime conversations.",
   "repository": {
     "type": "git",

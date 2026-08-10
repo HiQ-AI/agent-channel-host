@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-10
+
 ### Fixed
 
 - 修复新消息到达时活动 turn 恰好结束、`steer` 失败后 Worker 被永久封死的问题；未引导成功的消息会保留在 inbox，并自动补送到下一 turn。
@@ -54,7 +56,8 @@
 
 - 首次发布 `@zzusp/agent-channel-host`，提供 DingTalk DWS Channel、每会话固定 Codex session、持久化 inbox、按需 Worker 和交互式管理 View。
 
-[Unreleased]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/HiQ-AI/agent-channel-host/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/HiQ-AI/agent-channel-host/releases/tag/v1.0.0
