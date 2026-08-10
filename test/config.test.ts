@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import YAML from 'yaml';
-import { defaultConfig, loadConfig, writeConfig } from '../src/config.js';
+import { defaultConfig, loadConfig, validateConfig, writeConfig } from '../src/config.js';
 
 test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   const current = defaultConfig('model-defaults', '.', 'Agent');
@@ -12,6 +12,7 @@ test('v2 配置明确拆分 Channel Runtime Scheduling', () => {
   assert.deepEqual(current.channel, {
     id: 'dingtalk', enabled: true, profileId: 'default', command: 'dws',
     subscriptions: { groups: 'selected', directs: 'selected' },
+    wakeWord: 'Agent',
     defaultModes: { groups: 'shadow', directs: 'shadow' },
     selfMessagePollSeconds: 5,
   });
@@ -40,12 +41,14 @@ test('既有 v2 配置缺少 Channel 新字段时保持启用并默认 selected'
     delete legacy.channel.enabled;
     delete legacy.channel.subscriptions;
     delete legacy.channel.defaultModes;
+    delete legacy.channel.wakeWord;
     await writeFile(path, YAML.stringify(legacy), 'utf8');
     const loaded = await loadConfig('legacy-v2', path);
     assert.deepEqual(loaded.identity, { name: 'Agent' });
     assert.equal(loaded.channel.enabled, true);
     assert.deepEqual(loaded.channel.subscriptions, { groups: 'selected', directs: 'selected' });
     assert.deepEqual(loaded.channel.defaultModes, { groups: 'shadow', directs: 'shadow' });
+    assert.equal(loaded.channel.wakeWord, 'Agent');
     await writeConfig(loaded, path);
     const normalized = await readFile(path, 'utf8');
     assert.equal(normalized.includes('role:'), false);
@@ -53,6 +56,14 @@ test('既有 v2 配置缺少 Channel 新字段时保持启用并默认 selected'
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('唤醒词订阅模式要求 1-32 个字符', () => {
+  const config = defaultConfig('wake-word-validation', '.', 'Agent');
+  config.channel.subscriptions.groups = 'wake-word';
+  assert.equal(validateConfig(config).channel.wakeWord, 'Agent');
+  assert.throws(() => validateConfig({ ...config, channel: { ...config.channel, wakeWord: ' ' } }));
+  assert.throws(() => validateConfig({ ...config, channel: { ...config.channel, wakeWord: 'x'.repeat(33) } }));
 });
 
 test('v2 配置不暴露 turn 超时且忽略旧字段', async () => {
