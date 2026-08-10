@@ -12,13 +12,11 @@ export class ConversationWorker {
   private draining: Promise<void> | null = null;
   private started = false;
   private closed = false;
-  private blockedAfterError = false;
   private signalGeneration = 0;
   private lastSignalAtMs = 0;
   private activeEvents: AdmittedEvent[] | null = null;
   private steering: Promise<void> | null = null;
   private steerRequested = false;
-  private steeringError: Error | null = null;
 
   constructor(
     private readonly config: HostConfig,
@@ -90,7 +88,6 @@ export class ConversationWorker {
     if (events.length > 0) {
       try {
         this.activeEvents = [...events];
-        this.steeringError = null;
         const result = await this.session.deliver(batchPrompt(this.conversation, events));
         await this.awaitSteeringIdle();
         const deliveredEvents = this.activeEvents;
@@ -117,7 +114,6 @@ export class ConversationWorker {
 
   signal(): void {
     if (this.closed) throw new Error('conversation worker 已关闭');
-    if (this.blockedAfterError) return;
     this.signalGeneration += 1;
     this.lastSignalAtMs = Date.now();
     this.store.setWorkerState({
@@ -134,7 +130,7 @@ export class ConversationWorker {
   private startDrain(): void {
     this.draining = this.drain().finally(() => {
       this.draining = null;
-      if (!this.closed && !this.blockedAfterError && this.store.pendingEventCount(this.conversation.id) > 0) this.startDrain();
+      if (!this.closed && this.store.pendingEventCount(this.conversation.id) > 0) this.startDrain();
       else if (!this.closed) this.onIdle(this);
     });
   }
@@ -155,7 +151,6 @@ export class ConversationWorker {
       });
       try {
         this.activeEvents = [...events];
-        this.steeringError = null;
         const result = await this.session.deliver(batchPrompt(this.conversation, events));
         await this.awaitSteeringIdle();
         const deliveredEvents = this.activeEvents;
@@ -223,8 +218,9 @@ export class ConversationWorker {
         sequences: events.map((event) => event.sequence), turnIdPrefix: accepted.turnId.slice(0, 12),
       });
     } catch (error) {
+      // turn 可能在 signal 与 steer 之间结束。保留新消息为 pending，待当前
+      // deliver 收尾后由 drain 作为下一 turn 投递，不能因此封死 Worker。
       this.store.releaseClaimedEvents(events, this.workerId);
-      this.steeringError = error as Error;
       this.log({
         type: 'MESSAGE_STEER_FAILED', conversationId: this.conversation.id,
         sequences: events.map((event) => event.sequence), error: (error as Error).message,
@@ -234,7 +230,6 @@ export class ConversationWorker {
 
   private async awaitSteeringIdle(): Promise<void> {
     while (this.steering) await this.steering;
-    if (this.steeringError) throw new Error(`活动 turn 引导失败：${this.steeringError.message}`);
   }
 
   private async waitForQuietWindow(): Promise<void> {
@@ -248,7 +243,6 @@ export class ConversationWorker {
   }
 
   private onError(error: Error, events: AdmittedEvent[]): void {
-    if (this.steeringError) this.blockedAfterError = true;
     this.store.setWorkerState({
       conversationId: this.conversation.id, workerId: this.workerId,
       runtimeId: this.conversation.runtimeId, state: 'error', processId: this.session.processId,
