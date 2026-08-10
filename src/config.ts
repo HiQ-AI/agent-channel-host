@@ -11,7 +11,7 @@ export const MINIMUM_CODEX_VERSION = 'codex-cli 0.145.0';
 export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
 export const DEFAULT_CODEX_EFFORT = 'low';
 export const CODEX_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
-export const CHANNEL_SUBSCRIPTION_MODES = ['none', 'selected', 'all', 'wake-word'] as const;
+export const CHANNEL_SUBSCRIPTION_MODES = ['none', 'selected', 'all'] as const;
 export type ChannelSubscriptionMode = typeof CHANNEL_SUBSCRIPTION_MODES[number];
 
 const configSchema = z.object({
@@ -30,6 +30,7 @@ const configSchema = z.object({
       groups: z.enum(CHANNEL_SUBSCRIPTION_MODES).default('selected'),
       directs: z.enum(CHANNEL_SUBSCRIPTION_MODES).default('selected'),
     }).default({ groups: 'selected', directs: 'selected' }),
+    wakeWordEnabled: z.boolean().default(false),
     wakeWord: z.string().trim().min(1).refine(
       (value) => Array.from(value).length <= 32,
       { message: '唤醒词长度不能超过 32 个字符' },
@@ -83,6 +84,7 @@ export function defaultConfig(instance: string, cwd: string, name: string): Host
         groups: 'selected',
         directs: 'selected',
       },
+      wakeWordEnabled: false,
       wakeWord: inferredWakeWord(name),
       defaultModes: {
         groups: 'shadow',

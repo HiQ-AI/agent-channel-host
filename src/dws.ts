@@ -343,16 +343,12 @@ export function applyWakeWordSubscription(
   event: NormalizedEvent,
   currentUserName: string,
 ): NormalizedEvent | null {
-  const subscription = event.kind === 'group'
-    ? config.channel.subscriptions.groups
-    : config.channel.subscriptions.directs;
-  if (subscription !== 'wake-word') return event;
-  if (!isCurrentUserHumanMessage(event, currentUserName)) return null;
+  if (!config.channel.wakeWordEnabled || !isCurrentUserHumanMessage(event, currentUserName)) return event;
   const content = wakeWordContent(event.content);
-  if (content === null || !content.startsWith(config.channel.wakeWord)) return null;
+  if (content === null || !content.startsWith(config.channel.wakeWord)) return event;
   const instruction = content.slice(config.channel.wakeWord.length).replace(/^[\s:：,，、]+/u, '');
-  if (!instruction) return null;
-  return { ...event, content: instruction };
+  if (!instruction) return event;
+  return { ...event, wakeWordInstruction: instruction };
 }
 
 function wakeWordContent(value: unknown): string | null {
@@ -431,8 +427,8 @@ export function consumerArgs(eventKey: string, config: HostConfig): string[] {
 
 export function subscribedEventKeys(config: HostConfig): string[] {
   const eventKeys: string[] = [];
-  if (config.channel.subscriptions.groups !== 'none') eventKeys.push(GROUP_EVENT);
-  if (config.channel.subscriptions.directs !== 'none') eventKeys.push(DIRECT_EVENT);
+  if (config.channel.wakeWordEnabled || config.channel.subscriptions.groups !== 'none') eventKeys.push(GROUP_EVENT);
+  if (config.channel.wakeWordEnabled || config.channel.subscriptions.directs !== 'none') eventKeys.push(DIRECT_EVENT);
   return eventKeys;
 }
 

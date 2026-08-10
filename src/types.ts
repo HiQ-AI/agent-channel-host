@@ -70,6 +70,7 @@ export interface NormalizedEvent {
   occurredAt: string | null;
   receivedAt: string;
   source: Record<string, unknown>;
+  wakeWordInstruction?: string;
 }
 
 export interface AdmittedEvent extends NormalizedEvent {

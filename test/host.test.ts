@@ -608,9 +608,10 @@ test('Channel 订阅范围与新会话默认模式独立，名称优先取群名
     assert.equal(resolveEventConversation(config, store, groupEvent).reason, 'conversation-not-authorized');
     assert.equal(store.listConversations().length, 0);
 
-    config.channel.subscriptions.groups = 'wake-word';
-    const wakeWordConversation = resolveEventConversation(config, store, groupEvent);
-    assert.equal(wakeWordConversation.reason, 'auto-created');
+    config.channel.wakeWordEnabled = true;
+    const wakeWordConversation = resolveEventConversation(config, store, { ...groupEvent, wakeWordInstruction: '检查发布状态' });
+    assert.equal(wakeWordConversation.reason, 'wake-word');
+    assert.equal(wakeWordConversation.wakeWordFallback, true);
     store.deleteConversation(wakeWordConversation.conversation!.id);
 
     config.channel.subscriptions.groups = 'all';
@@ -624,11 +625,15 @@ test('Channel 订阅范围与新会话默认模式独立，名称优先取群名
 
     config.channel.defaultModes.groups = 'shadow';
     assert.equal(resolveEventConversation(config, store, groupEvent).conversation?.mode, 'reply');
+    config.channel.subscriptions.groups = 'selected';
+    const subscribedWakeWord = resolveEventConversation(config, store, { ...groupEvent, wakeWordInstruction: '不应二次处理' });
+    assert.equal(subscribedWakeWord.reason, 'authorized');
+    assert.equal(subscribedWakeWord.wakeWordFallback, false);
 
     store.setConversationEnabled(auto.conversation!.id, false);
     assert.equal(resolveEventConversation(config, store, groupEvent).reason, 'conversation-disabled');
     config.channel.subscriptions.groups = 'none';
-    assert.equal(resolveEventConversation(config, store, groupEvent).reason, 'subscription-none');
+    assert.equal(resolveEventConversation(config, store, groupEvent).reason, 'conversation-disabled');
 
     const directEvent = normalizeDwsEvent({
       type: 'user_im_message_receive_o2o_all', event_id: 'direct-policy-1',

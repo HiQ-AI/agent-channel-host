@@ -36,26 +36,24 @@ test('只将严格短占位文案识别为机器人未完成消息', () => {
   }
 });
 
-test('wake-word 仅准入本人严格前缀消息，并移除唤醒词与分隔符', () => {
+test('唤醒词模式只标记本人严格前缀消息，是否兜底准入由 Host 决定', () => {
   const config = defaultConfig('wake-word', '.', '小小鹏');
-  config.channel.subscriptions.groups = 'wake-word';
+  config.channel.wakeWordEnabled = true;
   const event = normalizeDwsEvent({
     type: GROUP_EVENT, event_id: 'wake-1', conversation_id: 'wake-group',
     sender_name: '孙鹏', content: '小小鹏：检查发布状态',
   })!;
-  assert.equal(applyWakeWordSubscription(config, event, '孙鹏')?.content, '检查发布状态');
-  assert.equal(applyWakeWordSubscription(config, { ...event, senderName: '同事甲' }, '孙鹏'), null);
+  assert.equal(applyWakeWordSubscription(config, event, '孙鹏')?.wakeWordInstruction, '检查发布状态');
+  assert.equal(applyWakeWordSubscription(config, { ...event, senderName: '同事甲' }, '孙鹏')?.wakeWordInstruction, undefined);
   const aiEvent = { ...event, source: { ...event.source, aiTag: true } };
   assert.equal(isCurrentUserHumanMessage(aiEvent, '孙鹏'), false);
-  assert.equal(applyWakeWordSubscription(config, aiEvent, '孙鹏'), null);
-  assert.equal(applyWakeWordSubscription(config, { ...event, content: ' 小小鹏：检查' }, '孙鹏'), null);
-  assert.equal(applyWakeWordSubscription(config, { ...event, content: '小小鹏： ' }, '孙鹏'), null);
+  assert.equal(applyWakeWordSubscription(config, aiEvent, '孙鹏')?.wakeWordInstruction, undefined);
+  assert.equal(applyWakeWordSubscription(config, { ...event, content: ' 小小鹏：检查' }, '孙鹏')?.wakeWordInstruction, undefined);
+  assert.equal(applyWakeWordSubscription(config, { ...event, content: '小小鹏： ' }, '孙鹏')?.wakeWordInstruction, undefined);
   const direct = { ...event, kind: 'direct' as const, content: '小小鹏, 处理私聊事项' };
-  assert.equal(applyWakeWordSubscription(config, direct, '孙鹏')?.content, direct.content);
-  config.channel.subscriptions.directs = 'wake-word';
-  assert.equal(applyWakeWordSubscription(config, direct, '孙鹏')?.content, '处理私聊事项');
-  config.channel.subscriptions.groups = 'selected';
-  assert.equal(applyWakeWordSubscription(config, { ...event, senderName: '同事甲' }, '孙鹏')?.content, event.content);
+  assert.equal(applyWakeWordSubscription(config, direct, '孙鹏')?.wakeWordInstruction, '处理私聊事项');
+  config.channel.wakeWordEnabled = false;
+  assert.equal(applyWakeWordSubscription(config, event, '孙鹏')?.wakeWordInstruction, undefined);
 });
 
 test('按 messageId 解析回查正文，并等待非占位内容连续两次稳定', async () => {
@@ -561,8 +559,8 @@ test('DWS 只启动配置允许的共享 consumer，全部 none 时不启动事�
   assert.deepEqual(subscribedEventKeys(config), [DIRECT_EVENT]);
   config.channel.subscriptions = { groups: 'none', directs: 'none' };
   assert.deepEqual(subscribedEventKeys(config), []);
-  config.channel.subscriptions = { groups: 'wake-word', directs: 'none' };
-  assert.deepEqual(subscribedEventKeys(config), [GROUP_EVENT]);
+  config.channel.wakeWordEnabled = true;
+  assert.deepEqual(subscribedEventKeys(config), [GROUP_EVENT, DIRECT_EVENT]);
 });
 
 test('DWS bus ready 必须同时具备 running 状态与可用 status RPC', () => {

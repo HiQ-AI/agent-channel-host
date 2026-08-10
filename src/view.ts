@@ -903,6 +903,13 @@ async function activateChannelItem(
     state.notice = actionNotice ?? `${entry.label} 已选择 ${next}`;
     return;
   }
+  if (item.kind === 'wake-word-enabled') {
+    const entry = createChannelWakeWordEnabledSettingEntry(instance.config, instance.store, target, instance.configFile);
+    const next = entry.value === 'enabled' ? 'disabled' : 'enabled';
+    const actionNotice = await applySettingWithProgress(state, instance, entry, next, actions);
+    state.notice = actionNotice ?? `唤醒词模式已切换为 ${next}`;
+    return;
+  }
   if (item.kind === 'wake-word') {
     const entry = createChannelWakeWordSettingEntry(instance.config, instance.store, target, instance.configFile);
     state.editing = {
@@ -1271,13 +1278,13 @@ export function createChannelSubscriptionSettingEntry(
     `channel:${channel.id}:${channel.profileId}:subscriptions:${kind}`,
     label,
     channel.subscriptions[kind],
-    'none/selected/all/wake-word；View owner 即时重启',
+    'none/selected/all；View owner 即时重启',
     config,
     store,
     configFile,
     (next, value) => {
       if (!CHANNEL_SUBSCRIPTION_MODES.includes(value as ChannelSubscriptionMode)) {
-        throw new Error('订阅模式必须是 none、selected、all 或 wake-word');
+        throw new Error('订阅模式必须是 none、selected 或 all');
       }
       next.channel.subscriptions[kind] = value as ChannelSubscriptionMode;
     },
@@ -1300,7 +1307,7 @@ export function createChannelWakeWordSettingEntry(
     `channel:${channel.id}:${channel.profileId}:wake-word`,
     '唤醒词',
     channel.wakeWord,
-    '1-32 个字符；wake-word 订阅模式使用',
+    '1-32 个字符；唤醒词模式开启时使用',
     config,
     store,
     configFile,
@@ -1311,6 +1318,34 @@ export function createChannelWakeWordSettingEntry(
     },
   );
   entry.section = 'channels';
+  entry.restartHost = true;
+  return entry;
+}
+
+export function createChannelWakeWordEnabledSettingEntry(
+  config: HostConfig,
+  store: Store,
+  target: Pick<ChannelTarget, 'channelId' | 'profileId'>,
+  configFile?: string,
+): SettingEntry {
+  const channel = configuredChannels(config)
+    .find((item) => item.id === target.channelId && item.profileId === target.profileId);
+  if (!channel) throw new Error(`Channel 不存在：${target.channelId}/${target.profileId}`);
+  const entry = configSetting(
+    `channel:${channel.id}:${channel.profileId}:wake-word-enabled`,
+    '唤醒词模式',
+    channel.wakeWordEnabled ? 'enabled' : 'disabled',
+    '作为订阅策略未准入消息的兜底，作用于所有群聊和私聊',
+    config,
+    store,
+    configFile,
+    (next, value) => {
+      if (value !== 'enabled' && value !== 'disabled') throw new Error('唤醒词模式必须是 enabled 或 disabled');
+      next.channel.wakeWordEnabled = value === 'enabled';
+    },
+  );
+  entry.section = 'channels';
+  entry.input = 'toggle';
   entry.restartHost = true;
   return entry;
 }
@@ -1719,13 +1754,14 @@ function renderChannelManagement(
         [selected?.kind === 'groups-default-mode' ? '>' : ' ', '群聊默认模式', channel.defaultModes.groups, '只影响之后新建且未显式指定模式的群聊'],
         [selected?.kind === 'directs-subscription' ? '>' : ' ', '私聊订阅', channel.subscriptions.directs, subscriptionEffect(channel.subscriptions.directs, '私聊')],
         [selected?.kind === 'directs-default-mode' ? '>' : ' ', '私聊默认模式', channel.defaultModes.directs, '只影响之后新建且未显式指定模式的私聊'],
-        [selected?.kind === 'wake-word' ? '>' : ' ', '唤醒词', channel.wakeWord, 'wake-word 模式仅准入本人以该文本开头的消息'],
+        [selected?.kind === 'wake-word-enabled' ? '>' : ' ', '唤醒词模式', channel.wakeWordEnabled ? 'enabled' : 'disabled', '订阅策略未准入时兜底；覆盖所有群聊和私聊'],
+        [selected?.kind === 'wake-word' ? '>' : ' ', '唤醒词', channel.wakeWord, '仅本人真人消息严格以该文本开头时触发'],
       ],
       width,
       {
         separator: ' │ ', dividerSeparator: '─┼─', dividerFill: '─',
         decorate: tableDecorator(color, [
-          'enabled', 'groups-subscription', 'groups-default-mode', 'directs-subscription', 'directs-default-mode', 'wake-word',
+          'enabled', 'groups-subscription', 'groups-default-mode', 'directs-subscription', 'directs-default-mode', 'wake-word-enabled', 'wake-word',
         ].indexOf(selected?.kind ?? ''), 2),
       },
     ),
@@ -2042,7 +2078,7 @@ function channelConversations(instance: ViewInstance, target: Pick<ChannelTarget
 }
 
 type ChannelManagementItem =
-  | { kind: 'enabled' | 'groups-subscription' | 'groups-default-mode' | 'directs-subscription' | 'directs-default-mode' | 'wake-word' | 'search-group' }
+  | { kind: 'enabled' | 'groups-subscription' | 'groups-default-mode' | 'directs-subscription' | 'directs-default-mode' | 'wake-word-enabled' | 'wake-word' | 'search-group' }
   | { kind: 'conversation'; conversation: Conversation };
 
 function channelManagementItems(
@@ -2055,6 +2091,7 @@ function channelManagementItems(
     { kind: 'groups-default-mode' },
     { kind: 'directs-subscription' },
     { kind: 'directs-default-mode' },
+    { kind: 'wake-word-enabled' },
     { kind: 'wake-word' },
     ...channelGroups(instance, target).map((conversation) => ({ kind: 'conversation' as const, conversation })),
     { kind: 'search-group' },
@@ -2065,7 +2102,6 @@ function channelManagementItems(
 function subscriptionEffect(mode: ChannelSubscriptionMode, kind: '群聊' | '私聊'): string {
   if (mode === 'none') return '拒绝该类全部消息';
   if (mode === 'all') return `未知${kind}按对应默认模式建档`;
-  if (mode === 'wake-word') return `仅本人以唤醒词开头时准入，未知${kind}自动建档`;
   return '仅准入已启用的指定会话';
 }
 

@@ -738,7 +738,7 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，职责未�
   state.detailInstanceName = instance.name;
   state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
   config.channel.defaultModes.groups = 'reply';
-  state.selectedChannelItem = 6;
+  state.selectedChannelItem = 7;
   const searches: string[] = [];
   const added: string[] = [];
   const actions = {
@@ -779,7 +779,7 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，职责未�
     assert.match(state.notice ?? '', /最近 50 条消息/);
 
     await handleManagementViewInput('\u001b[D', state, instances, () => undefined, actions);
-    state.selectedChannelItem = 6;
+    state.selectedChannelItem = 7;
     await handleManagementViewInput('\u001b[C', state, instances, () => undefined, actions);
     assert.equal(state.detailConversationId, bound[0]?.id);
     assert.equal(store.listConversations().length, 1);
@@ -979,7 +979,7 @@ test('设置、群搜索和 Instance 向导支持光标移动、Home End 及前�
 
     state.settingsInstanceName = null;
     state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
-    state.selectedChannelItem = 6;
+    state.selectedChannelItem = 7;
     const actions = { searchGroups: async () => [] };
     await handleManagementViewInput('\u001b[C', state, instances, () => undefined, actions);
     await handleManagementViewInput('编器', state, instances, () => undefined, actions);
@@ -1130,8 +1130,6 @@ test('Channel 页面分别选择群聊/私聊订阅与默认模式，并展示�
     state.selectedChannelItem = 1;
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     assert.equal(config.channel.subscriptions.groups, 'all');
-    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
-    assert.equal(config.channel.subscriptions.groups, 'wake-word');
     state.selectedChannelItem = 2;
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     assert.equal(config.channel.defaultModes.groups, 'reply');
@@ -1143,6 +1141,9 @@ test('Channel 页面分别选择群聊/私聊订阅与默认模式，并展示�
     assert.equal(config.channel.defaultModes.directs, 'reply');
     state.selectedChannelItem = 5;
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(config.channel.wakeWordEnabled, true);
+    state.selectedChannelItem = 6;
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     assert.equal(state.editing?.label, '唤醒词');
     state.editing!.value = '小小鹏';
     state.editing!.cursor = 3;
@@ -1150,33 +1151,35 @@ test('Channel 页面分别选择群聊/私聊订阅与默认模式，并展示�
     assert.equal(config.channel.wakeWord, '小小鹏');
     assert.equal(restarts, 6);
     const loaded = await loadConfig(instance.name, configFile);
-    assert.deepEqual(loaded.channel.subscriptions, { groups: 'wake-word', directs: 'all' });
+    assert.deepEqual(loaded.channel.subscriptions, { groups: 'all', directs: 'all' });
+    assert.equal(loaded.channel.wakeWordEnabled, true);
     assert.equal(loaded.channel.wakeWord, '小小鹏');
     assert.deepEqual(loaded.channel.defaultModes, { groups: 'reply', directs: 'reply' });
     const rendered = renderManagementView([instance], state, null, [], 120);
-    assert.match(rendered, /群聊订阅\s+│ wake-word/);
+    assert.match(rendered, /群聊订阅\s+│ all/);
     assert.match(rendered, /群聊默认模式\s+│ reply/);
     assert.match(rendered, /私聊订阅\s+│ all/);
     assert.match(rendered, /私聊默认模式\s+│ reply/);
     assert.match(rendered, /唤醒词\s+│ 小小鹏/);
     assert.match(rendered, /GROUPS[\s\S]*指定群聊/);
     assert.match(rendered, /DIRECTS[\s\S]*指定私聊/);
-    state.selectedChannelItem = 6;
+    assert.match(rendered, /唤醒词模式\s+│ enabled/);
+    state.selectedChannelItem = 7;
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     assert.equal(state.detailConversationId, group.id);
     state.detailConversationId = null;
-    state.selectedChannelItem = 8;
+    state.selectedChannelItem = 9;
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     assert.equal(state.detailConversationId, direct.id);
     state.detailConversationId = null;
-    state.selectedChannelItem = 6;
+    state.selectedChannelItem = 7;
     await handleManagementViewInput('d', state, [instance], () => undefined, actions);
     assert.equal(state.destructiveConfirmation?.conversationId, group.id);
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     assert.equal(store.getConversation(group.id), null);
     assert.ok(state.detailChannel);
     assert.equal(state.destructiveConfirmation, null);
-    state.selectedChannelItem = 7;
+    state.selectedChannelItem = 8;
     await handleManagementViewInput('d', state, [instance], () => undefined, actions);
     assert.equal(
       (state.destructiveConfirmation as { conversationId: string | null } | null)?.conversationId,
