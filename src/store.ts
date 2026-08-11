@@ -858,6 +858,82 @@ export class Store {
     return mapSession(this.db.prepare('SELECT * FROM runtime_sessions WHERE conversation_id=?').get(conversationId) as Row | undefined);
   }
 
+  pendingContinuationConversationIds(): string[] {
+    return (this.db.prepare(`
+      SELECT DISTINCT conversation_id FROM inbound_events
+      WHERE processing_state='admitted' AND ingress='continuation' ORDER BY conversation_id
+    `).all() as Row[]).map((row) => String(row.conversation_id));
+  }
+
+  admitTaskContinuation(input: {
+    conversationId?: string;
+    expectedParentThreadId: string;
+    continuationId: string;
+    text: string;
+  }): {
+    admitted: boolean;
+    conversation: Conversation;
+    eventId: string;
+    sequence: number;
+    processingState: string;
+  } {
+    const expectedParentThreadId = input.expectedParentThreadId.trim();
+    const continuationId = input.continuationId.trim();
+    const content = input.text.trim();
+    if (!expectedParentThreadId) throw new Error('expectedParentThreadId 不能为空');
+    if (!continuationId) throw new Error('continuationId 不能为空');
+    if (!content) throw new Error('续接内容不能为空');
+    const eventId = `continuation:${continuationId}`;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const rows = this.db.prepare(`
+        SELECT c.* FROM conversations c
+        JOIN runtime_sessions s ON s.conversation_id=c.id
+        WHERE s.provider_session_id=? AND c.enabled=1
+        LIMIT 2
+      `).all(expectedParentThreadId) as Row[];
+      if (rows.length === 0) throw new Error('没有匹配该父会话 provider session ID 的已启用 conversation');
+      if (rows.length > 1) throw new Error('父会话 provider session ID 映射到多个 conversation，拒绝猜测');
+      const conversation = mapConversation(rows[0]);
+      if (!conversation) throw new Error('父会话映射读取失败');
+      if (input.conversationId && conversation.id !== input.conversationId) {
+        throw new Error('conversationId 与父会话 provider session 所属 conversation 不一致');
+      }
+      const existing = this.db.prepare(`
+        SELECT conversation_id,ingress,sequence,processing_state FROM inbound_events WHERE fingerprint=?
+      `).get(eventId) as Row | undefined;
+      if (existing) {
+        if (String(existing.conversation_id) !== conversation.id || String(existing.ingress) !== 'continuation') {
+          throw new Error('continuationId 已被其他会话或其他 ingress 使用，拒绝伪幂等');
+        }
+        this.db.exec('COMMIT');
+        return {
+          admitted: false, conversation, eventId,
+          sequence: Number(existing.sequence), processingState: String(existing.processing_state),
+        };
+      }
+      const latest = this.db.prepare(
+        'SELECT COALESCE(MAX(sequence),0) AS sequence FROM inbound_events WHERE conversation_id=?',
+      ).get(conversation.id) as Row;
+      const sequence = Number(latest.sequence) + 1;
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        INSERT INTO inbound_events(
+          id,conversation_id,sequence,fingerprint,event_id,message_id,sender_id,sender_name,
+          body_json,occurred_at,received_at,processing_state,ingress
+        ) VALUES(?,?,?,?,?,NULL,NULL,?,?,?,?,?,'continuation')
+      `).run(
+        randomUUID(), conversation.id, sequence, eventId, eventId, '本地任务续接控制器',
+        JSON.stringify({ content, quotedMessage: null, forwardedMessages: null }), now, now, 'admitted',
+      );
+      this.db.exec('COMMIT');
+      return { admitted: true, conversation, eventId, sequence, processingState: 'admitted' };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   saveSession(session: SessionRecord): void {
     const conversation = this.getConversation(session.conversationId);
     if (!conversation) throw new Error(`conversation 不存在：${session.conversationId}`);

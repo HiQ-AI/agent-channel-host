@@ -575,6 +575,106 @@ test('View 本地输入写入同一 Conversation inbox 并唤醒固定 session',
   }
 });
 
+test('活动 turn 中任务续接不 steer，只在当前 turn 完成后开启下一 turn', async () => {
+  const config = defaultConfig('continuation-next-turn', '.', 'Agent');
+  config.scheduling.quietWindowMilliseconds = 0;
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'continuation-user', title: '续接私聊',
+    responsibility: '', mode: 'shadow', workerWarmSeconds: 60,
+  });
+  store.saveSession({
+    conversationId: conversation.id, runtimeId: 'codex', providerSessionId: 'session-fixed-123456789', generation: 1,
+    lifecycle: 'ready', protocolFingerprint: 'fake:v1', runtimeCwd: '.', bootstrapTurnId: null,
+    createdAt: '2026-08-11T00:00:00.000Z', updatedAt: '2026-08-11T00:00:00.000Z',
+  });
+  const runtime = new FakeRuntime();
+  runtime.blockFirst = true;
+  const scheduler = new EventDrivenScheduler(
+    config, store,
+    new Map([['dingtalk\0default', new FakeChannel()]]),
+    new Map([['codex', runtime]]),
+    () => undefined,
+  );
+  try {
+    admit(store, conversation, 'active-channel-message');
+    scheduler.signal(conversation.id);
+    await waitFor(() => runtime.sessions[0]?.prompts.length === 1);
+    const continuation = store.admitTaskContinuation({
+      conversationId: conversation.id,
+      expectedParentThreadId: 'session-fixed-123456789',
+      continuationId: 'old-run-id',
+      text: '恢复未完成任务',
+    });
+    assert.equal(continuation.admitted, true);
+    scheduler.signalContinuation(conversation.id);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(runtime.sessions[0]!.steered.length, 0);
+    assert.equal(runtime.sessions[0]!.prompts.length, 1);
+    runtime.sessions[0]!.completeActive();
+    await waitFor(() => runtime.sessions[0]!.prompts.length === 2);
+    assert.match(runtime.sessions[0]!.prompts[1]!, /宿主任务续跑事件/);
+    assert.match(runtime.sessions[0]!.prompts[1]!, /恢复未完成任务/);
+    await waitFor(() => String(store.db.prepare(
+      "SELECT processing_state FROM inbound_events WHERE fingerprint='continuation:old-run-id'",
+    ).get()?.processing_state) === 'forwarded');
+  } finally {
+    await scheduler.stop();
+    store.close();
+  }
+});
+
+test('外部 SQLite continuation 在 Host 轮询后自动唤醒并进入 forwarded 终态', async () => {
+  const root = resolve('.test-host-external-continuation');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const previous = process.env.AGENT_CHANNEL_HOME;
+  process.env.AGENT_CHANNEL_HOME = root;
+  const config = defaultConfig('external-continuation', '.', 'Agent');
+  config.channel.enabled = false;
+  config.scheduling.quietWindowMilliseconds = 0;
+  const stateFile = resolve(root, 'instances', 'external-continuation', 'state.sqlite3');
+  const setup = new Store(stateFile);
+  const conversation = setup.addConversation({
+    kind: 'direct', externalId: 'external-continuation-user', title: '外部续接', responsibility: '', mode: 'shadow',
+  });
+  setup.saveSession({
+    conversationId: conversation.id, runtimeId: 'codex', providerSessionId: 'external-parent-thread', generation: 1,
+    lifecycle: 'ready', protocolFingerprint: 'fake:v1', runtimeCwd: '.', bootstrapTurnId: null,
+    createdAt: '2026-08-11T00:00:00.000Z', updatedAt: '2026-08-11T00:00:00.000Z',
+  });
+  setup.close();
+  const runtime = new FakeRuntime();
+  const abort = new AbortController();
+  let ready = false;
+  try {
+    const running = runHost(config, {
+      signal: abort.signal, handleProcessSignals: false, runtime,
+      ownerLock: new FakeOwnerLock('external-continuation-owner'),
+      log: (record) => { if (record.type === 'HOST_READY') ready = true; },
+    });
+    await waitFor(() => ready);
+    const external = new Store(stateFile);
+    try {
+      const admitted = external.admitTaskContinuation({
+        expectedParentThreadId: 'external-parent-thread', continuationId: 'external-run', text: '外部续接内容',
+      });
+      assert.equal(admitted.processingState, 'admitted');
+      await waitFor(() => runtime.sessions[0]?.prompts.length === 1, 2_500);
+      await waitFor(() => String(external.db.prepare(
+        "SELECT processing_state FROM inbound_events WHERE fingerprint='continuation:external-run'",
+      ).get()?.processing_state) === 'forwarded');
+      assert.match(runtime.sessions[0]!.prompts[0]!, /外部续接内容/);
+    } finally { external.close(); }
+    abort.abort();
+    await running;
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+    else process.env.AGENT_CHANNEL_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('Channel disabled 时 Host 不启动 Channel 且不获取其 owner', async () => {
   const root = resolve('.test-disabled-channel-host');
   await rm(root, { recursive: true, force: true });
@@ -739,8 +839,8 @@ function silentRun(turnId: string): DeliveryRun {
   };
 }
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 2_000;
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));

@@ -119,3 +119,24 @@ test('私聊消息来源使用对方 openDingTalkId 和名称，不暴露 Host C
   assert.equal(prompt.includes('发送者OpenDingTalkId'), false);
   store.close();
 });
+
+test('任务续接事件明确标记为宿主控制而不是渠道消息', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'continuation-user', title: '续接私聊', responsibility: '', mode: 'shadow',
+  });
+  const event = store.admitEvent(conversation, {
+    channelId: conversation.channelId,
+    channelProfileId: conversation.channelProfileId,
+    fingerprint: 'continuation-prompt', eventId: 'continuation-prompt', messageId: null,
+    conversationExternalId: conversation.externalId, conversationTitle: conversation.title,
+    kind: conversation.kind, senderId: null, senderName: '本地任务续接控制器',
+    content: '恢复 Task TT-1', quotedMessage: null, forwardedMessages: null,
+    occurredAt: '2026-08-11T00:00:00.000Z', receivedAt: '2026-08-11T00:00:00.000Z', source: {},
+  }, 'continuation').event!;
+  const prompt = batchPrompt(conversation, [event]);
+  assert.match(prompt, /消息类型：宿主任务续跑事件（不是新的渠道消息）/);
+  assert.match(prompt, /不要仅因本控制事件向当前渠道发送消息/);
+  assert.match(prompt, /恢复 Task TT-1/);
+  store.close();
+});
