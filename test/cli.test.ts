@@ -5,6 +5,7 @@ import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { loadConfig, writeConfig } from '../src/config.js';
+import { Store } from '../src/store.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -64,6 +65,28 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     assert.equal(addedBody.mode, 'shadow');
     assert.equal(addedBody.responsibility, '');
     assert.equal(addedBody.workerWarmSeconds, 300);
+    const cliStore = new Store(join(root, 'instances', 'test', 'state.sqlite3'));
+    cliStore.saveSession({
+      conversationId: addedBody.id, runtimeId: 'codex', providerSessionId: 'cli-parent-thread', generation: 1,
+      lifecycle: 'ready', protocolFingerprint: 'test', runtimeCwd: '.', bootstrapTurnId: null,
+      createdAt: '2026-08-11T00:00:00.000Z', updatedAt: '2026-08-11T00:00:00.000Z',
+    });
+    cliStore.close();
+    const continued = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'continue-task', '--instance', 'test',
+      '--provider-session-id', 'cli-parent-thread', '--conversation-id', addedBody.id,
+      '--continuation-id', 'cli-run-1', '--text', 'CLI 续接验证',
+    ], { encoding: 'utf8', env });
+    const continuedBody = JSON.parse(continued.stdout);
+    assert.equal(continuedBody.admitted, true);
+    assert.equal(continuedBody.processingState, 'admitted');
+    assert.equal(continuedBody.sequence, 1);
+    const continuedAgain = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'continue-task', '--instance', 'test',
+      '--provider-session-id', 'cli-parent-thread', '--conversation-id', addedBody.id,
+      '--continuation-id', 'cli-run-1', '--text', 'CLI 幂等重试',
+    ], { encoding: 'utf8', env });
+    assert.deepEqual(JSON.parse(continuedAgain.stdout), { ...continuedBody, admitted: false });
 
     const currentConfig = await loadConfig('test', join(root, 'instances', 'test', 'config.yaml'));
     currentConfig.channel.defaultModes.directs = 'reply';

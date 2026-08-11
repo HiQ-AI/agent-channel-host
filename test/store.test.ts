@@ -516,6 +516,55 @@ test('重启发现活动 claim 时释放消息但保留原 provider session 和 
   store.close();
 });
 
+test('任务续接按父 session 原子准入并提供可回读的幂等状态', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'continuation-target', title: '续接目标', responsibility: '', mode: 'shadow',
+  });
+  store.saveSession({
+    conversationId: conversation.id, runtimeId: 'codex', providerSessionId: 'parent-thread-exact', generation: 1,
+    lifecycle: 'ready', protocolFingerprint: 'test', runtimeCwd: '.', bootstrapTurnId: null,
+    createdAt: '2026-08-11T00:00:00.000Z', updatedAt: '2026-08-11T00:00:00.000Z',
+  });
+  const first = store.admitTaskContinuation({
+    expectedParentThreadId: 'parent-thread-exact', continuationId: 'run-1', text: '继续执行',
+  });
+  const duplicate = store.admitTaskContinuation({
+    expectedParentThreadId: 'parent-thread-exact', continuationId: 'run-1', text: '重复重试',
+  });
+  assert.equal(first.admitted, true);
+  assert.equal(duplicate.admitted, false);
+  assert.equal(duplicate.sequence, first.sequence);
+  assert.equal(duplicate.processingState, 'admitted');
+  assert.deepEqual(store.pendingContinuationConversationIds(), [conversation.id]);
+  assert.throws(() => store.admitTaskContinuation({
+    expectedParentThreadId: 'missing-parent', continuationId: 'run-2', text: '不能投递',
+  }), /没有匹配/);
+  store.close();
+});
+
+test('父 session 多重映射及跨会话 continuationId 冲突均 fail closed', () => {
+  const store = new Store(':memory:');
+  const first = store.addConversation({ kind: 'direct', externalId: 'continuation-a', title: 'A', responsibility: '', mode: 'shadow' });
+  const second = store.addConversation({ kind: 'direct', externalId: 'continuation-b', title: 'B', responsibility: '', mode: 'shadow' });
+  const save = (conversationId: string, providerSessionId: string) => store.saveSession({
+    conversationId, runtimeId: 'codex', providerSessionId, generation: 1, lifecycle: 'ready',
+    protocolFingerprint: 'test', runtimeCwd: '.', bootstrapTurnId: null,
+    createdAt: '2026-08-11T00:00:00.000Z', updatedAt: '2026-08-11T00:00:00.000Z',
+  });
+  save(first.id, 'parent-a');
+  save(second.id, 'parent-b');
+  store.admitTaskContinuation({ expectedParentThreadId: 'parent-a', continuationId: 'same-run', text: 'A' });
+  assert.throws(() => store.admitTaskContinuation({
+    expectedParentThreadId: 'parent-b', continuationId: 'same-run', text: 'B',
+  }), /其他会话/);
+  save(second.id, 'parent-a');
+  assert.throws(() => store.admitTaskContinuation({
+    expectedParentThreadId: 'parent-a', continuationId: 'multi-map', text: '拒绝猜测',
+  }), /多个 conversation/);
+  store.close();
+});
+
 test('lease 只允许一个存活 owner', () => {
   const store = new Store(':memory:');
   assert.equal(store.acquireLease('host', 'one', 1_000, 1_000), true);

@@ -13,6 +13,13 @@ import { randomUUID } from 'node:crypto';
 
 export interface HostControl {
   submitConversationInput(conversationId: string, text: string): void;
+  submitTaskContinuation(input: {
+    conversationId: string;
+    expectedParentThreadId: string;
+    continuationId: string;
+    text: string;
+    delivery: 'next-turn';
+  }): { admitted: boolean; eventId: string; sequence: number; processingState: string };
 }
 
 interface WorkerHandle {
@@ -31,6 +38,7 @@ export interface HostRunOptions {
 }
 
 export const SELF_MESSAGE_REALTIME_SETTLE_MILLISECONDS = 5_000;
+export const EXTERNAL_INPUT_POLL_MILLISECONDS = 1_000;
 
 export function selfMessagePollUntil(now = new Date()): Date {
   return new Date(now.getTime() - SELF_MESSAGE_REALTIME_SETTLE_MILLISECONDS);
@@ -139,6 +147,26 @@ export class EventDrivenScheduler {
     void this.ensureWorker(conversation)
       .then(({ worker }) => {
         if (!this.stopping) worker.signal();
+      })
+      .catch((error) => {
+        if (!this.stopping) this.fatal(error as Error);
+      });
+  }
+
+  signalContinuation(conversationId: string): void {
+    if (this.stopping) return;
+    const conversation = this.store.getConversation(conversationId);
+    if (!conversation?.enabled) return;
+    this.clearWarmTimer(conversationId);
+    const existing = this.workers.get(conversationId);
+    if (existing) {
+      // continuation 永远不能 steer 进当前 turn；当前 turn 收尾会从 pending 自动开启下一 turn。
+      if (!existing.worker.isDeliveringTurn()) existing.worker.signal();
+      return;
+    }
+    void this.ensureWorker(conversation)
+      .then(({ worker }) => {
+        if (!this.stopping && !worker.isDeliveringTurn()) worker.signal();
       })
       .catch((error) => {
         if (!this.stopping) this.fatal(error as Error);
@@ -297,6 +325,7 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     stopResolve();
   };
   let leaseTimer: NodeJS.Timeout | null = null;
+  let externalInputTimer: NodeJS.Timeout | null = null;
   let scheduler: EventDrivenScheduler | null = null;
   let runtimeInitialized = false;
   let lockAcquired = false;
@@ -491,6 +520,12 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     const recovered = scheduler.reconcile();
     startupRecoveryComplete = true;
     for (const conversationId of startupSignals) scheduler.signal(conversationId);
+    externalInputTimer = setInterval(() => {
+      for (const conversationId of store.pendingContinuationConversationIds()) {
+        scheduler?.signalContinuation(conversationId);
+      }
+    }, EXTERNAL_INPUT_POLL_MILLISECONDS);
+    externalInputTimer.unref();
     options.onControlReady?.({
       submitConversationInput: (conversationId, text) => {
         const conversation = store.getConversation(conversationId);
@@ -522,6 +557,23 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
         scheduler?.signal(conversation.id);
         log({ type: 'VIEW_INPUT_ADMITTED', conversationId: conversation.id, sequence: admitted.event?.sequence });
       },
+      submitTaskContinuation: ({
+        conversationId, expectedParentThreadId, continuationId, text, delivery,
+      }) => {
+        if (delivery !== 'next-turn') throw new Error('task continuation 只支持 next-turn 投递');
+        const admitted = store.admitTaskContinuation({
+          conversationId, expectedParentThreadId, continuationId, text,
+        });
+        if (admitted.admitted) scheduler?.signalContinuation(conversationId);
+        log({
+          type: 'TASK_CONTINUATION_ADMITTED', conversationId, eventId: admitted.eventId,
+          admitted: admitted.admitted, sequence: admitted.sequence,
+        });
+        return {
+          admitted: admitted.admitted, eventId: admitted.eventId,
+          sequence: admitted.sequence, processingState: admitted.processingState,
+        };
+      },
     });
     if (recovered.length > 0) log({ type: 'PENDING_RECONCILED', conversations: recovered.length });
     log({
@@ -542,6 +594,7 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     if (selfMessagePollTimer) clearTimeout(selfMessagePollTimer);
     const fatalError = fatal as Error | null;
     if (leaseTimer) clearInterval(leaseTimer);
+    if (externalInputTimer) clearInterval(externalInputTimer);
     await scheduler?.stop();
     if (channelOwned && channel) {
       await channel.stop().catch((error) => log({ type: 'CHANNEL_STOP_ERROR', error: (error as Error).message }));

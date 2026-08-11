@@ -6,6 +6,7 @@ interface MessageEnvelope {
   senderId: string | null;
   time: string;
   content: string;
+  kind?: 'channel' | 'continuation';
 }
 
 export function conversationResponsibilityReminder(responsibility: string): string | null {
@@ -41,6 +42,7 @@ export function batchPrompt(conversation: Conversation, events: AdmittedEvent[])
     senderId: event.senderId,
     time: event.occurredAt ?? event.receivedAt,
     content: messageContent(event.content, event.quotedMessage, event.forwardedMessages),
+    kind: event.ingress === 'continuation' ? 'continuation' : 'channel',
   })));
 }
 
@@ -63,6 +65,10 @@ function messagePrompt(conversation: Conversation, messages: MessageEnvelope[]):
   const rendered = messages
     .map((message, index) => [
       `消息 ${index + 1}`,
+      ...(message.kind === 'continuation' ? [
+        '消息类型：宿主任务续跑事件（不是新的渠道消息）',
+        '处理约束：按任务账本继续执行；不要仅因本控制事件向当前渠道发送消息。',
+      ] : []),
       `发送者：${message.sender}`,
       ...(conversation.channelId === 'dingtalk' && conversation.kind === 'group'
         ? [`发送者OpenDingTalkId：${message.senderId ?? '未知'}`]

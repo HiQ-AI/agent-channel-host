@@ -1,0 +1,10 @@
+case,round-1
+父session精确映射与原子准入,PASS
+重复continuation幂等回读,PASS
+父session零映射或多映射拒绝,PASS
+跨会话幂等键冲突拒绝,PASS
+活动turn不steer且下一turn投递,PASS
+外部SQLite写入由Host轮询唤醒,PASS
+成功后processing_state进入forwarded,PASS
+CLI真实准入与重复回读,PASS
+完整构建与回归测试,PASS

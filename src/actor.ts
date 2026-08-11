@@ -127,6 +127,8 @@ export class ConversationWorker {
 
   isBusy(): boolean { return this.draining !== null || Boolean(this.session.hasBackgroundWork?.()); }
 
+  isDeliveringTurn(): boolean { return this.draining !== null || this.activeEvents !== null; }
+
   private startDrain(): void {
     this.draining = this.drain().finally(() => {
       this.draining = null;

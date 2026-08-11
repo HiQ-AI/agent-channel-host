@@ -172,6 +172,39 @@ conversation.command('list')
     }
   });
 
+conversation.command('continue-task')
+  .description('把中断任务可靠投递到父会话的下一个 turn')
+  .requiredOption('--instance <name>', 'instance 名称')
+  .requiredOption('--provider-session-id <id>', '完整 provider session ID')
+  .requiredOption('--text <text>', '发送给 Agent 的文本')
+  .requiredOption('--continuation-id <id>', '调用方稳定 continuation ID')
+  .option('--conversation-id <id>', '预期 conversation UUID；提供时会严格校验')
+  .option('--delivery <mode>', '固定为 next-turn', 'next-turn')
+  .action(async (options) => {
+    const config = await loadConfig(options.instance);
+    const text = String(options.text).trim();
+    const continuationId = String(options.continuationId).trim();
+    if (!text) throw new Error('--text 不能为空');
+    if (!continuationId) throw new Error('--continuation-id 不能为空');
+    if (options.delivery !== 'next-turn') throw new Error('--delivery 只支持 next-turn');
+    const store = new Store(statePath(options.instance));
+    try {
+      const admitted = store.admitTaskContinuation({
+        conversationId: options.conversationId,
+        expectedParentThreadId: String(options.providerSessionId),
+        continuationId,
+        text,
+      });
+      print({
+        ok: true, admitted: admitted.admitted, conversationId: admitted.conversation.id,
+        providerSessionId: String(options.providerSessionId), eventId: admitted.eventId,
+        sequence: admitted.sequence, processingState: admitted.processingState, delivery: 'next-turn',
+      });
+    } finally {
+      store.close();
+    }
+  });
+
 for (const enabled of [true, false]) {
   conversation.command(enabled ? 'enable' : 'disable')
     .requiredOption('--instance <name>', 'instance 名称')
