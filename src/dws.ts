@@ -753,7 +753,7 @@ export class DwsChannelAdapter implements ChannelAdapter {
     for (const { conversation, start } of targets) {
       const events = await fetchConversationBackfill(this.config, conversation, start, until);
       for (const event of events) {
-        if (!isCurrentUserHistoryMessage(event, this.selfUserName)) continue;
+        if (!isCurrentUserHumanMessage(event, this.selfUserName)) continue;
         const accepted = applyWakeWordSubscription(this.config, event, this.selfUserName);
         if (!accepted) continue;
         onEvent(accepted);

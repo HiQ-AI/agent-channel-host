@@ -203,7 +203,7 @@ agent-channel conversation add `
 - `none`：该类消息全部拒绝；
 - `selected`：仅准入已登记且 enabled 的 Conversation；
 
-Channel 还提供独立的 `channel.wakeWordEnabled` 唤醒词模式开关。开启后，它作为上述订阅策略的兜底并同时覆盖所有群聊和私聊：已被订阅策略准入的消息照常处理，不重复套用唤醒词；未被订阅策略准入时，仅当前 DWS profile 本人真人发送、且正文严格以 `channel.wakeWord` 开头的消息会被准入。带 AI 标记的本人消息不会触发，匹配后移除唤醒词和紧随其后的常用分隔符，未知会话按对应默认模式自动建档。
+Channel 还提供独立的 `channel.wakeWordEnabled` 唤醒词模式开关。开启后，它同时观察所有群聊和私聊：已被常规订阅策略准入的消息只进入来源固定 Conversation，不重复创建任务；未被常规策略准入时，当前 DWS profile 本人真人发送且正文严格以 `channel.wakeWord` 开头的消息，会创建一条独立唤醒任务 Conversation 和独立 Codex session。唤醒任务固定使用自身 `shadow` 模式，不读取群聊/私聊默认模式；带 AI 标记的本人消息不会进入定时补拉。
 - `all`：未知 Conversation 收到首条消息时以空职责、对应默认模式和当前 runtime 建档，再持久准入；空职责使用 Agent 自身职责。显式 disabled 的 Conversation 仍然拒绝，不会被 `all` 绕过。
 
 “群聊默认模式”和“私聊默认模式”分别取 `shadow/reply`，只影响之后自动建档或未显式指定 mode 的新 Conversation；已有 Conversation 的 mode 不会被批量改写。`reply` 表示 Host 允许 Agent 的 reply 决定进入发送门禁，不表示每条消息都必须回复。旧 version 2 配置缺少这两个字段时均按 `shadow` 加载。
@@ -227,7 +227,7 @@ channel:
   selfMessagePollSeconds: 5
 ```
 
-`none/selected/all` 是群聊和私聊的常规 Host 准入策略，`shadow/reply` 是新 Conversation 的默认发言权限，唤醒词模式则是常规策略未准入时的统一兜底。DingTalk 始终只有一个 Channel owner 和一个 bus；唤醒词模式开启时，即使群聊和私聊均为 `none`，也会启动两类共享 consumer，但不会为每个会话创建接收服务。交互式 `view` 可在 Channel 页面开关唤醒词模式、编辑 1–32 字符的唤醒词，并管理 Host 重启。
+`none/selected/all` 是群聊和私聊的常规 Host 准入策略，`shadow/reply` 只决定常规新 Conversation 的默认发言权限；唤醒词任务独立于两类 Conversation 及其默认模式。DingTalk 始终只有一个 Channel owner 和一个 bus；唤醒词模式开启时，即使群聊和私聊均为 `none`，也会启动两类共享 consumer，但不会为每个会话创建接收服务。交互式 `view` 可在 Channel 页面开关唤醒词模式、编辑 1–32 字符的唤醒词，并管理 Host 重启。
 
 ## 离线 runtime canary
 
@@ -337,9 +337,9 @@ agent-channel service remove --instance triss
 
 - SQLite WAL 保证 Host 收到事件后的本地 admission 与投递状态持久化。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
 - 离线补拉使用 `dws chat message list --direction newer`：群聊按 `--group`、私聊按 `--open-dingtalk-id` 分页读取。DWS 时间参数只有秒级且无时区，Host 固定按 `Asia/Shanghai` 解释，因此采用 2 秒重叠窗口。
-- 实时订阅建立后，Host 默认在上一轮完成 5 秒后再次串行扫描已启用会话，只保留当前 DWS profile 用户发送的历史消息。唤醒词模式开启时，每轮还会先按当前 profile 的 `userId` 查询一次资料页自聊窗口；命中唤醒词后自动建立固定私聊 Conversation。每轮截止到当前时间前 5 秒，让实时订阅优先准入；随后按 `openMessageId` 复用 inbox 唯一约束去重。普通会话水位保存在 `self_message_poll_state`，自聊发现水位按 Channel/profile 单独持久化，失败均不推进。
+- 实时订阅建立后，Host 默认在上一轮完成 5 秒后再次串行扫描已启用常规会话，只保留当前 DWS profile 本人真人发送的历史消息。唤醒词模式开启时，每轮还会先按当前 profile 的 `userId` 查询一次资料页自聊窗口；命中唤醒词后创建独立唤醒任务 Conversation。每轮截止到当前时间前 5 秒，让实时订阅优先准入；随后按 `openMessageId` 复用 inbox 唯一约束去重。普通会话水位保存在 `self_message_poll_state`，自聊发现水位按 Channel/profile 单独持久化，失败均不推进。
 - 本人补拉不会并发启动多个会话查询，也不会使用固定周期重叠执行：一轮先查询一次自聊窗口，再逐会话、逐页读取，整轮结束后才开始下一次等待。发现自聊 Conversation 后会从普通逐会话列表排除，避免同一窗口每轮查询两次。会话越多时同一会话的实际扫描周期会相应变长，以限制 DWS 子进程和历史接口压力。可通过 `channel.selfMessagePollSeconds` 设置 1–300 秒轮间等待。
-- 开启唤醒词模式后，实时订阅、启动离线补拉和本人定时补拉使用同一识别规则。示例唤醒词为“小小鹏”时，常规订阅未准入的 `小小鹏：检查发布状态` 会把“检查发布状态”交给对应固定 session；` 小小鹏：检查`、他人发送的同文消息、只有唤醒词而没有事项的消息均不会触发兜底。常规订阅已准入的会话仍按原消息处理，不重复投递。
+- 开启唤醒词模式后，实时订阅、启动离线补拉和本人定时补拉使用同一识别规则。示例唤醒词为“小小鹏”时，常规订阅未准入的 `小小鹏：检查发布状态` 会新建独立 session 处理“检查发布状态”；` 小小鹏：检查`、他人发送的同文消息、只有唤醒词而没有事项的消息均不会触发。常规订阅已准入的会话仍按原消息处理，不重复创建唤醒任务。
 - Host 启动只恢复未转发及未达 3 次上限的 failed inbox，不恢复或发送历史 outbox。schema v13 会把旧 `completed` 原位迁移为 `forwarded`、删除旧 decision 表，并为已有 Conversation 补上默认职责提醒间隔 5；遗留 outbox 不进入新运行路径。
 - Host 不启动第二个网络接收服务；当前数据面是一个 DWS owner、一个 bus，以及按群聊/私聊订阅范围启停的共享 consumer。
 - Host 仅在 `dws event status` 同时返回 `state=running` 和可用 live RPC 时认定 bus ready；只有存活 PID、没有 IPC 的状态会明确报告为 stale bus/PID 复用。DWS 子进程退出时保留经脱敏且有界的 stderr 根因，不再只显示 `code=5`。

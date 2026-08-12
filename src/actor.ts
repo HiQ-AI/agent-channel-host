@@ -40,7 +40,7 @@ export class ConversationWorker {
     });
     try {
       let history: RecentGroupHistory | null = null;
-      if (this.conversation.kind === 'group') {
+      if (this.conversation.kind === 'group' && this.conversation.purpose === 'channel') {
         const onboarding = this.store.getGroupOnboarding(this.conversation.id);
         if (!onboarding) throw new Error(`群 onboarding 状态不存在：${this.conversation.id}`);
         if (!['forwarded', 'submitted', 'delivered', 'delivery_unknown'].includes(onboarding.state)) {
@@ -48,7 +48,7 @@ export class ConversationWorker {
         }
       }
       await this.session.start();
-      if (this.conversation.kind === 'group') await this.deliverRecentHistory(history);
+      if (this.conversation.kind === 'group' && this.conversation.purpose === 'channel') await this.deliverRecentHistory(history);
       this.started = true;
       this.store.setWorkerState({
         conversationId: this.conversation.id, workerId: this.workerId,

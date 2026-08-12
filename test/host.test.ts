@@ -503,7 +503,7 @@ test('Host 先建立实时订阅再补拉，补拉完成前不启动 Worker，�
   }
 });
 
-test('唤醒词模式轮询资料页自聊并自动建立固定私聊 Conversation', async () => {
+test('唤醒词模式轮询资料页自聊并创建独立唤醒 Conversation', async () => {
   const root = resolve('.test-host-self-chat');
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true });
@@ -525,9 +525,11 @@ test('唤醒词模式轮询资料页自聊并自动建立固定私聊 Conversati
     assert.doesNotMatch(runtime.sessions[0]!.prompts[0]!, /小小鹏：检查自聊/);
     const observer = new Store(resolve(root, 'instances', 'self-chat-host', 'state.sqlite3'));
     try {
-      const conversation = observer.listConversations().find((item) => item.externalId === 'self-open-id');
+      const conversation = observer.listConversations().find((item) => item.purpose === 'wake');
       assert.equal(conversation?.kind, 'direct');
-      assert.equal(conversation?.title, '本人');
+      assert.equal(conversation?.mode, 'shadow');
+      assert.match(conversation?.title ?? '', /^唤醒 · 私聊 · 本人$/);
+      assert.match(conversation?.externalId ?? '', /^wake:/);
     } finally { observer.close(); }
     abort.abort();
     await running;
@@ -769,10 +771,21 @@ test('Channel 订阅范围与新会话默认模式独立，名称优先取群名
     assert.equal(store.listConversations().length, 0);
 
     config.channel.wakeWordEnabled = true;
+    config.channel.defaultModes.groups = 'reply';
     const wakeWordConversation = resolveEventConversation(config, store, { ...groupEvent, wakeWordInstruction: '检查发布状态' });
     assert.equal(wakeWordConversation.reason, 'wake-word');
     assert.equal(wakeWordConversation.wakeWordFallback, true);
+    assert.equal(wakeWordConversation.conversation?.purpose, 'wake');
+    assert.equal(wakeWordConversation.conversation?.mode, 'shadow');
+    assert.match(wakeWordConversation.conversation?.externalId ?? '', /^wake:/);
+    assert.equal(store.getGroupOnboarding(wakeWordConversation.conversation!.id), null);
+    assert.equal(wakeWordConversation.event.content, '检查发布状态');
+    const secondWake = resolveEventConversation(config, store, {
+      ...groupEvent, fingerprint: `${groupEvent.fingerprint}-second`, wakeWordInstruction: '第二项任务',
+    });
+    assert.notEqual(secondWake.conversation?.id, wakeWordConversation.conversation?.id);
     store.deleteConversation(wakeWordConversation.conversation!.id);
+    store.deleteConversation(secondWake.conversation!.id);
 
     config.channel.subscriptions.groups = 'all';
     config.channel.defaultModes.groups = 'reply';

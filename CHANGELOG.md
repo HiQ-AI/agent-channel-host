@@ -8,7 +8,8 @@
 
 - 新增 durable 任务续接入口 `conversation continue-task`：按完整父 provider session 原子准入，支持稳定 continuation ID 幂等重试，并固定在当前活动 turn 之后另开下一 turn，避免任务控制事件误入 `steer`。
 - Channel 新增独立唤醒词模式开关，作为群聊与私聊常规订阅策略未准入时的统一兜底；已订阅消息保持原逻辑且不会重复处理，兜底仅接收本人以唤醒词开头的真人消息。
-- 唤醒词模式支持钉钉资料页自聊窗口：每轮按当前 DWS profile 的 `userId` 查询一次自聊历史，命中后自动建立固定私聊 Conversation，并使用独立持久化水位及 inbox 去重。
+- 唤醒词模式支持钉钉资料页自聊窗口：每轮按当前 DWS profile 的 `userId` 查询一次自聊历史，命中后建立独立任务 Conversation，并使用独立持久化水位及 inbox 去重。
+- 唤醒消息改为创建独立任务 Conversation 与独立 Codex session，不复用来源群聊/私聊会话，也不继承两类会话的默认模式；定时补拉统一剔除本人 AI 消息。
 
 ## [1.2.1] - 2026-08-10
 

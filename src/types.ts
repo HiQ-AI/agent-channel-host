@@ -12,6 +12,7 @@ export interface Conversation {
   channelId: string;
   channelProfileId: string;
   kind: ConversationKind;
+  purpose: 'channel' | 'wake';
   externalId: string;
   title: string;
   responsibility: string;

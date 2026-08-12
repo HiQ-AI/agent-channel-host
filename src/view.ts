@@ -1737,6 +1737,7 @@ function renderChannelManagement(
     .find((row) => row.channelId === target.channelId && row.profileId === target.profileId) ?? {};
   const groups = channelGroups(instance, target);
   const directs = channelDirects(instance, target);
+  const wakes = channelWakes(instance, target);
   const items = channelManagementItems(instance, target);
   const selected = items[state.selectedChannelItem];
   const lines = [
@@ -1796,6 +1797,18 @@ function renderChannelManagement(
         : -1, 2),
     ),
     ansi('指定私聊使用稳定 openDingTalkId 登记；事件能提供人员姓名时显示姓名，不按姓名猜测 ID。可用 conversation add 添加后在此管理。', 'dim', color),
+    '', heading('WAKES', color),
+    ...table(
+      ['', 'WAKE TASK', 'STATE', 'RUNTIME'],
+      wakes.map((wake) => [
+        selected?.kind === 'conversation' && selected.conversation.id === wake.id ? '>' : ' ', wake.title,
+        wake.enabled ? 'enabled' : 'disabled', wake.runtimeId,
+      ]),
+      width,
+      semanticTable(color, selected?.kind === 'conversation'
+        ? wakes.findIndex((wake) => wake.id === selected.conversation.id)
+        : -1, 2),
+    ),
   ];
   return lines;
 }
@@ -2054,12 +2067,12 @@ function wrapAnsiLine(value: string, width: number): string[] {
 }
 
 function channelGroups(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
-  return channelConversations(instance, target).filter((conversation) => conversation.kind === 'group');
+  return channelConversations(instance, target).filter((conversation) => conversation.purpose === 'channel' && conversation.kind === 'group');
 }
 
 function channelDirects(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
   return channelConversations(instance, target)
-    .filter((conversation) => conversation.kind === 'direct')
+    .filter((conversation) => conversation.purpose === 'channel' && conversation.kind === 'direct')
     .map((conversation) => ({
       ...conversation,
       title: displayConversationTitle(
@@ -2068,6 +2081,10 @@ function channelDirects(instance: ViewInstance, target: Pick<ChannelTarget, 'cha
           .find((member) => member.externalUserId === conversation.externalId)?.displayName ?? null,
       ),
     }));
+}
+
+function channelWakes(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
+  return channelConversations(instance, target).filter((conversation) => conversation.purpose === 'wake');
 }
 
 function channelConversations(instance: ViewInstance, target: Pick<ChannelTarget, 'channelId' | 'profileId'>): Conversation[] {
@@ -2096,6 +2113,7 @@ function channelManagementItems(
     ...channelGroups(instance, target).map((conversation) => ({ kind: 'conversation' as const, conversation })),
     { kind: 'search-group' },
     ...channelDirects(instance, target).map((conversation) => ({ kind: 'conversation' as const, conversation })),
+    ...channelWakes(instance, target).map((conversation) => ({ kind: 'conversation' as const, conversation })),
   ];
 }
 

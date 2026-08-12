@@ -46,6 +46,7 @@ export function selfMessagePollUntil(now = new Date()): Date {
 
 export interface ConversationResolution {
   conversation: Conversation | null;
+  event: NormalizedEvent;
   created: boolean;
   wakeWordFallback: boolean;
   reason: 'authorized' | 'auto-created' | 'wake-word' | 'subscription-none' | 'conversation-disabled' | 'conversation-not-authorized';
@@ -66,48 +67,59 @@ export function resolveEventConversation(
     event.kind,
     event.conversationExternalId,
   );
-  if (existing) {
-    if (!existing.enabled) return { conversation: null, created: false, wakeWordFallback: false, reason: 'conversation-disabled' };
-    if (subscription === 'none' && !wakeWordFallback) {
-      return { conversation: null, created: false, wakeWordFallback: false, reason: 'subscription-none' };
-    }
+  if (existing?.enabled && subscription !== 'none') {
     const discoveredTitle = discoveredConversationTitle(event);
     if (discoveredTitle && isGeneratedConversationTitle(existing.title, event.kind, event.conversationExternalId)) {
       store.setConversationTitle(existing.id, discoveredTitle);
-      return { conversation: store.getConversation(existing.id) ?? existing, created: false, wakeWordFallback: subscription === 'none', reason: subscription === 'none' ? 'wake-word' : 'authorized' };
+      return { conversation: store.getConversation(existing.id) ?? existing, event, created: false, wakeWordFallback: false, reason: 'authorized' };
     }
-    return { conversation: existing, created: false, wakeWordFallback: subscription === 'none', reason: subscription === 'none' ? 'wake-word' : 'authorized' };
+    return { conversation: existing, event, created: false, wakeWordFallback: false, reason: 'authorized' };
   }
-  if (subscription !== 'all' && !wakeWordFallback) {
-    return subscription === 'none'
-      ? { conversation: null, created: false, wakeWordFallback: false, reason: 'subscription-none' }
-      : { conversation: null, created: false, wakeWordFallback: false, reason: 'conversation-not-authorized' };
+  if (subscription === 'all' && !existing) {
+    const created = createChannelConversation(config, store, event);
+    return { conversation: created, event, created: true, wakeWordFallback: false, reason: 'auto-created' };
   }
-  let created: Conversation;
-  try {
-    created = store.addConversation({
-      channelId: event.channelId,
-      channelProfileId: event.channelProfileId,
-      kind: event.kind,
-      externalId: event.conversationExternalId,
-      title: discoveredConversationTitle(event) || anonymousConversationTitle(event.kind, event.conversationExternalId),
-      responsibility: '',
-      mode: event.kind === 'group' ? config.channel.defaultModes.groups : config.channel.defaultModes.directs,
-      runtimeId: config.runtime.id,
-    });
-  } catch (error) {
-    const concurrent = store.findConversation(
-      event.channelId,
-      event.channelProfileId,
-      event.kind,
-      event.conversationExternalId,
-    );
-    if (!concurrent) throw error;
-    return concurrent.enabled
-      ? { conversation: concurrent, created: false, wakeWordFallback: subscription !== 'all', reason: subscription === 'all' ? 'authorized' : 'wake-word' }
-      : { conversation: null, created: false, wakeWordFallback: false, reason: 'conversation-disabled' };
+  if (wakeWordFallback) {
+    const externalId = `wake:${event.fingerprint}`;
+    const routedEvent = {
+      ...event,
+      conversationExternalId: externalId,
+      conversationTitle: wakeConversationTitle(event),
+      content: event.wakeWordInstruction,
+    };
+    try {
+      const created = store.addConversation({
+        channelId: event.channelId, channelProfileId: event.channelProfileId,
+        kind: event.kind, purpose: 'wake', externalId,
+        title: routedEvent.conversationTitle, responsibility: '', mode: 'shadow', runtimeId: config.runtime.id,
+      });
+      return { conversation: created, event: routedEvent, created: true, wakeWordFallback: true, reason: 'wake-word' };
+    } catch (error) {
+      const concurrent = store.findConversation(event.channelId, event.channelProfileId, event.kind, externalId);
+      if (!concurrent) throw error;
+      return { conversation: concurrent, event: routedEvent, created: false, wakeWordFallback: true, reason: 'wake-word' };
+    }
   }
-  return { conversation: created, created: true, wakeWordFallback: subscription !== 'all', reason: subscription === 'all' ? 'auto-created' : 'wake-word' };
+  if (existing && !existing.enabled) return { conversation: null, event, created: false, wakeWordFallback: false, reason: 'conversation-disabled' };
+  return subscription === 'none'
+    ? { conversation: null, event, created: false, wakeWordFallback: false, reason: 'subscription-none' }
+    : { conversation: null, event, created: false, wakeWordFallback: false, reason: 'conversation-not-authorized' };
+}
+
+function createChannelConversation(config: HostConfig, store: Store, event: NormalizedEvent): Conversation {
+  return store.addConversation({
+    channelId: event.channelId, channelProfileId: event.channelProfileId, kind: event.kind,
+    externalId: event.conversationExternalId,
+    title: discoveredConversationTitle(event) || anonymousConversationTitle(event.kind, event.conversationExternalId),
+    responsibility: '', mode: event.kind === 'group' ? config.channel.defaultModes.groups : config.channel.defaultModes.directs,
+    runtimeId: config.runtime.id,
+  });
+}
+
+function wakeConversationTitle(event: NormalizedEvent): string {
+  const sourceKind = event.kind === 'group' ? '群聊' : '私聊';
+  const sourceTitle = discoveredConversationTitle(event) ?? '未知来源';
+  return `唤醒 · ${sourceKind} · ${sourceTitle}`;
 }
 
 export class EventDrivenScheduler {
@@ -417,10 +429,7 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
           channelId: normalized.channelId, kind: normalized.kind, mode: conversation.mode,
         });
       }
-      const eventForAdmission = resolution.wakeWordFallback
-        ? { ...normalized, content: normalized.wakeWordInstruction }
-        : normalized;
-      const admitted = store.admitEvent(conversation, eventForAdmission, ingress);
+      const admitted = store.admitEvent(conversation, resolution.event, ingress);
       if (!admitted.admitted || !admitted.event) {
         log({
           type: 'EVENT_DUPLICATE', conversationId: conversation.id,
@@ -460,7 +469,7 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
       store.setChannelConnection({ ...descriptor, state: 'ready', ownerPid: process.pid, connectedAt });
       if (channel.backfill) {
         const until = new Date(connectedAt);
-        const targets = store.listConversations(true).map((conversation) => ({
+        const targets = store.listConversations(true).filter((conversation) => conversation.purpose === 'channel').map((conversation) => ({
           conversation,
           start: store.conversationBackfillStart(conversation),
         }));
@@ -490,7 +499,8 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
           const selfChatExternalId = channel.selfChatExternalId?.() ?? null;
           const conversations = channel.pollSelfMessages
             ? store.listConversations(true).filter(
-              (item) => item.kind !== 'direct' || item.externalId !== selfChatExternalId,
+              (item) => item.purpose === 'channel'
+                && (item.kind !== 'direct' || item.externalId !== selfChatExternalId),
             )
             : [];
           for (const conversation of conversations) {

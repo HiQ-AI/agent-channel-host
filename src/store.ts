@@ -565,6 +565,14 @@ export class Store {
         PRAGMA user_version=15;
       `);
     }
+    const wakePurposeVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (wakePurposeVersion < 16) {
+      this.db.exec(`
+        ALTER TABLE conversations ADD COLUMN purpose TEXT NOT NULL DEFAULT 'channel'
+          CHECK(purpose IN ('channel','wake'));
+        PRAGMA user_version=16;
+      `);
+    }
   }
 
   selfMessagePollStart(conversation: Conversation): Date {
@@ -646,6 +654,7 @@ export class Store {
     channelId?: string;
     channelProfileId?: string;
     kind: ConversationKind;
+    purpose?: 'channel' | 'wake';
     externalId: string;
     title: string;
     responsibility: string;
@@ -667,17 +676,17 @@ export class Store {
     try {
       this.db.prepare(`
         INSERT INTO conversations(
-          id,channel_id,channel_profile_id,kind,external_id,title,responsibility,mode,runtime_id,
+          id,channel_id,channel_profile_id,kind,purpose,external_id,title,responsibility,mode,runtime_id,
           worker_warm_seconds,responsibility_reminder_interval,policy_version,enabled,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,1,1,?,?)
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,1,?,?)
       `).run(
-        id, channelId, channelProfileId, input.kind, input.externalId, input.title,
+        id, channelId, channelProfileId, input.kind, input.purpose ?? 'channel', input.externalId, input.title,
         input.responsibility.trim(), input.mode, runtimeId, workerWarmSeconds, responsibilityReminderInterval, now, now,
       );
       this.db.prepare(`
         INSERT INTO runtime_workers(conversation_id,runtime_id,state,updated_at) VALUES(?,?,'stopped',?)
       `).run(id, runtimeId, now);
-      if (input.kind === 'group') {
+      if (input.kind === 'group' && (input.purpose ?? 'channel') === 'channel') {
         this.db.prepare(`
           INSERT INTO group_onboarding(conversation_id,state,created_at,updated_at) VALUES(?,'pending',?,?)
         `).run(id, now, now);
@@ -1793,7 +1802,7 @@ export class Store {
       })),
       conversations: conversations.map((row) => ({
         id: String(row.id), idPrefix: String(row.id).slice(0, 8), channelId: String(row.channel_id),
-        channelProfileId: String(row.channel_profile_id), kind: String(row.kind), title: displayTitleFromRow(row),
+        channelProfileId: String(row.channel_profile_id), kind: String(row.kind), purpose: String(row.purpose ?? 'channel'), title: displayTitleFromRow(row),
         responsibility: String(row.responsibility), policyVersion: Number(row.policy_version),
         mode: String(row.mode), runtimeId: String(row.runtime_id), enabled: Boolean(row.enabled),
         workerWarmSeconds: Number(row.worker_warm_seconds), pending: Number(row.pending_count),
@@ -1859,7 +1868,7 @@ function mapConversation(row: Row | undefined): Conversation | null {
   if (!row) return null;
   return {
     id: String(row.id), channelId: String(row.channel_id), channelProfileId: String(row.channel_profile_id),
-    kind: row.kind as ConversationKind, externalId: String(row.external_id),
+    kind: row.kind as ConversationKind, purpose: (row.purpose ?? 'channel') as Conversation['purpose'], externalId: String(row.external_id),
     title: String(row.title), responsibility: String(row.responsibility), mode: row.mode as ConversationMode,
     runtimeId: String(row.runtime_id), workerWarmSeconds: Number(row.worker_warm_seconds),
     responsibilityReminderInterval: Number(row.responsibility_reminder_interval ?? DEFAULT_RESPONSIBILITY_REMINDER_INTERVAL),
