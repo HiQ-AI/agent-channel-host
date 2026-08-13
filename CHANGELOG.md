@@ -11,6 +11,10 @@
 - 唤醒词模式支持钉钉资料页自聊窗口：每轮按当前 DWS profile 的 `userId` 查询一次自聊历史，命中后建立独立任务 Conversation，并使用独立持久化水位及 inbox 去重。
 - 唤醒消息改为创建独立任务 Conversation 与独立 Codex session，不复用来源群聊/私聊会话，也不继承两类会话的默认模式；定时补拉统一剔除本人 AI 消息。
 
+### Changed
+
+- 群聊消息来源不再注入固定的 DWS `@` 发送规则，仍保留每条消息的发送者 OpenDingTalkId 供 Agent 按需使用。
+
 ## [1.2.1] - 2026-08-10
 
 ### Fixed

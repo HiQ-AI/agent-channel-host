@@ -59,9 +59,6 @@ function messagePrompt(conversation: Conversation, messages: MessageEnvelope[]):
     `目标ID：${conversation.externalId}`,
     `${targetName}：${conversation.title}`,
   ].join('\n');
-  const mentionGuide = conversation.channelId === 'dingtalk' && conversation.kind === 'group'
-    ? '\n群聊实际 @ 规则：需要 @ 某位发送者时，仅使用消息中非“未知”的发送者OpenDingTalkId；正文必须包含 <@openDingTalkId>，并在 dws chat message send 中同时传 --at-open-dingtalk-ids openDingTalkId。不要只写 @姓名，也不要猜测 ID。'
-    : '';
   const rendered = messages
     .map((message, index) => [
       `消息 ${index + 1}`,
@@ -77,7 +74,7 @@ function messagePrompt(conversation: Conversation, messages: MessageEnvelope[]):
       `内容：${message.content}`,
     ].join('\n'))
     .join('\n\n');
-  return `${source}${mentionGuide}\n\n以下是收到的消息：\n\n${rendered}`;
+  return `${source}\n\n以下是收到的消息：\n\n${rendered}`;
 }
 
 export function messageContent(content: unknown, quoted: unknown, forwarded: unknown): string {
