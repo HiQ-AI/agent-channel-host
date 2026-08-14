@@ -76,6 +76,29 @@ test('活动 turn steer 原样携带 expectedTurnId 与 clientUserMessageId', as
   }
 });
 
+test('空闲 thread 启动 turn 原样携带 clientUserMessageId 并立即返回 turnId', async () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'start-user', title: '空闲启动私聊', responsibility: '', mode: 'reply',
+  });
+  const config = defaultConfig('start-turn', '.', 'Agent');
+  const identity = fakeIdentity();
+  const appServer = await CodexAppServerHost.start(config, identity);
+  const session = new CodexAppServerSession(config, conversation, identity, store, appServer);
+  try {
+    await session.start();
+    const started = await session.startTurn('HUMAN_START', 'human-start-request');
+    assert.equal(started.turnId, 'fake-turn');
+    assert.equal(session.currentTurnId, 'fake-turn');
+    assert.deepEqual(await started.completion, { turnId: 'fake-turn', status: 'completed' });
+    assert.equal(session.currentTurnId, null);
+  } finally {
+    await session.stop();
+    await appServer.stop();
+    store.close();
+  }
+});
+
 test('协议升级后仍恢复 Conversation 原 session 且 generation 不变', async () => {
   const store = new Store(':memory:');
   const conversation = store.addConversation({

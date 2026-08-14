@@ -219,11 +219,25 @@ conversation.command('intervention-state')
       if (!target) throw new Error(`conversation 不存在：${options.id}`);
       const state = store.getInterventionTarget(target.id);
       const session = store.getSession(target.id);
+      const threadId = state?.threadId ?? session?.providerSessionId ?? null;
+      const turnId = state?.turnId ?? null;
+      const hostRunning = store.status().hostState === 'running';
+      const canSteer = Boolean(hostRunning && state?.canIntervene);
+      const canStartTurn = Boolean(hostRunning && target.enabled && threadId && !turnId);
+      const canSend = canSteer || canStartTurn;
       print({
         conversationId: target.id,
-        threadId: state?.threadId ?? session?.providerSessionId ?? null,
-        turnId: state?.turnId ?? null,
-        canIntervene: state?.canIntervene ?? false,
+        threadId,
+        turnId,
+        canIntervene: canSteer,
+        canSteer,
+        canStartTurn,
+        canSend,
+        reasonCode: canSend ? null
+          : !target.enabled ? 'conversation_disabled'
+            : !hostRunning ? 'host_unavailable'
+            : !threadId ? 'thread_unavailable'
+              : 'runtime_unsupported',
         workerId: state?.workerId ?? null,
         updatedAt: state?.updatedAt ?? session?.updatedAt ?? null,
       });
@@ -232,20 +246,23 @@ conversation.command('intervention-state')
     }
   });
 
-conversation.command('intervene')
-  .description('向预期的活动 turn 提交一条幂等人工介入指令')
+conversation.command('message')
+  .alias('intervene')
+  .description('向 Conversation 提交幂等人工消息；忙时 steer，空闲时创建 turn')
   .requiredOption('--instance <name>', 'instance 名称')
   .requiredOption('--id <id>', 'conversation UUID')
   .requiredOption('--request-id <id>', '调用方稳定且唯一的请求 ID')
   .requiredOption('--expected-thread-id <id>', '提交前读取到的完整 threadId')
-  .requiredOption('--expected-turn-id <id>', '提交前读取到的完整 turnId')
+  .option('--expected-turn-id <id>', '活动状态提交前读取到的完整 turnId')
   .requiredOption('--text <text>', '介入内容')
   .option('--ttl-seconds <seconds>', '领取前有效秒数，默认 60', parseInterventionTtl, 60)
   .action(async (options) => {
     await loadConfig(options.instance);
     const requestId = requiredInterventionValue(options.requestId, '--request-id', 128);
     const expectedThreadId = requiredInterventionValue(options.expectedThreadId, '--expected-thread-id', 256);
-    const expectedTurnId = requiredInterventionValue(options.expectedTurnId, '--expected-turn-id', 256);
+    const expectedTurnId = options.expectedTurnId
+      ? requiredInterventionValue(options.expectedTurnId, '--expected-turn-id', 256)
+      : null;
     const instruction = requiredInterventionValue(options.text, '--text', 10_000);
     const store = new Store(statePath(options.instance));
     try {

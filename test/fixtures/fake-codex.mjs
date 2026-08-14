@@ -84,11 +84,14 @@ function handleAppServerMessage(message, sendResponse, sendNotification, sendRaw
       return sendResponse(message.id, { thread: { id: message.params.threadId } });
     }
     if (message.method === 'turn/start') {
+      const prompt = message.params?.input?.[0]?.text ?? '';
+      if (prompt.includes('HUMAN_START') && message.params?.clientUserMessageId !== 'human-start-request') {
+        return sendResponse(message.id, undefined, 'missing turn/start clientUserMessageId');
+      }
       const turnId = String(message.params?.threadId ?? '').startsWith('parallel-')
         ? `turn-${message.params.threadId}` : 'fake-turn';
       sendResponse(message.id, { turn: { id: turnId } });
       sendNotification('turn/started', { turn: { id: turnId } });
-      const prompt = message.params?.input?.[0]?.text ?? '';
       if (prompt.includes('APPROVAL_REQUEST')) {
         sendRaw({
           id: 'approval-1', method: 'item/commandExecution/requestApproval',

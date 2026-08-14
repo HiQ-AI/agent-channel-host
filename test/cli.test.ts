@@ -73,15 +73,21 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
     });
     cliStore.setInterventionTarget({
       conversationId: addedBody.id, threadId: 'cli-parent-thread', turnId: 'cli-active-turn',
-      canIntervene: true, workerId: 'cli-worker',
+      canIntervene: true, canStartTurn: false, workerId: 'cli-worker',
     });
+    cliStore.acquireLease('host', 'cli-host', Date.now(), 30_000);
     cliStore.close();
     const interventionState = await execFileAsync(process.execPath, [
       cli, 'conversation', 'intervention-state', '--instance', 'test', '--id', addedBody.id,
     ], { encoding: 'utf8', env });
     assert.deepEqual(
-      (({ threadId, turnId, canIntervene }) => ({ threadId, turnId, canIntervene }))(JSON.parse(interventionState.stdout)),
-      { threadId: 'cli-parent-thread', turnId: 'cli-active-turn', canIntervene: true },
+      (({ threadId, turnId, canSteer, canStartTurn, canSend }) => (
+        { threadId, turnId, canSteer, canStartTurn, canSend }
+      ))(JSON.parse(interventionState.stdout)),
+      {
+        threadId: 'cli-parent-thread', turnId: 'cli-active-turn',
+        canSteer: true, canStartTurn: false, canSend: true,
+      },
     );
     const intervention = await execFileAsync(process.execPath, [
       cli, 'conversation', 'intervene', '--instance', 'test', '--id', addedBody.id,
@@ -99,6 +105,15 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
       cli, 'conversation', 'intervention-result', '--instance', 'test', '--request-id', 'cli-intervention-1',
     ], { encoding: 'utf8', env });
     assert.equal(JSON.parse(interventionResult.stdout).state, 'pending');
+    const idleMessage = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'message', '--instance', 'test', '--id', addedBody.id,
+      '--request-id', 'cli-idle-message-1', '--expected-thread-id', 'cli-parent-thread',
+      '--text', '从空闲状态继续', '--ttl-seconds', '30',
+    ], { encoding: 'utf8', env });
+    assert.deepEqual(
+      (({ created, expectedTurnId, state }) => ({ created, expectedTurnId, state }))(JSON.parse(idleMessage.stdout)),
+      { created: true, expectedTurnId: null, state: 'pending' },
+    );
     const continued = await execFileAsync(process.execPath, [
       cli, 'conversation', 'continue-task', '--instance', 'test',
       '--provider-session-id', 'cli-parent-thread', '--conversation-id', addedBody.id,

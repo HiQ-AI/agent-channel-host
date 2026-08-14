@@ -19,6 +19,7 @@ export class ConversationWorker {
   private steerRequested = false;
   private steerTail: Promise<void> = Promise.resolve();
   private interventionProcessing: Promise<void> | null = null;
+  private externalDraining: Promise<void> | null = null;
 
   constructor(
     private readonly config: HostConfig,
@@ -125,12 +126,16 @@ export class ConversationWorker {
       processId: this.session.processId, lastSignalAt: new Date(this.lastSignalAtMs).toISOString(),
     });
     if (this.activeEvents) this.startSteer();
-    else if (this.started && !this.draining) this.startDrain();
+    else if (this.started && !this.draining && !this.interventionProcessing) this.startDrain();
   }
 
-  isBusy(): boolean { return this.draining !== null || Boolean(this.session.hasBackgroundWork?.()); }
+  isBusy(): boolean {
+    return this.draining !== null || this.externalDraining !== null || Boolean(this.session.hasBackgroundWork?.());
+  }
 
-  isDeliveringTurn(): boolean { return this.draining !== null || this.activeEvents !== null; }
+  isDeliveringTurn(): boolean {
+    return this.draining !== null || this.externalDraining !== null || this.activeEvents !== null;
+  }
 
   refreshInterventionTarget(): void {
     const threadId = this.session.currentSessionId;
@@ -140,13 +145,15 @@ export class ConversationWorker {
       threadId,
       turnId,
       canIntervene: Boolean(threadId && turnId && this.session.supportsActiveSteer),
+      canStartTurn: Boolean(threadId && !turnId && this.session.supportsTurnStart && !this.closed),
       workerId: this.closed ? null : this.workerId,
     });
   }
 
   processInterventions(): void {
-    if (this.closed || this.interventionProcessing) return;
+    if (this.closed || !this.started || this.interventionProcessing) return;
     this.refreshInterventionTarget();
+    if (this.draining && !this.session.currentTurnId) return;
     this.interventionProcessing = this.processOneIntervention()
       .catch((error) => this.log({
         type: 'INTERVENTION_PROCESS_ERROR', conversationId: this.conversation.id,
@@ -155,6 +162,8 @@ export class ConversationWorker {
       .finally(() => {
         this.interventionProcessing = null;
         this.refreshInterventionTarget();
+        if (!this.closed && !this.externalDraining && !this.draining
+          && this.store.pendingEventCount(this.conversation.id) > 0) this.startDrain();
       });
   }
 
@@ -186,44 +195,110 @@ export class ConversationWorker {
       reject('expired', '指令在执行前已过期', 'expired');
       return;
     }
-    if (!this.session.supportsActiveSteer) {
-      reject('unsupported', '当前 runtime session 不支持活动 turn 介入');
+    if (!this.store.getConversation(this.conversation.id)?.enabled) {
+      reject('conversation_disabled', 'Conversation 已禁用');
       return;
     }
     if (actualThreadId !== intervention.expectedThreadId) {
       reject('thread_mismatch', '当前 threadId 与 expectedThreadId 不一致');
       return;
     }
-    if (!actualTurnId || actualTurnId !== intervention.expectedTurnId) {
-      reject('turn_mismatch', '当前 turnId 与 expectedTurnId 不一致');
-      return;
-    }
     try {
-      const accepted = await this.session.steer(
-        interventionPrompt(intervention.instruction),
-        intervention.expectedTurnId,
-        intervention.requestId,
-      );
-      if (accepted.turnId !== intervention.expectedTurnId) {
-        reject('turn_mismatch', 'session.steer 未确认 expectedTurnId');
+      if (actualTurnId) {
+        if (!this.session.supportsActiveSteer) {
+          reject('steer_unsupported', '当前 runtime session 不支持活动 turn 介入');
+          return;
+        }
+        if (!intervention.expectedTurnId || actualTurnId !== intervention.expectedTurnId) {
+          reject('turn_mismatch', '当前 turnId 与 expectedTurnId 不一致');
+          return;
+        }
+        const accepted = await this.session.steer(
+          interventionPrompt(intervention.instruction),
+          intervention.expectedTurnId,
+          intervention.requestId,
+        );
+        if (accepted.turnId !== intervention.expectedTurnId) {
+          reject('turn_mismatch', 'session.steer 未确认 expectedTurnId');
+          return;
+        }
+        this.finishIntervention(intervention, 'steered', '消息已介入预期活动 turn', actualThreadId, accepted.turnId);
+        this.log({
+          type: 'INTERVENTION_STEERED', conversationId: this.conversation.id,
+          requestId: intervention.requestId, turnIdPrefix: accepted.turnId.slice(0, 12),
+        });
         return;
       }
-      this.store.finishIntervention({
-        requestId: intervention.requestId,
-        workerId: this.workerId,
-        state: 'succeeded',
-        resultCode: 'steered',
-        resultMessage: '指令已介入预期活动 turn',
-        actualThreadId,
-        actualTurnId: accepted.turnId,
-      });
+      if (intervention.expectedTurnId) {
+        reject('turn_mismatch', '预期活动 turn 已结束，不会降级创建下一 turn');
+        return;
+      }
+      if (!this.session.supportsTurnStart || !this.session.startTurn) {
+        reject('start_unsupported', '当前 runtime session 不支持从空闲状态启动 turn');
+        return;
+      }
+      const started = await this.session.startTurn(
+        interventionPrompt(intervention.instruction), intervention.requestId,
+      );
+      this.observeExternalTurn(started.turnId, started.completion);
+      this.finishIntervention(intervention, 'started', '消息已在原 thread 创建新 turn', actualThreadId, started.turnId);
       this.log({
-        type: 'INTERVENTION_STEERED', conversationId: this.conversation.id,
-        requestId: intervention.requestId, turnIdPrefix: accepted.turnId.slice(0, 12),
+        type: 'INTERVENTION_TURN_STARTED', conversationId: this.conversation.id,
+        requestId: intervention.requestId, turnIdPrefix: started.turnId.slice(0, 12),
       });
     } catch (error) {
-      reject('steer_failed', (error as Error).message);
+      reject(actualTurnId ? 'steer_failed' : 'start_failed', (error as Error).message);
     }
+  }
+
+  private finishIntervention(
+    intervention: RuntimeIntervention,
+    resultCode: 'steered' | 'started',
+    resultMessage: string,
+    actualThreadId: string,
+    actualTurnId: string,
+  ): void {
+    this.store.finishIntervention({
+      requestId: intervention.requestId, workerId: this.workerId, state: 'succeeded',
+      resultCode, resultMessage, actualThreadId, actualTurnId,
+    });
+  }
+
+  private observeExternalTurn(
+    turnId: string,
+    completion: Promise<import('./types.js').DeliveryRun>,
+  ): void {
+    this.activeEvents = [];
+    const observed = (async () => {
+      try {
+        const result = await completion;
+        await this.awaitSteeringIdle();
+        const events = this.activeEvents ?? [];
+        if (events.length > 0) {
+          if (result.status === 'completed') this.store.markBatchForwarded(events, this.workerId, result.turnId);
+          else this.store.releaseClaimedEvents(events, this.workerId);
+        }
+        this.log({
+          type: 'INTERVENTION_TURN_COMPLETED', conversationId: this.conversation.id,
+          turnIdPrefix: turnId.slice(0, 12), status: result.status,
+        });
+      } catch (error) {
+        const events = this.activeEvents ?? [];
+        if (events.length > 0) this.store.markBatchFailed(events, this.workerId, (error as Error).message);
+        this.log({
+          type: 'INTERVENTION_TURN_FAILED', conversationId: this.conversation.id,
+          turnIdPrefix: turnId.slice(0, 12), error: (error as Error).message,
+        });
+      } finally {
+        this.activeEvents = null;
+        this.refreshInterventionTarget();
+      }
+    })();
+    this.externalDraining = observed.finally(() => {
+      this.externalDraining = null;
+      if (!this.closed && this.store.pendingEventCount(this.conversation.id) > 0) this.startDrain();
+      else if (!this.closed) this.onIdle(this);
+    });
   }
 
   private startDrain(): void {
@@ -250,7 +325,11 @@ export class ConversationWorker {
       });
       try {
         this.activeEvents = [...events];
-        const result = await this.session.deliver(batchPrompt(this.conversation, events));
+        const prompt = batchPrompt(this.conversation, events);
+        const started = this.session.startTurn
+          ? await this.withSteerLock(() => this.session.startTurn!(prompt))
+          : null;
+        const result = started ? await started.completion : await this.session.deliver(prompt);
         await this.awaitSteeringIdle();
         const deliveredEvents = this.activeEvents;
         this.activeEvents = null;
@@ -367,6 +446,7 @@ export class ConversationWorker {
     await this.interventionProcessing?.catch(() => undefined);
     await this.steerTail.catch(() => undefined);
     await this.session.interruptActive().catch(() => false);
+    await this.externalDraining?.catch(() => undefined);
     await this.draining?.catch(() => undefined);
     await this.session.stop();
     this.store.setWorkerState({
@@ -379,6 +459,7 @@ export class ConversationWorker {
       threadId: this.session.currentSessionId,
       turnId: null,
       canIntervene: false,
+      canStartTurn: false,
       workerId: null,
     });
   }

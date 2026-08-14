@@ -6,8 +6,8 @@
 
 ### Added
 
-- 新增 Host 持有 session 的活动 turn 人工介入邮箱：本机调用方可读取完整 `threadId`、`turnId` 与可介入状态，提交带 expected IDs 的幂等指令，并查询 `succeeded/rejected/expired` 结果；Worker 串行调用既有 `session.steer()`，错误或已结束 turn 不会误投到下一轮。
-- Codex Runtime 改为每个 Host 实例托管一个回环 WebSocket App Server；全部 Conversation 使用独立连接共享同一进程，并在 `status/view` 发布 `ws://127.0.0.1:<port>`、App Server instance ID 和 PID，供本机临时客户端按需接入。
+- 新增 Host 持有 session 的 Conversation 人工消息邮箱：状态区分 `canSteer/canStartTurn/canSend`，活动时安全 `turn/steer`，空闲时在固定原 thread 上 `turn/start`；两条路径共用 request ID 幂等、TTL、expected ID 校验和明确终态，并返回实际 turn ID。
+- Codex Runtime 改为每个 Host 实例托管一个回环 WebSocket App Server；全部 Conversation 使用独立连接共享同一进程，并在 `status/view` 发布 `ws://127.0.0.1:<port>`、App Server instance ID 和 PID，供本机诊断和 Host 管理连接生命周期。
 - 新增 durable 任务续接入口 `conversation continue-task`：按完整父 provider session 原子准入，支持稳定 continuation ID 幂等重试，并固定在当前活动 turn 之后另开下一 turn，避免任务控制事件误入 `steer`。
 - Channel 新增独立唤醒词模式开关，作为群聊与私聊常规订阅策略未准入时的统一兜底；已订阅消息保持原逻辑且不会重复处理，兜底仅接收本人以唤醒词开头的真人消息。
 - 唤醒词模式支持钉钉资料页自聊窗口：每轮按当前 DWS profile 的 `userId` 查询一次自聊历史，命中后自动建立固定私聊 Conversation，并使用独立持久化水位及 inbox 去重。

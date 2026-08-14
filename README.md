@@ -321,13 +321,13 @@ agent-channel view --once
 agent-channel run --instance triss
 ```
 
-活动 turn 的本机人工介入分为“读取状态、提交、查询结果”三步。调用方必须复用稳定 `request-id`，并原样携带刚读取到的完整 thread/turn ID：
+Conversation 的本机人工消息分为“读取状态、提交、查询结果”三步。调用方必须复用稳定 `request-id` 并携带完整 thread ID；状态中的 `canSteer/canStartTurn/canSend` 区分当前可用路径：
 
 ```powershell
 agent-channel conversation intervention-state `
   --instance triss --id '<conversation UUID>'
 
-agent-channel conversation intervene `
+agent-channel conversation message `
   --instance triss --id '<conversation UUID>' `
   --request-id '<stable request ID>' `
   --expected-thread-id '<full thread ID>' `
@@ -339,7 +339,7 @@ agent-channel conversation intervention-result `
   --instance triss --request-id '<stable request ID>'
 ```
 
-只有 `intervention-state` 这个显式本机控制命令输出完整 ID；普通 `status/view` 仍保持脱敏。提交成功只表示进入邮箱，最终以 `intervention-result` 的终态为准。
+当 `canStartTurn=true` 时省略 `--expected-turn-id`，Host 会在该 Conversation 固定的原 thread 上创建新 turn。活动 turn 的 expected ID 已过期时会明确拒绝，不会降级投到下一轮。只有 `intervention-state` 这个显式本机控制命令输出完整 ID；普通 `status/view` 仍保持脱敏。提交成功只表示进入邮箱，最终以 `intervention-result` 返回的 `resultCode` 和 `actualTurnId` 为准。正式调用方只连接 Host 邮箱，不直接管理共享 App Server 或 thread 生命周期。
 
 `status --instance` 输出一个 instance 的机器可读 JSON；`view` 是跨 instance 的交互管理面。非编辑态第一次按 `q` 或任何状态下按 `Ctrl+C` 只打开退出确认，并明确显示会停止多少个 View-owned Host；再次按 `q`、`Ctrl+C` 或 Enter 才退出，按 Esc/`←` 取消且保留当前页面与尚未提交的编辑内容。进程收到外部 SIGINT/SIGTERM 时仍立即安全收尾。总览和详情默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。instance 设置先通过与启动相同的 schema 校验，再原子保存；标记“重启后生效”的配置不会伪装成已即时应用。
 

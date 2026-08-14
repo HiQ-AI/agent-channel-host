@@ -128,6 +128,7 @@ export interface RuntimeInterventionTarget {
   threadId: string | null;
   turnId: string | null;
   canIntervene: boolean;
+  canStartTurn: boolean;
   workerId: string | null;
   updatedAt: string;
 }
@@ -138,7 +139,7 @@ export interface RuntimeIntervention {
   requestId: string;
   conversationId: string;
   expectedThreadId: string;
-  expectedTurnId: string;
+  expectedTurnId: string | null;
   instruction: string;
   state: RuntimeInterventionState;
   expiresAt: string;

@@ -21,7 +21,7 @@ export interface CodexAppServerIdentity {
   command: ResolvedCommand;
 }
 
-const DRIVER_PROTOCOL = 'app-server-v2-shared-websocket-turn-steer';
+const DRIVER_PROTOCOL = 'app-server-v3-shared-websocket-conversation-message';
 const NON_INTERACTIVE_THREAD_OPTIONS = {
   approvalPolicy: 'never',
   sandbox: 'danger-full-access',
@@ -70,6 +70,7 @@ export class CodexAppServerSession implements AgentSession {
   get currentSessionId(): string | null { return this.providerSessionId; }
   get currentTurnId(): string | null { return this.activeTurnId; }
   get supportsActiveSteer(): boolean { return true; }
+  get supportsTurnStart(): boolean { return true; }
   get processId(): number | null { return this.appServer.processId; }
   hasBackgroundWork(): boolean { return this.activeTurnId !== null; }
 
@@ -105,6 +106,14 @@ export class CodexAppServerSession implements AgentSession {
   }
 
   async deliver(prompt: string): Promise<DeliveryRun> {
+    const started = await this.startTurn(prompt);
+    return started.completion;
+  }
+
+  async startTurn(
+    prompt: string,
+    clientUserMessageId?: string,
+  ): Promise<{ turnId: string; completion: Promise<DeliveryRun> }> {
     if (!this.providerSessionId) throw new Error('Codex App Server session 尚未 start');
     if (this.activeTurnId) throw new Error('同一 conversation 已有活动 Codex turn');
     const conversation = this.store.getConversation(this.conversation.id);
@@ -120,11 +129,21 @@ export class CodexAppServerSession implements AgentSession {
       input: [{ type: 'text', text: effectivePrompt }],
       model: this.config.runtime.model,
       effort: this.config.runtime.effort,
+      ...(clientUserMessageId ? { clientUserMessageId } : {}),
     }) as JsonObject;
     const turn = result.turn as JsonObject | undefined;
     const turnId = typeof turn?.id === 'string' ? turn.id : null;
     if (!turnId) throw new Error('turn/start 未返回 turn id');
     this.activeTurnId = turnId;
+    return { turnId, completion: this.completeTurn(turnId, responsibility, inject, reminderInterval) };
+  }
+
+  private async completeTurn(
+    turnId: string,
+    responsibility: string,
+    injectedResponsibility: boolean,
+    reminderInterval: number,
+  ): Promise<DeliveryRun> {
     try {
       const completed = await this.waitForCompletion(turnId);
       const status = (completed.turn as JsonObject | undefined)?.status;
@@ -137,7 +156,7 @@ export class CodexAppServerSession implements AgentSession {
         : this.sessionRecord('ready', now, now));
       this.lastCompletedResponsibility = responsibility;
       this.completedTurnsSinceResponsibilityReminder = nextResponsibilityReminderCount(
-        this.completedTurnsSinceResponsibilityReminder, inject, reminderInterval,
+        this.completedTurnsSinceResponsibilityReminder, injectedResponsibility, reminderInterval,
       );
       return { turnId, status: 'completed' };
     } finally {
