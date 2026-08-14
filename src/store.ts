@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,6 +17,9 @@ import type {
   NormalizedEvent,
   OutboxRecord,
   RuntimeWorkerRecord,
+  RuntimeIntervention,
+  RuntimeInterventionState,
+  RuntimeInterventionTarget,
   SessionRecord,
   SelfMessagePollState,
 } from './types.js';
@@ -564,6 +567,64 @@ export class Store {
         );
         PRAGMA user_version=15;
       `);
+    }
+    const interventionVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (interventionVersion < 16) {
+      this.db.exec(`
+        CREATE TABLE runtime_intervention_targets (
+          conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+          thread_id TEXT,
+          turn_id TEXT,
+          can_intervene INTEGER NOT NULL DEFAULT 0 CHECK(can_intervene IN (0,1)),
+          worker_id TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE runtime_interventions (
+          request_id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          expected_thread_id TEXT NOT NULL,
+          expected_turn_id TEXT NOT NULL,
+          instruction TEXT NOT NULL,
+          payload_sha256 TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('pending','claimed','succeeded','rejected','expired')),
+          expires_at TEXT NOT NULL,
+          claimed_by TEXT,
+          claim_expires_at TEXT,
+          result_code TEXT,
+          result_message TEXT,
+          actual_thread_id TEXT,
+          actual_turn_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE INDEX idx_runtime_interventions_claim
+          ON runtime_interventions(conversation_id,state,created_at);
+        PRAGMA user_version=16;
+      `);
+    }
+    const sharedAppServerVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (sharedAppServerVersion < 17) {
+      const runtimeTable = this.db.prepare(
+        "SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='runtime_adapters'",
+      ).get() as Row | undefined;
+      if (runtimeTable) {
+        this.db.exec(`
+          ALTER TABLE runtime_adapters ADD COLUMN endpoint TEXT;
+          ALTER TABLE runtime_adapters ADD COLUMN instance_id TEXT;
+          ALTER TABLE runtime_adapters ADD COLUMN process_id INTEGER;
+        `);
+      } else {
+        this.db.exec(`
+          CREATE TABLE runtime_adapters (
+            runtime_id TEXT PRIMARY KEY,label TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('starting','ready','stopped','error')),
+            model TEXT,protocol_fingerprint TEXT,context_recovery TEXT,
+            endpoint TEXT,instance_id TEXT,process_id INTEGER,error TEXT,updated_at TEXT NOT NULL
+          );
+        `);
+      }
+      this.db.exec('PRAGMA user_version=17');
     }
   }
 
@@ -1521,6 +1582,174 @@ export class Store {
     ).get(conversationId) as Row | undefined);
   }
 
+  setInterventionTarget(input: {
+    conversationId: string;
+    threadId: string | null;
+    turnId: string | null;
+    canIntervene: boolean;
+    workerId: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO runtime_intervention_targets(
+        conversation_id,thread_id,turn_id,can_intervene,worker_id,updated_at
+      ) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(conversation_id) DO UPDATE SET
+        thread_id=excluded.thread_id,turn_id=excluded.turn_id,
+        can_intervene=excluded.can_intervene,worker_id=excluded.worker_id,updated_at=excluded.updated_at
+    `).run(
+      input.conversationId, input.threadId, input.turnId,
+      input.canIntervene ? 1 : 0, input.workerId, now,
+    );
+  }
+
+  getInterventionTarget(conversationId: string): RuntimeInterventionTarget | null {
+    const row = this.db.prepare(
+      'SELECT * FROM runtime_intervention_targets WHERE conversation_id=?',
+    ).get(conversationId) as Row | undefined;
+    return row ? mapInterventionTarget(row) : null;
+  }
+
+  submitIntervention(input: {
+    requestId: string;
+    conversationId: string;
+    expectedThreadId: string;
+    expectedTurnId: string;
+    instruction: string;
+    expiresAt: Date;
+  }): { created: boolean; intervention: RuntimeIntervention } {
+    const conversation = this.getConversation(input.conversationId);
+    if (!conversation?.enabled) throw new Error(`enabled conversation 不存在：${input.conversationId}`);
+    const payloadSha256 = interventionPayloadSha256(input);
+    let created = false;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare(
+        'SELECT payload_sha256 FROM runtime_interventions WHERE request_id=?',
+      ).get(input.requestId) as Row | undefined;
+      if (row) {
+        if (String(row.payload_sha256) !== payloadSha256) {
+          throw new Error(`介入 requestId 幂等冲突：${input.requestId}`);
+        }
+      } else {
+        const now = new Date().toISOString();
+        this.db.prepare(`
+          INSERT INTO runtime_interventions(
+            request_id,conversation_id,expected_thread_id,expected_turn_id,instruction,payload_sha256,
+            state,expires_at,created_at,updated_at
+          ) VALUES(?,?,?,?,?,?,'pending',?,?,?)
+        `).run(
+          input.requestId, input.conversationId, input.expectedThreadId, input.expectedTurnId,
+          input.instruction, payloadSha256, input.expiresAt.toISOString(), now, now,
+        );
+        created = true;
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return { created, intervention: this.getIntervention(input.requestId)! };
+  }
+
+  getIntervention(requestId: string): RuntimeIntervention | null {
+    const row = this.db.prepare('SELECT * FROM runtime_interventions WHERE request_id=?')
+      .get(requestId) as Row | undefined;
+    return row ? mapIntervention(row) : null;
+  }
+
+  expireInterventions(now = new Date()): number {
+    const nowIso = now.toISOString();
+    const pending = this.db.prepare(`
+      UPDATE runtime_interventions SET
+        state='expired',result_code='expired',result_message='指令在领取前已过期',
+        updated_at=?,completed_at=?
+      WHERE state='pending' AND expires_at<=?
+    `).run(nowIso, nowIso, nowIso);
+    const claimed = this.db.prepare(`
+      UPDATE runtime_interventions SET
+        state='rejected',result_code='outcome_unknown',
+        result_message='上次领取后未回写结果，为防止重复 steer 不再重试',
+        updated_at=?,completed_at=?
+      WHERE state='claimed' AND claim_expires_at<=?
+    `).run(nowIso, nowIso, nowIso);
+    return Number(pending.changes) + Number(claimed.changes);
+  }
+
+  claimIntervention(
+    conversationId: string,
+    workerId: string,
+    now = new Date(),
+    claimMilliseconds = 30_000,
+  ): RuntimeIntervention | null {
+    const nowIso = now.toISOString();
+    const claimExpiresAt = new Date(now.getTime() + claimMilliseconds).toISOString();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare(`
+        UPDATE runtime_interventions SET
+          state='expired',result_code='expired',result_message='指令在领取前已过期',
+          updated_at=?,completed_at=?
+        WHERE conversation_id=? AND state='pending' AND expires_at<=?
+      `).run(nowIso, nowIso, conversationId, nowIso);
+      this.db.prepare(`
+        UPDATE runtime_interventions SET
+          state='rejected',result_code='outcome_unknown',
+          result_message='上次领取后未回写结果，为防止重复 steer 不再重试',
+          updated_at=?,completed_at=?
+        WHERE conversation_id=? AND state='claimed' AND claim_expires_at<=?
+      `).run(nowIso, nowIso, conversationId, nowIso);
+      const row = this.db.prepare(`
+        SELECT request_id FROM runtime_interventions
+        WHERE conversation_id=? AND state='pending'
+        ORDER BY created_at,request_id LIMIT 1
+      `).get(conversationId) as Row | undefined;
+      if (!row) {
+        this.db.exec('COMMIT');
+        return null;
+      }
+      const requestId = String(row.request_id);
+      const changed = this.db.prepare(`
+        UPDATE runtime_interventions SET
+          state='claimed',claimed_by=?,claim_expires_at=?,updated_at=?
+        WHERE request_id=? AND state='pending'
+      `).run(workerId, claimExpiresAt, nowIso, requestId);
+      if (Number(changed.changes) !== 1) throw new Error(`介入指令领取竞争失败：${requestId}`);
+      this.db.exec('COMMIT');
+      return this.getIntervention(requestId);
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  finishIntervention(input: {
+    requestId: string;
+    workerId: string;
+    state: Extract<RuntimeInterventionState, 'succeeded' | 'rejected' | 'expired'>;
+    resultCode: string;
+    resultMessage: string;
+    actualThreadId: string | null;
+    actualTurnId: string | null;
+  }): RuntimeIntervention {
+    const now = new Date().toISOString();
+    const changed = this.db.prepare(`
+      UPDATE runtime_interventions SET
+        state=?,result_code=?,result_message=?,actual_thread_id=?,actual_turn_id=?,
+        updated_at=?,completed_at=?
+      WHERE request_id=? AND state='claimed' AND claimed_by=?
+    `).run(
+      input.state, input.resultCode, input.resultMessage, input.actualThreadId, input.actualTurnId,
+      now, now, input.requestId, input.workerId,
+    );
+    const record = this.getIntervention(input.requestId);
+    if (!record) throw new Error(`介入指令不存在：${input.requestId}`);
+    if (Number(changed.changes) === 0 && record.state !== input.state) {
+      throw new Error(`介入指令状态已变化：${input.requestId}/${record.state}`);
+    }
+    return record;
+  }
+
   setChannelConnection(input: {
     channelId: string;
     profileId: string;
@@ -1569,17 +1798,21 @@ export class Store {
     model: string | null;
     protocolFingerprint?: string | null;
     contextRecovery?: string | null;
+    endpoint?: string | null;
+    instanceId?: string | null;
+    processId?: number | null;
     error?: string | null;
   }): void {
     const now = new Date().toISOString();
     const current = this.db.prepare('SELECT * FROM runtime_adapters WHERE runtime_id=?')
       .get(input.runtimeId) as Row | undefined;
     this.db.prepare(`
-      INSERT INTO runtime_adapters(runtime_id,label,state,model,protocol_fingerprint,context_recovery,error,updated_at)
-      VALUES(?,?,?,?,?,?,?,?)
+      INSERT INTO runtime_adapters(runtime_id,label,state,model,protocol_fingerprint,context_recovery,endpoint,instance_id,process_id,error,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(runtime_id) DO UPDATE SET
         label=excluded.label,state=excluded.state,model=excluded.model,
         protocol_fingerprint=excluded.protocol_fingerprint,context_recovery=excluded.context_recovery,
+        endpoint=excluded.endpoint,instance_id=excluded.instance_id,process_id=excluded.process_id,
         error=excluded.error,updated_at=excluded.updated_at
     `).run(
       input.runtimeId,
@@ -1592,6 +1825,9 @@ export class Store {
       input.contextRecovery !== undefined
         ? input.contextRecovery
         : current?.context_recovery ? String(current.context_recovery) : null,
+      input.endpoint !== undefined ? input.endpoint : current?.endpoint ? String(current.endpoint) : null,
+      input.instanceId !== undefined ? input.instanceId : current?.instance_id ? String(current.instance_id) : null,
+      input.processId !== undefined ? input.processId : current?.process_id ? Number(current.process_id) : null,
       input.error ?? null,
       now,
     );
@@ -1691,7 +1927,7 @@ export class Store {
       FROM channel_connections ORDER BY channel_id,profile_id
     `).all() as Row[];
     const runtimeAdapters = this.db.prepare(`
-      SELECT runtime_id,label,state,model,protocol_fingerprint,context_recovery,error,updated_at
+      SELECT runtime_id,label,state,model,protocol_fingerprint,context_recovery,endpoint,instance_id,process_id,error,updated_at
       FROM runtime_adapters ORDER BY runtime_id
     `).all() as Row[];
     const conversations = this.db.prepare(`
@@ -1788,6 +2024,9 @@ export class Store {
         model: row.model ? String(row.model) : null,
         protocolFingerprintPrefix: row.protocol_fingerprint ? String(row.protocol_fingerprint).slice(0, 20) : null,
         contextRecovery: row.context_recovery ? String(row.context_recovery) : 'unavailable',
+        endpoint: row.endpoint ? String(row.endpoint) : null,
+        instanceId: row.instance_id ? String(row.instance_id) : null,
+        processId: row.process_id === null ? null : Number(row.process_id),
         error: row.error ? String(row.error) : null,
         updatedAt: String(row.updated_at),
       })),
@@ -1976,6 +2215,52 @@ function mapWorker(row: Row | undefined): RuntimeWorkerRecord | null {
     error: row.error ? String(row.error) : null,
     startedAt: row.started_at ? String(row.started_at) : null,
     updatedAt: String(row.updated_at),
+  };
+}
+
+function interventionPayloadSha256(input: {
+  conversationId: string;
+  expectedThreadId: string;
+  expectedTurnId: string;
+  instruction: string;
+}): string {
+  return createHash('sha256').update(JSON.stringify({
+    conversationId: input.conversationId,
+    expectedThreadId: input.expectedThreadId,
+    expectedTurnId: input.expectedTurnId,
+    instruction: input.instruction,
+  })).digest('hex');
+}
+
+function mapInterventionTarget(row: Row): RuntimeInterventionTarget {
+  return {
+    conversationId: String(row.conversation_id),
+    threadId: row.thread_id ? String(row.thread_id) : null,
+    turnId: row.turn_id ? String(row.turn_id) : null,
+    canIntervene: Number(row.can_intervene) === 1,
+    workerId: row.worker_id ? String(row.worker_id) : null,
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function mapIntervention(row: Row): RuntimeIntervention {
+  return {
+    requestId: String(row.request_id),
+    conversationId: String(row.conversation_id),
+    expectedThreadId: String(row.expected_thread_id),
+    expectedTurnId: String(row.expected_turn_id),
+    instruction: String(row.instruction),
+    state: row.state as RuntimeInterventionState,
+    expiresAt: String(row.expires_at),
+    claimedBy: row.claimed_by ? String(row.claimed_by) : null,
+    claimExpiresAt: row.claim_expires_at ? String(row.claim_expires_at) : null,
+    resultCode: row.result_code ? String(row.result_code) : null,
+    resultMessage: row.result_message ? String(row.result_message) : null,
+    actualThreadId: row.actual_thread_id ? String(row.actual_thread_id) : null,
+    actualTurnId: row.actual_turn_id ? String(row.actual_turn_id) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    completedAt: row.completed_at ? String(row.completed_at) : null,
   };
 }
 

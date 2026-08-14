@@ -39,15 +39,20 @@ export interface RuntimeDescriptor {
   model: string | null;
   protocolFingerprint: string;
   contextRecovery: 'runtime-native' | 'adapter-managed' | 'unavailable';
+  endpoint?: string | null;
+  instanceId?: string | null;
+  processId?: number | null;
 }
 
 export interface AgentSession {
   start(): Promise<unknown>;
   deliver(prompt: string): Promise<DeliveryRun>;
-  steer(prompt: string): Promise<{ turnId: string }>;
+  steer(prompt: string, expectedTurnId?: string, clientUserMessageId?: string): Promise<{ turnId: string }>;
   interruptActive(): Promise<boolean>;
   stop(): Promise<void>;
   readonly currentSessionId: string | null;
+  readonly currentTurnId?: string | null;
+  readonly supportsActiveSteer?: boolean;
   readonly processId: number | null;
   hasBackgroundWork?(): boolean;
 }
@@ -55,4 +60,5 @@ export interface AgentSession {
 export interface RuntimeAdapter {
   readonly descriptor: RuntimeDescriptor;
   createSession(conversation: Conversation): AgentSession;
+  stop?(): Promise<void>;
 }

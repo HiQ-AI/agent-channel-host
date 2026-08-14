@@ -1703,8 +1703,10 @@ function renderInstanceOverview(
   if (conversationWindow.overflow) lines.push(ansi(viewportStatus(conversationWindow), 'dim', color));
   lines.push('', heading('RUNTIMES', color));
   lines.push(...table(
-    ['RUNTIME', 'LABEL', 'STATE', 'MODEL', 'RECOVERY', 'ERROR'],
-    runtimeWindow.rows.map((row) => [row.runtimeId, row.label, row.state, row.model ?? '-', row.contextRecovery ?? '-', row.error ?? '-']),
+    ['RUNTIME', 'STATE', 'MODEL', 'WS ENDPOINT', 'INSTANCE', 'PID', 'ERROR'],
+    runtimeWindow.rows.map((row) => [
+      row.runtimeId, row.state, row.model ?? '-', row.endpoint ?? '-', row.instanceId ?? '-', row.processId ?? '-', row.error ?? '-',
+    ]),
     width,
     semanticTable(color),
   ));

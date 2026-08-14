@@ -123,6 +123,36 @@ export interface RuntimeWorkerRecord {
   updatedAt: string;
 }
 
+export interface RuntimeInterventionTarget {
+  conversationId: string;
+  threadId: string | null;
+  turnId: string | null;
+  canIntervene: boolean;
+  workerId: string | null;
+  updatedAt: string;
+}
+
+export type RuntimeInterventionState = 'pending' | 'claimed' | 'succeeded' | 'rejected' | 'expired';
+
+export interface RuntimeIntervention {
+  requestId: string;
+  conversationId: string;
+  expectedThreadId: string;
+  expectedTurnId: string;
+  instruction: string;
+  state: RuntimeInterventionState;
+  expiresAt: string;
+  claimedBy: string | null;
+  claimExpiresAt: string | null;
+  resultCode: string | null;
+  resultMessage: string | null;
+  actualThreadId: string | null;
+  actualTurnId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
 export interface OutboxRecord {
   id: string;
   conversationId: string;
