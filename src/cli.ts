@@ -6,7 +6,9 @@ import {
 import { configPath, discoverInstances, statePath } from './paths.js';
 import { Store } from './store.js';
 import { dwsDoctor, resolveExactGroup, searchDwsGroups } from './dws.js';
-import { CodexAppServerSession, verifyCodexAppServer } from './codex-app-server.js';
+import { verifyCodexAppServer } from './codex-app-server.js';
+import { CodexRuntimeAdapter } from './codex-runtime.js';
+import type { AgentSession } from './contracts.js';
 import { runHost, type HostControl } from './host.js';
 import {
   installUserService, removeUserService, removeUserServiceIfInstalled, windowsServicePlan,
@@ -499,21 +501,25 @@ program.command('verify')
   .action(async (options) => {
     const config = await loadConfig(options.instance);
     const store = new Store(statePath(options.instance));
-    let session: CodexAppServerSession | null = null;
+    let session: AgentSession | null = null;
+    let runtime: CodexRuntimeAdapter | null = null;
     try {
       const target = store.getConversation(options.id);
       if (!target) throw new Error(`conversation 不存在：${options.id}`);
-      const runtime = await verifyCodexAppServer(config);
+      runtime = await CodexRuntimeAdapter.create(config, store);
       const startupMode = store.getSession(target.id) ? 'resumed' : 'new';
       store.setRuntimeAdapter({
         runtimeId: config.runtime.id,
         label: 'Codex App Server',
         state: 'stopped',
         model: config.runtime.model,
-        protocolFingerprint: runtime.fingerprint,
+        protocolFingerprint: runtime.descriptor.protocolFingerprint,
         contextRecovery: 'runtime-native',
+        endpoint: runtime.descriptor.endpoint,
+        instanceId: runtime.descriptor.instanceId,
+        processId: runtime.descriptor.processId,
       });
-      session = new CodexAppServerSession(config, target, runtime, store);
+      session = runtime.createSession(target);
       await session.start();
       const canary = await session.deliver(`
 [宿主离线验证事件；不是钉钉消息]
@@ -529,9 +535,12 @@ program.command('verify')
         delivery: 'forwarded',
         model: config.runtime.model,
         effort: config.runtime.effort,
+        appServerEndpoint: runtime.descriptor.endpoint,
+        appServerInstanceId: runtime.descriptor.instanceId,
       });
     } finally {
       await session?.stop().catch(() => undefined);
+      await runtime?.stop().catch(() => undefined);
       store.close();
     }
   });

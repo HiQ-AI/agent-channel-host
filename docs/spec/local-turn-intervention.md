@@ -2,13 +2,13 @@
 
 ## 目标
 
-Agent Channel Host 持有 Conversation 对应 Codex App Server session，外部进程不能绕过 Host 直接操作该 thread。本改动在现有 Worker 上增加本机 SQLite 指令邮箱：Host 发布当前完整 `threadId`、`turnId` 和可介入状态；外部调用方按该状态提交带 `expectedThreadId`、`expectedTurnId` 的幂等指令；持有 session 的 Worker 领取并调用既有 `session.steer()`，再回写终态。
+Agent Channel Host 托管实例级共享 Codex App Server，并让每个 Conversation Worker 通过独立 WebSocket 连接持有自己的 session。本改动同时提供两层本机接入：Host 发布共享 WebSocket endpoint/instance/PID，供符合 Codex JSON-RPC 协议的临时客户端接入；并提供 SQLite 指令邮箱，由 Worker 代为执行带 expected IDs 的幂等 `session.steer()` 并回写终态。
 
-不改变消息 inbox、Actor drain、Worker lease、session 生命周期或 App Server 进程所有权，不引入 Redis、HTTP 服务或第二个 App Server 客户端。
+不改变消息 inbox、Actor drain、Worker lease 或固定 thread 映射，不引入 Redis或外部事件总线。共享 App Server 只监听 `127.0.0.1`，Host 等待 `/readyz` 后才开始投递。
 
 ## 与 Issue #59 的关系
 
-Issue #59 证明 Codex 0.146.0 的 `turn/steer` 使用 `threadId`、`expectedTurnId`、`input` 和可选 `clientUserMessageId`，并要求错误 turn 不能进入下一轮。但其“Host 级共享 WebSocket App Server + Agent Studio 临时直连”方案与当前约束不同：最终 steer 必须由持有目标 session 的 Host 执行。因此本方案保留现有每 Conversation 的 stdio App Server，不实施共享 WebSocket/readyz/外部直连；邮箱 `requestId` 映射为 `clientUserMessageId`，由原 Worker 调用 steer。
+本方案完整采用 Issue #59 的 Host 级共享 WebSocket App Server：Host 启动一个 `codex app-server --listen ws://127.0.0.1:<port>`，各 Conversation 使用独立连接，endpoint、instance ID 和 PID写入 Runtime 状态并展示在 View。邮箱 `requestId` 同时映射为 `clientUserMessageId`；错误 turn 无论经临时客户端还是 Host Worker 都不能进入下一轮。
 
 ## 外部契约
 
@@ -69,7 +69,7 @@ Worker 启动、Host 邮箱 tick、turn 收尾和 Worker 停止时刷新该状�
 - 邮箱不唤醒空闲 Worker，也不创建新 turn；没有活动 turn 的请求会被拒绝，不降级为 next-turn。
 - Conversation lease 继续保证同一 Conversation 只有一个 Worker；邮箱 claim 额外绑定 worker ID。
 - 指令按普通外部人工输入处理，不作为 system/developer instruction，也不授予审批或更高权限。
-- 默认 TTL 60 秒，允许 1–3600 秒；首次 schema migration 新增两张表并升级 user_version。
+- 默认 TTL 60 秒，允许 1–3600 秒；schema migration 新增邮箱表与共享 App Server 发布字段并升级到 user_version 17。
 
 ## 验证
 

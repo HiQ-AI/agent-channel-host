@@ -205,6 +205,10 @@ test('management view 明确分离总览内 INSTANCES 与全局设置', () => {
     channelId: 'slack', channelProfileId: 'workspace', runtimeId: 'claude',
     kind: 'group', externalId: 'channel-b', title: '群 B', responsibility: '评审', mode: 'shadow',
   });
+  store.setRuntimeAdapter({
+    runtimeId: 'codex', label: 'Codex App Server', state: 'ready', model: 'gpt-test',
+    endpoint: 'ws://127.0.0.1:45678', instanceId: 'app-server-instance', processId: 2468,
+  });
   try {
     const instances = [
       viewInstance('management-view', config, store),
@@ -221,10 +225,12 @@ test('management view 明确分离总览内 INSTANCES 与全局设置', () => {
     assert.doesNotMatch(overview, /MESSAGES received=|HISTORY loaded=/);
 
     state.detailInstanceName = 'management-view';
-    const instanceView = renderManagementView(instances, state, detail, settings, 140);
+    const instanceView = renderManagementView(instances, state, detail, settings, 140, false, false, 40);
     assert.match(instanceView, /CHANNELS/);
     assert.match(instanceView, /CONVERSATIONS/);
     assert.match(instanceView, /RUNTIMES/);
+    assert.match(instanceView, /ws:\/\/127\.0\.0\.1:45678/);
+    assert.match(instanceView, /app-server-instance/);
     assert.match(instanceView, /私聊 A/);
     assert.doesNotMatch(instanceView, /MESSAGES received=|HISTORY loaded=|RECENT MESSAGES|ALERTS/);
     assert.ok(instanceView.indexOf('CHANNELS') < instanceView.indexOf('CONVERSATIONS'));

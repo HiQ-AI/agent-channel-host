@@ -335,6 +335,7 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
   let leaseTimer: NodeJS.Timeout | null = null;
   let externalInputTimer: NodeJS.Timeout | null = null;
   let scheduler: EventDrivenScheduler | null = null;
+  let runtime: RuntimeAdapter | null = null;
   let runtimeInitialized = false;
   let lockAcquired = false;
   let leaseAcquired = false;
@@ -375,9 +376,8 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
 
     store.setRuntimeAdapter({
       runtimeId: config.runtime.id, label: 'Codex CLI', state: 'starting',
-      model: config.runtime.model,
+      model: config.runtime.model, endpoint: null, instanceId: null, processId: null,
     });
-    let runtime: RuntimeAdapter;
     if (options.runtime) runtime = options.runtime;
     else {
       try {
@@ -385,7 +385,8 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
       } catch (error) {
         store.setRuntimeAdapter({
           runtimeId: config.runtime.id, label: 'Codex CLI', state: 'error',
-          model: config.runtime.model, error: (error as Error).message,
+          model: config.runtime.model, endpoint: null, instanceId: null, processId: null,
+          error: (error as Error).message,
         });
         throw error;
       }
@@ -398,11 +399,15 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
       model: runtime.descriptor.model,
       protocolFingerprint: runtime.descriptor.protocolFingerprint,
       contextRecovery: runtime.descriptor.contextRecovery,
+      endpoint: runtime.descriptor.endpoint,
+      instanceId: runtime.descriptor.instanceId,
+      processId: runtime.descriptor.processId,
     });
     const runtimes = new Map([[runtime.descriptor.runtimeId, runtime as RuntimeAdapter]]);
     log({
       type: 'RUNTIME_VERIFIED', runtimeId: runtime.descriptor.runtimeId,
       model: runtime.descriptor.model, protocolFingerprintPrefix: runtime.descriptor.protocolFingerprint.slice(0, 20),
+      endpoint: runtime.descriptor.endpoint ?? null, appServerInstanceId: runtime.descriptor.instanceId ?? null,
     });
     scheduler = new EventDrivenScheduler(config, store, channels, runtimes, log, requestStop);
     let startupRecoveryComplete = false;
@@ -606,6 +611,7 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     if (leaseTimer) clearInterval(leaseTimer);
     if (externalInputTimer) clearInterval(externalInputTimer);
     await scheduler?.stop();
+    await runtime?.stop?.().catch((error) => log({ type: 'RUNTIME_STOP_ERROR', error: (error as Error).message }));
     if (channelOwned && channel) {
       await channel.stop().catch((error) => log({ type: 'CHANNEL_STOP_ERROR', error: (error as Error).message }));
       store.setChannelConnection({
@@ -619,7 +625,8 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
       const runtimeError = fatalError && fatalError !== channelFatal ? fatalError : null;
       store.setRuntimeAdapter({
         runtimeId: config.runtime.id, label: 'Codex CLI', state: runtimeError ? 'error' : 'stopped',
-        model: config.runtime.model, error: runtimeError?.message ?? null,
+        model: config.runtime.model, endpoint: null, instanceId: null, processId: null,
+        error: runtimeError?.message ?? null,
       });
     }
     if (leaseAcquired) store.releaseLease('host', lock.ownerId);

@@ -603,6 +603,29 @@ export class Store {
         PRAGMA user_version=16;
       `);
     }
+    const sharedAppServerVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (sharedAppServerVersion < 17) {
+      const runtimeTable = this.db.prepare(
+        "SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='runtime_adapters'",
+      ).get() as Row | undefined;
+      if (runtimeTable) {
+        this.db.exec(`
+          ALTER TABLE runtime_adapters ADD COLUMN endpoint TEXT;
+          ALTER TABLE runtime_adapters ADD COLUMN instance_id TEXT;
+          ALTER TABLE runtime_adapters ADD COLUMN process_id INTEGER;
+        `);
+      } else {
+        this.db.exec(`
+          CREATE TABLE runtime_adapters (
+            runtime_id TEXT PRIMARY KEY,label TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('starting','ready','stopped','error')),
+            model TEXT,protocol_fingerprint TEXT,context_recovery TEXT,
+            endpoint TEXT,instance_id TEXT,process_id INTEGER,error TEXT,updated_at TEXT NOT NULL
+          );
+        `);
+      }
+      this.db.exec('PRAGMA user_version=17');
+    }
   }
 
   selfMessagePollStart(conversation: Conversation): Date {
@@ -1775,17 +1798,21 @@ export class Store {
     model: string | null;
     protocolFingerprint?: string | null;
     contextRecovery?: string | null;
+    endpoint?: string | null;
+    instanceId?: string | null;
+    processId?: number | null;
     error?: string | null;
   }): void {
     const now = new Date().toISOString();
     const current = this.db.prepare('SELECT * FROM runtime_adapters WHERE runtime_id=?')
       .get(input.runtimeId) as Row | undefined;
     this.db.prepare(`
-      INSERT INTO runtime_adapters(runtime_id,label,state,model,protocol_fingerprint,context_recovery,error,updated_at)
-      VALUES(?,?,?,?,?,?,?,?)
+      INSERT INTO runtime_adapters(runtime_id,label,state,model,protocol_fingerprint,context_recovery,endpoint,instance_id,process_id,error,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(runtime_id) DO UPDATE SET
         label=excluded.label,state=excluded.state,model=excluded.model,
         protocol_fingerprint=excluded.protocol_fingerprint,context_recovery=excluded.context_recovery,
+        endpoint=excluded.endpoint,instance_id=excluded.instance_id,process_id=excluded.process_id,
         error=excluded.error,updated_at=excluded.updated_at
     `).run(
       input.runtimeId,
@@ -1798,6 +1825,9 @@ export class Store {
       input.contextRecovery !== undefined
         ? input.contextRecovery
         : current?.context_recovery ? String(current.context_recovery) : null,
+      input.endpoint !== undefined ? input.endpoint : current?.endpoint ? String(current.endpoint) : null,
+      input.instanceId !== undefined ? input.instanceId : current?.instance_id ? String(current.instance_id) : null,
+      input.processId !== undefined ? input.processId : current?.process_id ? Number(current.process_id) : null,
       input.error ?? null,
       now,
     );
@@ -1897,7 +1927,7 @@ export class Store {
       FROM channel_connections ORDER BY channel_id,profile_id
     `).all() as Row[];
     const runtimeAdapters = this.db.prepare(`
-      SELECT runtime_id,label,state,model,protocol_fingerprint,context_recovery,error,updated_at
+      SELECT runtime_id,label,state,model,protocol_fingerprint,context_recovery,endpoint,instance_id,process_id,error,updated_at
       FROM runtime_adapters ORDER BY runtime_id
     `).all() as Row[];
     const conversations = this.db.prepare(`
@@ -1994,6 +2024,9 @@ export class Store {
         model: row.model ? String(row.model) : null,
         protocolFingerprintPrefix: row.protocol_fingerprint ? String(row.protocol_fingerprint).slice(0, 20) : null,
         contextRecovery: row.context_recovery ? String(row.context_recovery) : 'unavailable',
+        endpoint: row.endpoint ? String(row.endpoint) : null,
+        instanceId: row.instance_id ? String(row.instance_id) : null,
+        processId: row.process_id === null ? null : Number(row.process_id),
         error: row.error ? String(row.error) : null,
         updatedAt: String(row.updated_at),
       })),

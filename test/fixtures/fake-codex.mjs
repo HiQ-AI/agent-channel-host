@@ -1,4 +1,6 @@
 import { createInterface } from 'node:readline';
+import { createServer } from 'node:http';
+import { WebSocketServer } from 'ws';
 
 const args = process.argv.slice(2);
 if (args[0] === 'app-server') {
@@ -32,51 +34,93 @@ function complete(echo = null) {
 }
 
 function runAppServer() {
+  const listenIndex = args.indexOf('--listen');
+  const endpoint = listenIndex >= 0 ? args[listenIndex + 1] : 'stdio://';
+  if (endpoint?.startsWith('ws://')) return runWebSocketAppServer(endpoint);
   const input = createInterface({ input: process.stdin });
-  input.on('line', (line) => {
-    const message = JSON.parse(line);
+  input.on('line', (line) => handleAppServerMessage(
+    JSON.parse(line), respond, notify,
+    (message) => process.stdout.write(`${JSON.stringify(message)}\n`),
+  ));
+}
+
+function runWebSocketAppServer(endpoint) {
+  const url = new URL(endpoint);
+  const server = createServer((request, response) => {
+    if (request.url === '/readyz') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      return response.end('[]');
+    }
+    response.writeHead(400);
+    response.end();
+  });
+  const sockets = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (request, socket, head) => {
+    sockets.handleUpgrade(request, socket, head, (client) => sockets.emit('connection', client, request));
+  });
+  sockets.on('connection', (client) => {
+    const socketRespond = (id, result, error) => client.send(JSON.stringify(error
+      ? { id, error: { code: -32000, message: error } }
+      : { id, result }));
+    const socketNotify = (method, params) => client.send(JSON.stringify({ method, params }));
+    client.on('message', (data) => handleAppServerMessage(
+      JSON.parse(data.toString()), socketRespond, socketNotify, (message) => client.send(JSON.stringify(message)),
+    ));
+  });
+  server.listen(Number(url.port), url.hostname);
+}
+
+function handleAppServerMessage(message, sendResponse, sendNotification, sendRaw) {
     if (message.method === 'initialized') return;
-    if (message.method === 'initialize') return respond(message.id, {});
+    if (message.method === 'initialize') return sendResponse(message.id, {});
     if (message.method === 'thread/start' || message.method === 'thread/resume') {
       if (message.params?.approvalPolicy !== 'never' || message.params?.sandbox !== 'danger-full-access') {
-        return fail(message.id, 'missing non-interactive thread policy');
+        return sendResponse(message.id, undefined, 'missing non-interactive thread policy');
       }
       const id = message.params.threadId ?? 'fake-app-server-session';
-      return respond(message.id, { thread: { id } });
+      return sendResponse(message.id, { thread: { id } });
+    }
+    if (message.method === 'thread/read') {
+      return sendResponse(message.id, { thread: { id: message.params.threadId } });
     }
     if (message.method === 'turn/start') {
-      const turnId = 'fake-turn';
-      respond(message.id, { turn: { id: turnId } });
-      notify('turn/started', { turn: { id: turnId } });
+      const turnId = String(message.params?.threadId ?? '').startsWith('parallel-')
+        ? `turn-${message.params.threadId}` : 'fake-turn';
+      sendResponse(message.id, { turn: { id: turnId } });
+      sendNotification('turn/started', { turn: { id: turnId } });
       const prompt = message.params?.input?.[0]?.text ?? '';
       if (prompt.includes('APPROVAL_REQUEST')) {
-        process.stdout.write(`${JSON.stringify({
+        sendRaw({
           id: 'approval-1', method: 'item/commandExecution/requestApproval',
           params: { threadId: message.params.threadId, turnId, itemId: 'command-1' },
-        })}\n`);
+        });
       } else if (prompt.includes('ACTIVE_STEER')) {
-        setTimeout(() => notify('turn/completed', { turn: { id: turnId, status: 'completed' } }), 500);
+        setTimeout(() => sendNotification('turn/completed', { turn: { id: turnId, status: 'completed' } }), 500);
       } else {
-        notify('turn/completed', { turn: { id: turnId, status: 'completed' } });
+        sendNotification('turn/completed', { turn: { id: turnId, status: 'completed' } });
       }
       return;
     }
     if (message.method === 'turn/steer') {
-      if (message.params?.expectedTurnId !== 'fake-turn') return fail(message.id, 'wrong expectedTurnId');
-      if (message.params?.clientUserMessageId !== 'human-request-app-server') {
-        return fail(message.id, 'missing clientUserMessageId');
+      if (String(message.params?.expectedTurnId ?? '').startsWith('turn-parallel-')) {
+        return sendResponse(message.id, { turnId: message.params.expectedTurnId });
       }
-      return respond(message.id, { turnId: 'fake-turn' });
+      if (message.params?.expectedTurnId !== 'fake-turn') return sendResponse(message.id, undefined, 'wrong expectedTurnId');
+      if (message.params?.clientUserMessageId !== 'human-request-app-server') {
+        return sendResponse(message.id, undefined, 'missing clientUserMessageId');
+      }
+      return sendResponse(message.id, { turnId: 'fake-turn' });
     }
     if (message.method === 'turn/interrupt') {
-      respond(message.id, {});
-      return notify('turn/completed', { turn: { id: message.params.turnId, status: 'interrupted' } });
+      sendResponse(message.id, {});
+      return sendNotification('turn/completed', { turn: { id: message.params.turnId, status: 'interrupted' } });
     }
-  });
 }
 
-function respond(id, result) {
-  process.stdout.write(`${JSON.stringify({ id, result })}\n`);
+function respond(id, result, error) {
+  process.stdout.write(`${JSON.stringify(error
+    ? { id, error: { code: -32000, message: error } }
+    : { id, result })}\n`);
 }
 
 function fail(id, message) {

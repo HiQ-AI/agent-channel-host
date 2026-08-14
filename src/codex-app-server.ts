@@ -1,10 +1,10 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { createInterface, type Interface } from 'node:readline';
+import type WebSocket from 'ws';
 import type { HostConfig } from './config.js';
 import { assertMinimumToolVersion } from './tool-version.js';
 import type { AgentSession } from './contracts.js';
-import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from './command.js';
-import { stopChild, withTimeout } from './process-utils.js';
+import { execResolved, resolveCommand, type ResolvedCommand } from './command.js';
+import { withTimeout } from './process-utils.js';
+import type { CodexAppServerHost } from './codex-app-server-host.js';
 import type { Store } from './store.js';
 import type { Conversation, DeliveryRun, SessionRecord } from './types.js';
 import {
@@ -21,7 +21,7 @@ export interface CodexAppServerIdentity {
   command: ResolvedCommand;
 }
 
-const DRIVER_PROTOCOL = 'app-server-v1-turn-steer';
+const DRIVER_PROTOCOL = 'app-server-v2-shared-websocket-turn-steer';
 const NON_INTERACTIVE_THREAD_OPTIONS = {
   approvalPolicy: 'never',
   sandbox: 'danger-full-access',
@@ -37,16 +37,14 @@ export async function verifyCodexAppServer(config: HostConfig): Promise<CodexApp
   const help = await execResolved(command, ['app-server', '--help'], {
     cwd: config.runtime.cwd, encoding: 'utf8', timeout: 10_000, windowsHide: true,
   });
-  if (!help.stdout.includes('--listen') && !help.stdout.includes('stdio')) {
-    throw new Error('Codex App Server 缺少 stdio 控制面');
+  if (!help.stdout.includes('--listen') || !help.stdout.includes('ws://IP:PORT')) {
+    throw new Error('Codex App Server 缺少 WebSocket 控制面');
   }
   return { version: actualVersion, fingerprint: `${actualVersion}:${DRIVER_PROTOCOL}`, command };
 }
 
 export class CodexAppServerSession implements AgentSession {
-  private child: ChildProcessWithoutNullStreams | null = null;
-  private stdout: Interface | null = null;
-  private stderr: Interface | null = null;
+  private socket: WebSocket | null = null;
   private pending = new Map<number, Pending>();
   private waiters: Waiter[] = [];
   private notifications = new Map<string, JsonObject>();
@@ -58,7 +56,6 @@ export class CodexAppServerSession implements AgentSession {
   private activeTurnId: string | null = null;
   private stopping = false;
   private terminalError: Error | null = null;
-  private stderrTail: string[] = [];
   private completedTurnsSinceResponsibilityReminder = 0;
   private lastCompletedResponsibility: string | null = null;
 
@@ -67,31 +64,22 @@ export class CodexAppServerSession implements AgentSession {
     private readonly conversation: Conversation,
     private readonly identity: CodexAppServerIdentity,
     private readonly store: Store,
+    private readonly appServer: CodexAppServerHost,
   ) {}
 
   get currentSessionId(): string | null { return this.providerSessionId; }
   get currentTurnId(): string | null { return this.activeTurnId; }
   get supportsActiveSteer(): boolean { return true; }
-  get processId(): number | null { return this.child?.pid ?? null; }
+  get processId(): number | null { return this.appServer.processId; }
   hasBackgroundWork(): boolean { return this.activeTurnId !== null; }
 
   async start(): Promise<void> {
-    if (this.child) throw new Error('Codex App Server session 已启动');
+    if (this.socket) throw new Error('Codex App Server session 已启动');
     this.terminalError = null;
-    this.child = spawn(this.identity.command.file, commandArgs(this.identity.command, ['app-server', '--listen', 'stdio://']), {
-      cwd: this.config.runtime.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: process.env,
-    });
-    this.stdout = createInterface({ input: this.child.stdout });
-    this.stderr = createInterface({ input: this.child.stderr });
-    this.stdout.on('line', (line) => this.onLine(line));
-    this.stderr.on('line', (line) => {
-      this.stderrTail.push(line);
-      if (this.stderrTail.length > 30) this.stderrTail.shift();
-    });
-    this.child.once('error', (error) => this.failAll(error));
-    this.child.once('exit', (code, signal) => {
-      if (!this.stopping) this.failAll(new Error(`Codex App Server 意外退出：code=${code} signal=${signal}`));
-    });
+    this.socket = await this.appServer.connect(
+      (message) => this.onLine(message),
+      (error) => this.failAll(error),
+    );
     await this.request('initialize', { clientInfo: { name: 'agent-channel-host', version: '1.0.0' } });
     this.notify('initialized', {});
     const existing = this.store.getSession(this.conversation.id);
@@ -189,10 +177,8 @@ export class CodexAppServerSession implements AgentSession {
   async stop(): Promise<void> {
     this.stopping = true;
     await this.interruptActive().catch(() => false);
-    await stopChild(this.child);
-    this.stdout?.close();
-    this.stderr?.close();
-    this.child = null;
+    this.socket?.close();
+    this.socket = null;
     this.failAll(new Error('Codex App Server session 已停止'));
   }
 
@@ -214,15 +200,16 @@ export class CodexAppServerSession implements AgentSession {
     this.send({ id, method, params });
     return withTimeout(response, this.config.runtime.startupTimeoutSeconds * 1_000, `Codex ${method}`)
       .catch((error) => {
-        const tail = this.stderrTail.length > 0 ? `；stderr tail: ${this.stderrTail.join(' | ')}` : '';
+        const tailText = this.appServer.errorTail;
+        const tail = tailText ? `；stderr tail: ${tailText}` : '';
         throw new Error(`${(error as Error).message}${tail}`);
       });
   }
 
   private notify(method: string, params: JsonObject): void { this.send({ method, params }); }
   private send(message: JsonObject): void {
-    if (!this.child || this.child.exitCode !== null) throw new Error('Codex App Server 未运行');
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    if (!this.socket || this.socket.readyState !== this.socket.OPEN) throw new Error('Codex App Server WebSocket 未连接');
+    this.socket.send(JSON.stringify(message));
   }
 
   private waitForCompletion(turnId: string): Promise<JsonObject> {
@@ -298,10 +285,8 @@ export class CodexAppServerSession implements AgentSession {
     }
     this.failAll(error);
     this.stopping = true;
-    const child = this.child;
-    void stopChild(child).finally(() => {
-      if (this.child === child) this.child = null;
-    });
+    this.socket?.close();
+    this.socket = null;
   }
 
   private failAll(error: Error): void {

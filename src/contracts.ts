@@ -39,6 +39,9 @@ export interface RuntimeDescriptor {
   model: string | null;
   protocolFingerprint: string;
   contextRecovery: 'runtime-native' | 'adapter-managed' | 'unavailable';
+  endpoint?: string | null;
+  instanceId?: string | null;
+  processId?: number | null;
 }
 
 export interface AgentSession {
@@ -57,4 +60,5 @@ export interface AgentSession {
 export interface RuntimeAdapter {
   readonly descriptor: RuntimeDescriptor;
   createSession(conversation: Conversation): AgentSession;
+  stop?(): Promise<void>;
 }
