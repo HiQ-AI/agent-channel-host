@@ -535,6 +535,9 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     for (const conversationId of startupSignals) scheduler.signal(conversationId);
     externalInputTimer = setInterval(() => {
       store.expireInterventions();
+      for (const conversationId of store.pendingInterventionConversationIds()) {
+        scheduler?.signal(conversationId);
+      }
       for (const conversationId of store.pendingContinuationConversationIds()) {
         scheduler?.signalContinuation(conversationId);
       }

@@ -59,6 +59,29 @@ class InterventionSession extends RecordingSession {
   }
 }
 
+class IdleInterventionSession extends InterventionSession {
+  override currentTurnId: string | null = null;
+  supportsTurnStart = true;
+  started: Array<{ prompt: string; clientUserMessageId?: string }> = [];
+  private complete: ((value: DeliveryRun) => void) | null = null;
+
+  async startTurn(
+    prompt: string,
+    clientUserMessageId?: string,
+  ): Promise<{ turnId: string; completion: Promise<DeliveryRun> }> {
+    this.started.push({ prompt, clientUserMessageId });
+    this.currentTurnId = 'turn-from-idle';
+    const completion = new Promise<DeliveryRun>((resolve) => { this.complete = resolve; });
+    return { turnId: this.currentTurnId, completion };
+  }
+
+  finish(): void {
+    this.currentTurnId = null;
+    this.complete?.({ turnId: 'turn-from-idle', status: 'completed' });
+    this.complete = null;
+  }
+}
+
 test('实时消息按可用批次传入固定 runtime session，Host 不调用 Channel send', async () => {
   const config = defaultConfig('actor', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
@@ -271,6 +294,77 @@ test('Worker 只把匹配 thread/turn 的幂等指令 steer 到当前活动 turn
   } finally {
     await worker.stop();
     assert.equal(store.getInterventionTarget(conversation.id)?.canIntervene, false);
+    store.close();
+  }
+});
+
+test('Worker 在空闲 Conversation 原 thread 创建 turn，并在执行中继续接收 Channel steer', async () => {
+  const config = defaultConfig('conversation-message', '.', 'Agent');
+  config.scheduling.quietWindowMilliseconds = 0;
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'idle-message-user', title: '空闲私聊', responsibility: '', mode: 'reply',
+  });
+  const session = new IdleInterventionSession();
+  const worker = new ConversationWorker(config, conversation, session, store, () => undefined);
+  try {
+    await worker.start();
+    const target = store.getInterventionTarget(conversation.id)!;
+    assert.deepEqual(
+      { turnId: target.turnId, canSteer: target.canIntervene, canStartTurn: target.canStartTurn },
+      { turnId: null, canSteer: false, canStartTurn: true },
+    );
+    store.submitIntervention({
+      requestId: 'idle-request-1', conversationId: conversation.id,
+      expectedThreadId: session.currentSessionId!, expectedTurnId: null,
+      instruction: '从页面继续处理', expiresAt: new Date(Date.now() + 60_000),
+    });
+    worker.processInterventions();
+    await waitFor(() => store.getIntervention('idle-request-1')?.state === 'succeeded');
+    assert.deepEqual(session.started, [{
+      prompt: '# 人工介入\n\n从页面继续处理', clientUserMessageId: 'idle-request-1',
+    }]);
+    assert.deepEqual(
+      {
+        code: store.getIntervention('idle-request-1')?.resultCode,
+        turnId: store.getIntervention('idle-request-1')?.actualTurnId,
+      },
+      { code: 'started', turnId: 'turn-from-idle' },
+    );
+
+    const admitted = store.admitEvent(conversation, normalizeDwsEvent({
+      type: 'user_im_message_receive_o2o_all', event_id: 'during-human-turn',
+      sender_open_dingtalk_id: conversation.externalId, sender_name: '同事甲', content: '补充条件',
+    })!);
+    assert.equal(admitted.admitted, true);
+    worker.signal();
+    await waitFor(() => session.received.length === 1);
+    assert.match(session.received[0]!.prompt, /内容：补充条件/);
+    session.finish();
+    await waitFor(() => store.status().forwarded_messages === 1);
+
+    store.submitIntervention({
+      requestId: 'idle-request-stale-turn', conversationId: conversation.id,
+      expectedThreadId: session.currentSessionId!, expectedTurnId: 'turn-already-ended',
+      instruction: '不能降级成新 turn', expiresAt: new Date(Date.now() + 60_000),
+    });
+    worker.processInterventions();
+    await waitFor(() => store.getIntervention('idle-request-stale-turn')?.state === 'rejected');
+    assert.equal(store.getIntervention('idle-request-stale-turn')?.resultCode, 'turn_mismatch');
+    assert.equal(session.started.length, 1);
+
+    store.submitIntervention({
+      requestId: 'idle-request-disabled', conversationId: conversation.id,
+      expectedThreadId: session.currentSessionId!, expectedTurnId: null,
+      instruction: '禁用后不能执行', expiresAt: new Date(Date.now() + 60_000),
+    });
+    store.setConversationEnabled(conversation.id, false);
+    worker.processInterventions();
+    await waitFor(() => store.getIntervention('idle-request-disabled')?.state === 'rejected');
+    assert.equal(store.getIntervention('idle-request-disabled')?.resultCode, 'conversation_disabled');
+    assert.equal(session.started.length, 1);
+  } finally {
+    await worker.stop();
     store.close();
   }
 });

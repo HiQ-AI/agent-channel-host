@@ -179,6 +179,33 @@ class FakeRuntime implements RuntimeAdapter {
   }
 }
 
+class MessageSession extends FakeSession {
+  currentTurnId: string | null = null;
+  supportsActiveSteer = true;
+  supportsTurnStart = true;
+  startedMessages: Array<{ prompt: string; clientUserMessageId?: string }> = [];
+
+  async startTurn(
+    prompt: string,
+    clientUserMessageId?: string,
+  ): Promise<{ turnId: string; completion: Promise<DeliveryRun> }> {
+    this.startedMessages.push({ prompt, clientUserMessageId });
+    this.currentTurnId = 'turn-host-recovered-message';
+    const completion = Promise.resolve({
+      turnId: this.currentTurnId, status: 'completed' as const,
+    }).finally(() => { this.currentTurnId = null; });
+    return { turnId: this.currentTurnId, completion };
+  }
+}
+
+class MessageRuntime extends FakeRuntime {
+  override createSession(_conversation: Conversation): AgentSession {
+    const session = new MessageSession();
+    this.sessions.push(session);
+    return session;
+  }
+}
+
 test('会话级决策失败不升级为 Host fatal，后续消息仍由同一 Channel 处理', async () => {
   const config = defaultConfig('scheduler-decision-isolation', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
@@ -458,6 +485,64 @@ test('可嵌入 Host 由 AbortSignal 停止，第二个 owner 不覆盖运行状
     await running;
     assert.equal(channel.stopped, 1);
     assert.equal(owner.released, 1);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+    else process.env.AGENT_CHANNEL_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Host 启动后按持久化 pending 人工消息唤醒空闲 Conversation Worker', async () => {
+  const root = resolve('.test-host-pending-conversation-message');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const previous = process.env.AGENT_CHANNEL_HOME;
+  process.env.AGENT_CHANNEL_HOME = root;
+  const config = defaultConfig('pending-conversation-message', '.', 'Agent');
+  const state = resolve(root, 'instances', config.instance, 'state.sqlite3');
+  const setup = new Store(state);
+  const conversation = setup.addConversation({
+    kind: 'direct', externalId: 'pending-human-user', title: '恢复人工消息', responsibility: '', mode: 'shadow',
+  });
+  const now = new Date().toISOString();
+  setup.saveSession({
+    conversationId: conversation.id, runtimeId: 'codex', providerSessionId: 'session-fixed-123456789',
+    generation: 1, lifecycle: 'ready', protocolFingerprint: 'fake:v1', runtimeCwd: '.',
+    bootstrapTurnId: null, createdAt: now, updatedAt: now,
+  });
+  setup.submitIntervention({
+    requestId: 'pending-after-restart', conversationId: conversation.id,
+    expectedThreadId: 'session-fixed-123456789', expectedTurnId: null,
+    instruction: 'Host 恢复后继续处理', expiresAt: new Date(Date.now() + 60_000),
+  });
+  setup.close();
+  const runtime = new MessageRuntime();
+  const abort = new AbortController();
+  try {
+    const running = runHost(config, {
+      signal: abort.signal, handleProcessSignals: false,
+      channel: new FakeChannel(), runtime,
+      ownerLock: new FakeOwnerLock('pending-message-owner'), log: () => undefined,
+    });
+    await waitFor(() => {
+      const observer = new Store(state);
+      try { return observer.getIntervention('pending-after-restart')?.state === 'succeeded'; }
+      finally { observer.close(); }
+    }, 4_000);
+    const resultStore = new Store(state);
+    try {
+      assert.deepEqual(
+        {
+          code: resultStore.getIntervention('pending-after-restart')?.resultCode,
+          turnId: resultStore.getIntervention('pending-after-restart')?.actualTurnId,
+        },
+        { code: 'started', turnId: 'turn-host-recovered-message' },
+      );
+    } finally { resultStore.close(); }
+    assert.equal(runtime.sessions.length, 1);
+    assert.equal((runtime.sessions[0] as MessageSession).startedMessages[0]?.clientUserMessageId, 'pending-after-restart');
+    abort.abort();
+    await running;
   } finally {
     if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
     else process.env.AGENT_CHANNEL_HOME = previous;

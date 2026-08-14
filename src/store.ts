@@ -626,6 +626,48 @@ export class Store {
       }
       this.db.exec('PRAGMA user_version=17');
     }
+    const conversationMessageVersion = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
+    if (conversationMessageVersion < 18) {
+      this.db.exec('PRAGMA foreign_keys=OFF');
+      try {
+        this.db.exec(`
+          BEGIN;
+          ALTER TABLE runtime_intervention_targets ADD COLUMN can_start_turn INTEGER NOT NULL DEFAULT 0
+            CHECK(can_start_turn IN (0,1));
+          CREATE TABLE runtime_interventions_v18 (
+            request_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            expected_thread_id TEXT NOT NULL,
+            expected_turn_id TEXT,
+            instruction TEXT NOT NULL,
+            payload_sha256 TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('pending','claimed','succeeded','rejected','expired')),
+            expires_at TEXT NOT NULL,
+            claimed_by TEXT,
+            claim_expires_at TEXT,
+            result_code TEXT,
+            result_message TEXT,
+            actual_thread_id TEXT,
+            actual_turn_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT
+          );
+          INSERT INTO runtime_interventions_v18 SELECT * FROM runtime_interventions;
+          DROP TABLE runtime_interventions;
+          ALTER TABLE runtime_interventions_v18 RENAME TO runtime_interventions;
+          CREATE INDEX idx_runtime_interventions_claim
+            ON runtime_interventions(conversation_id,state,created_at);
+          PRAGMA user_version=18;
+          COMMIT;
+        `);
+      } catch (error) {
+        try { this.db.exec('ROLLBACK'); } catch { /* transaction was not active */ }
+        throw error;
+      } finally {
+        this.db.exec('PRAGMA foreign_keys=ON');
+      }
+    }
   }
 
   selfMessagePollStart(conversation: Conversation): Date {
@@ -1193,6 +1235,10 @@ export class Store {
           error=CASE WHEN state IN ('starting','running') THEN 'host-restarted' ELSE error END,
           updated_at=?
       `).run(now);
+      this.db.prepare(`
+        UPDATE runtime_intervention_targets SET
+          turn_id=NULL,can_intervene=0,can_start_turn=0,worker_id=NULL,updated_at=?
+      `).run(now);
       const rows = this.db.prepare(`
         SELECT DISTINCT c.id
         FROM conversations c
@@ -1587,19 +1633,21 @@ export class Store {
     threadId: string | null;
     turnId: string | null;
     canIntervene: boolean;
+    canStartTurn: boolean;
     workerId: string | null;
   }): void {
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO runtime_intervention_targets(
-        conversation_id,thread_id,turn_id,can_intervene,worker_id,updated_at
-      ) VALUES(?,?,?,?,?,?)
+        conversation_id,thread_id,turn_id,can_intervene,can_start_turn,worker_id,updated_at
+      ) VALUES(?,?,?,?,?,?,?)
       ON CONFLICT(conversation_id) DO UPDATE SET
         thread_id=excluded.thread_id,turn_id=excluded.turn_id,
-        can_intervene=excluded.can_intervene,worker_id=excluded.worker_id,updated_at=excluded.updated_at
+        can_intervene=excluded.can_intervene,can_start_turn=excluded.can_start_turn,
+        worker_id=excluded.worker_id,updated_at=excluded.updated_at
     `).run(
       input.conversationId, input.threadId, input.turnId,
-      input.canIntervene ? 1 : 0, input.workerId, now,
+      input.canIntervene ? 1 : 0, input.canStartTurn ? 1 : 0, input.workerId, now,
     );
   }
 
@@ -1614,7 +1662,7 @@ export class Store {
     requestId: string;
     conversationId: string;
     expectedThreadId: string;
-    expectedTurnId: string;
+    expectedTurnId: string | null;
     instruction: string;
     expiresAt: Date;
   }): { created: boolean; intervention: RuntimeIntervention } {
@@ -1656,6 +1704,13 @@ export class Store {
     const row = this.db.prepare('SELECT * FROM runtime_interventions WHERE request_id=?')
       .get(requestId) as Row | undefined;
     return row ? mapIntervention(row) : null;
+  }
+
+  pendingInterventionConversationIds(): string[] {
+    return (this.db.prepare(`
+      SELECT DISTINCT conversation_id FROM runtime_interventions
+      WHERE state='pending' ORDER BY conversation_id
+    `).all() as Row[]).map((row) => String(row.conversation_id));
   }
 
   expireInterventions(now = new Date()): number {
@@ -2221,7 +2276,7 @@ function mapWorker(row: Row | undefined): RuntimeWorkerRecord | null {
 function interventionPayloadSha256(input: {
   conversationId: string;
   expectedThreadId: string;
-  expectedTurnId: string;
+  expectedTurnId: string | null;
   instruction: string;
 }): string {
   return createHash('sha256').update(JSON.stringify({
@@ -2238,6 +2293,7 @@ function mapInterventionTarget(row: Row): RuntimeInterventionTarget {
     threadId: row.thread_id ? String(row.thread_id) : null,
     turnId: row.turn_id ? String(row.turn_id) : null,
     canIntervene: Number(row.can_intervene) === 1,
+    canStartTurn: Number(row.can_start_turn) === 1,
     workerId: row.worker_id ? String(row.worker_id) : null,
     updatedAt: String(row.updated_at),
   };
@@ -2248,7 +2304,7 @@ function mapIntervention(row: Row): RuntimeIntervention {
     requestId: String(row.request_id),
     conversationId: String(row.conversation_id),
     expectedThreadId: String(row.expected_thread_id),
-    expectedTurnId: String(row.expected_turn_id),
+    expectedTurnId: row.expected_turn_id ? String(row.expected_turn_id) : null,
     instruction: String(row.instruction),
     state: row.state as RuntimeInterventionState,
     expiresAt: String(row.expires_at),
