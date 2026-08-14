@@ -45,6 +45,20 @@ class FailingSteeringSession extends SteeringSession {
   }
 }
 
+class InterventionSession extends RecordingSession {
+  currentTurnId: string | null = 'turn-intervention';
+  supportsActiveSteer = true;
+  received: Array<{ prompt: string; expectedTurnId?: string; clientUserMessageId?: string }> = [];
+  override async steer(
+    prompt: string,
+    expectedTurnId?: string,
+    clientUserMessageId?: string,
+  ): Promise<{ turnId: string }> {
+    this.received.push({ prompt, expectedTurnId, clientUserMessageId });
+    return { turnId: this.currentTurnId! };
+  }
+}
+
 test('实时消息按可用批次传入固定 runtime session，Host 不调用 Channel send', async () => {
   const config = defaultConfig('actor', '.', 'Agent');
   config.scheduling.quietWindowMilliseconds = 0;
@@ -203,6 +217,60 @@ test('活动 turn 已结束导致引导失败时，把新消息补送到下一 t
     assert.equal(store.pendingEventCount(conversation.id), 0);
   } finally {
     await worker.stop();
+    store.close();
+  }
+});
+
+test('Worker 只把匹配 thread/turn 的幂等指令 steer 到当前活动 turn', async () => {
+  const config = defaultConfig('intervention', '.', 'Agent');
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'intervention-user', title: '介入私聊', responsibility: '', mode: 'reply',
+  });
+  const session = new InterventionSession();
+  const worker = new ConversationWorker(config, conversation, session, store, () => undefined);
+  try {
+    await worker.start();
+    const target = store.getInterventionTarget(conversation.id)!;
+    assert.deepEqual(
+      { threadId: target.threadId, turnId: target.turnId, canIntervene: target.canIntervene },
+      { threadId: session.currentSessionId, turnId: session.currentTurnId, canIntervene: true },
+    );
+    store.submitIntervention({
+      requestId: 'human-request-1', conversationId: conversation.id,
+      expectedThreadId: session.currentSessionId!, expectedTurnId: session.currentTurnId!,
+      instruction: '先检查当前假设', expiresAt: new Date(Date.now() + 60_000),
+    });
+    worker.processInterventions();
+    await waitFor(() => store.getIntervention('human-request-1')?.state === 'succeeded');
+    assert.deepEqual(session.received, [{
+      prompt: '# 人工介入\n\n先检查当前假设',
+      expectedTurnId: 'turn-intervention',
+      clientUserMessageId: 'human-request-1',
+    }]);
+
+    store.submitIntervention({
+      requestId: 'human-request-2', conversationId: conversation.id,
+      expectedThreadId: session.currentSessionId!, expectedTurnId: 'stale-turn',
+      instruction: '这条不能进入下一轮', expiresAt: new Date(Date.now() + 60_000),
+    });
+    worker.processInterventions();
+    await waitFor(() => store.getIntervention('human-request-2')?.state === 'rejected');
+    assert.equal(store.getIntervention('human-request-2')?.resultCode, 'turn_mismatch');
+    assert.equal(session.received.length, 1);
+
+    store.submitIntervention({
+      requestId: 'human-request-3', conversationId: conversation.id,
+      expectedThreadId: 'stale-thread', expectedTurnId: session.currentTurnId!,
+      instruction: '错误 thread 也不能执行', expiresAt: new Date(Date.now() + 60_000),
+    });
+    worker.processInterventions();
+    await waitFor(() => store.getIntervention('human-request-3')?.state === 'rejected');
+    assert.equal(store.getIntervention('human-request-3')?.resultCode, 'thread_mismatch');
+    assert.equal(session.received.length, 1);
+  } finally {
+    await worker.stop();
+    assert.equal(store.getInterventionTarget(conversation.id)?.canIntervene, false);
     store.close();
   }
 });

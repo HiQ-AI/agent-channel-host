@@ -44,10 +44,12 @@ export interface RuntimeDescriptor {
 export interface AgentSession {
   start(): Promise<unknown>;
   deliver(prompt: string): Promise<DeliveryRun>;
-  steer(prompt: string): Promise<{ turnId: string }>;
+  steer(prompt: string, expectedTurnId?: string, clientUserMessageId?: string): Promise<{ turnId: string }>;
   interruptActive(): Promise<boolean>;
   stop(): Promise<void>;
   readonly currentSessionId: string | null;
+  readonly currentTurnId?: string | null;
+  readonly supportsActiveSteer?: boolean;
   readonly processId: number | null;
   hasBackgroundWork?(): boolean;
 }

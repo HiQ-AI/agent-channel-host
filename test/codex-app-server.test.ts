@@ -43,6 +43,28 @@ test('后台 App Server 意外发出审批请求时立即失败，不悬挂 turn
   store.close();
 });
 
+test('活动 turn steer 原样携带 expectedTurnId 与 clientUserMessageId', async () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'steer-user', title: '介入私聊', responsibility: '', mode: 'reply',
+  });
+  const session = new CodexAppServerSession(defaultConfig('steer', '.', 'Agent'), conversation, fakeIdentity(), store);
+  try {
+    await session.start();
+    const delivery = session.deliver('ACTIVE_STEER');
+    await waitFor(() => session.currentTurnId === 'fake-turn');
+    assert.deepEqual(
+      await session.steer('调整方向', 'fake-turn', 'human-request-app-server'),
+      { turnId: 'fake-turn' },
+    );
+    await assert.rejects(session.steer('过期方向', 'stale-turn', 'ignored'), /活动 turn 已变化/);
+    assert.equal((await delivery).status, 'completed');
+  } finally {
+    await session.stop();
+    store.close();
+  }
+});
+
 test('协议升级后仍恢复 Conversation 原 session 且 generation 不变', async () => {
   const store = new Store(':memory:');
   const conversation = store.addConversation({
@@ -79,4 +101,13 @@ function fakeIdentity(): CodexAppServerIdentity {
     fingerprint: 'fake-codex:app-server-v1-turn-steer',
     command: { kind: 'node-script', file: process.execPath, target: fakeCodex },
   };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('等待条件超时');
 }

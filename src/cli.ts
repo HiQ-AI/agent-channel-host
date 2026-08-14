@@ -205,6 +205,79 @@ conversation.command('continue-task')
     }
   });
 
+conversation.command('intervention-state')
+  .description('读取当前 Codex thread、活动 turn 与可介入状态')
+  .requiredOption('--instance <name>', 'instance 名称')
+  .requiredOption('--id <id>', 'conversation UUID')
+  .action(async (options) => {
+    await loadConfig(options.instance);
+    const store = new Store(statePath(options.instance));
+    try {
+      const target = store.getConversation(options.id);
+      if (!target) throw new Error(`conversation 不存在：${options.id}`);
+      const state = store.getInterventionTarget(target.id);
+      const session = store.getSession(target.id);
+      print({
+        conversationId: target.id,
+        threadId: state?.threadId ?? session?.providerSessionId ?? null,
+        turnId: state?.turnId ?? null,
+        canIntervene: state?.canIntervene ?? false,
+        workerId: state?.workerId ?? null,
+        updatedAt: state?.updatedAt ?? session?.updatedAt ?? null,
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+conversation.command('intervene')
+  .description('向预期的活动 turn 提交一条幂等人工介入指令')
+  .requiredOption('--instance <name>', 'instance 名称')
+  .requiredOption('--id <id>', 'conversation UUID')
+  .requiredOption('--request-id <id>', '调用方稳定且唯一的请求 ID')
+  .requiredOption('--expected-thread-id <id>', '提交前读取到的完整 threadId')
+  .requiredOption('--expected-turn-id <id>', '提交前读取到的完整 turnId')
+  .requiredOption('--text <text>', '介入内容')
+  .option('--ttl-seconds <seconds>', '领取前有效秒数，默认 60', parseInterventionTtl, 60)
+  .action(async (options) => {
+    await loadConfig(options.instance);
+    const requestId = requiredInterventionValue(options.requestId, '--request-id', 128);
+    const expectedThreadId = requiredInterventionValue(options.expectedThreadId, '--expected-thread-id', 256);
+    const expectedTurnId = requiredInterventionValue(options.expectedTurnId, '--expected-turn-id', 256);
+    const instruction = requiredInterventionValue(options.text, '--text', 10_000);
+    const store = new Store(statePath(options.instance));
+    try {
+      const submitted = store.submitIntervention({
+        requestId,
+        conversationId: String(options.id),
+        expectedThreadId,
+        expectedTurnId,
+        instruction,
+        expiresAt: new Date(Date.now() + Number(options.ttlSeconds) * 1_000),
+      });
+      print({ ok: true, created: submitted.created, ...publicIntervention(submitted.intervention) });
+    } finally {
+      store.close();
+    }
+  });
+
+conversation.command('intervention-result')
+  .description('按 requestId 查询人工介入的领取与执行结果')
+  .requiredOption('--instance <name>', 'instance 名称')
+  .requiredOption('--request-id <id>', '调用方提交时使用的 request ID')
+  .action(async (options) => {
+    await loadConfig(options.instance);
+    const requestId = requiredInterventionValue(options.requestId, '--request-id', 128);
+    const store = new Store(statePath(options.instance));
+    try {
+      const result = store.getIntervention(requestId);
+      if (!result) throw new Error(`介入指令不存在：${requestId}`);
+      print(publicIntervention(result));
+    } finally {
+      store.close();
+    }
+  });
+
 for (const enabled of [true, false]) {
   conversation.command(enabled ? 'enable' : 'disable')
     .requiredOption('--instance <name>', 'instance 名称')
@@ -526,6 +599,39 @@ function parseReminderInterval(value: string): number {
     throw new Error(`提醒间隔必须是 0-${MAX_RESPONSIBILITY_REMINDER_INTERVAL} 的整数`);
   }
   return parsed;
+}
+
+function parseInterventionTtl(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3_600) {
+    throw new Error('--ttl-seconds 必须是 1-3600 的整数');
+  }
+  return parsed;
+}
+
+function requiredInterventionValue(value: unknown, option: string, maxLength: number): string {
+  const parsed = String(value ?? '').trim();
+  if (!parsed) throw new Error(`${option} 不能为空`);
+  if (parsed.length > maxLength) throw new Error(`${option} 最长 ${maxLength} 个字符`);
+  return parsed;
+}
+
+function publicIntervention(value: import('./types.js').RuntimeIntervention): Record<string, unknown> {
+  return {
+    requestId: value.requestId,
+    conversationId: value.conversationId,
+    expectedThreadId: value.expectedThreadId,
+    expectedTurnId: value.expectedTurnId,
+    state: value.state,
+    expiresAt: value.expiresAt,
+    resultCode: value.resultCode,
+    resultMessage: value.resultMessage,
+    actualThreadId: value.actualThreadId,
+    actualTurnId: value.actualTurnId,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+    completedAt: value.completedAt,
+  };
 }
 
 function parseViewInterval(value: string): number {

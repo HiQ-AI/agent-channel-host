@@ -54,10 +54,19 @@ function runAppServer() {
           id: 'approval-1', method: 'item/commandExecution/requestApproval',
           params: { threadId: message.params.threadId, turnId, itemId: 'command-1' },
         })}\n`);
+      } else if (prompt.includes('ACTIVE_STEER')) {
+        setTimeout(() => notify('turn/completed', { turn: { id: turnId, status: 'completed' } }), 500);
       } else {
         notify('turn/completed', { turn: { id: turnId, status: 'completed' } });
       }
       return;
+    }
+    if (message.method === 'turn/steer') {
+      if (message.params?.expectedTurnId !== 'fake-turn') return fail(message.id, 'wrong expectedTurnId');
+      if (message.params?.clientUserMessageId !== 'human-request-app-server') {
+        return fail(message.id, 'missing clientUserMessageId');
+      }
+      return respond(message.id, { turnId: 'fake-turn' });
     }
     if (message.method === 'turn/interrupt') {
       respond(message.id, {});

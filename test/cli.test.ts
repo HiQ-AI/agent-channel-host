@@ -71,7 +71,34 @@ test('CLI init 后 status 可独立运行且不输出完整 thread ID', async ()
       lifecycle: 'ready', protocolFingerprint: 'test', runtimeCwd: '.', bootstrapTurnId: null,
       createdAt: '2026-08-11T00:00:00.000Z', updatedAt: '2026-08-11T00:00:00.000Z',
     });
+    cliStore.setInterventionTarget({
+      conversationId: addedBody.id, threadId: 'cli-parent-thread', turnId: 'cli-active-turn',
+      canIntervene: true, workerId: 'cli-worker',
+    });
     cliStore.close();
+    const interventionState = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'intervention-state', '--instance', 'test', '--id', addedBody.id,
+    ], { encoding: 'utf8', env });
+    assert.deepEqual(
+      (({ threadId, turnId, canIntervene }) => ({ threadId, turnId, canIntervene }))(JSON.parse(interventionState.stdout)),
+      { threadId: 'cli-parent-thread', turnId: 'cli-active-turn', canIntervene: true },
+    );
+    const intervention = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'intervene', '--instance', 'test', '--id', addedBody.id,
+      '--request-id', 'cli-intervention-1', '--expected-thread-id', 'cli-parent-thread',
+      '--expected-turn-id', 'cli-active-turn', '--text', '调整执行方向', '--ttl-seconds', '30',
+    ], { encoding: 'utf8', env });
+    assert.equal(JSON.parse(intervention.stdout).created, true);
+    const interventionAgain = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'intervene', '--instance', 'test', '--id', addedBody.id,
+      '--request-id', 'cli-intervention-1', '--expected-thread-id', 'cli-parent-thread',
+      '--expected-turn-id', 'cli-active-turn', '--text', '调整执行方向', '--ttl-seconds', '60',
+    ], { encoding: 'utf8', env });
+    assert.equal(JSON.parse(interventionAgain.stdout).created, false);
+    const interventionResult = await execFileAsync(process.execPath, [
+      cli, 'conversation', 'intervention-result', '--instance', 'test', '--request-id', 'cli-intervention-1',
+    ], { encoding: 'utf8', env });
+    assert.equal(JSON.parse(interventionResult.stdout).state, 'pending');
     const continued = await execFileAsync(process.execPath, [
       cli, 'conversation', 'continue-task', '--instance', 'test',
       '--provider-session-id', 'cli-parent-thread', '--conversation-id', addedBody.id,

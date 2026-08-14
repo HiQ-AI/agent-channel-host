@@ -38,6 +38,7 @@ flowchart LR
 - DWS 订阅若收到严格匹配“处理中/进行中/生成中/思考中”的短机器人占位消息，Channel 会用同一 `messageId` 在最多 15 秒内有界回查；非占位正文连续两次相同后才进入 inbox。普通消息不回查、不增加延迟；查询失败或到期时使用最后取得的正文，始终不丢弃原事件。
 - quiet window 用于合并短时间内连续到达的消息。活动 turn 开始后才到达的新消息在 `turn/started` 确认后通过 `turn/steer` 追加到同一 turn，不打断、不排队到下一 turn，也不并发 resume 同一 session；steer 失败时 Worker fail closed，重启恢复后重试，绝不静默改投下一 turn。
 - 宿主控制面可用 `conversation continue-task` 将未完成 Task 的稳定 continuation ID 写入同一 SQLite WAL inbox。命令会在单个事务内精确校验父 provider session、可选 Conversation ID 与幂等键；续接事件固定为 `next-turn`，活动 turn 中绝不 steer，当前 turn 收尾后才开启下一 turn。重复 continuation 会回读原 sequence/processing state；父 session 缺失、多重映射或幂等键跨会话冲突均 fail closed。
+- 人工实时介入使用独立的本机 SQLite 邮箱。Host Worker 发布当前完整 `threadId`、`turnId` 和可介入状态；调用方必须携带读取到的 expected IDs 与稳定 `requestId`。只有持有该 Conversation App Server session 的 Worker 才会领取，并与普通消息共用串行 steer 队列。thread/turn 已变化、turn 已结束、请求过期或能力不支持时回写明确终态，绝不降级为下一 turn；未知执行结果也不会自动重放。
 - Host 不配置 turn 超时，也不会因运行时长或新消息终止活动 turn。Host 停止或 runtime 自身退出造成的未完成 claim 在下次启动时恢复。
 - Host 启动时先建立群聊/私聊实时 consumer，再以每个已启用 Conversation 的最后消息时间为起点补拉至 consumer ready 时刻；没有本地消息时从 Conversation 创建时间开始。补拉起点向前重叠 2 秒，历史与实时交叠消息按同一 Conversation 的消息 ID 或 fingerprint 去重。补拉完成前不启动 Worker，任一会话补拉失败则 Host fail closed，不伪装 ready。
 - 群首次接入时只读拉取最近 50 条消息，先逐条写入 history inbox，再按时间顺序合成一个首次引导交给该群固定 session。Host 不要求自我介绍、不接收决定，也不发送回复。
@@ -164,7 +165,7 @@ Windows 默认数据目录：
 
 0.3 配置版本为 `version: 2`，删除 `protocol` 块，并把原来混在 `runtime` 中的 DWS、调度与 Codex 字段拆开。项目尚未正式部署，因此不保留两套加载路径；读取 `version: 1` 会明确失败。
 
-旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v9，保留 conversation session generation、历史重置审计和 `delivery_unknown` 发送终态；旧 checkpoint/成员资料列仅作为本地管理数据保留，不再自动注入 runtime。已有 Conversation 一律恢复其原 provider session；版本、协议、Runtime 配置或 cwd 变化不会自动轮换 session，恢复失败会明确报错并保留原映射。
+旧预览 instance 应先停止 Host 并备份完整 SQLite/WAL 目录，然后按配置样例人工迁移。当前 SQLite schema 为 v16，保留 conversation session generation、历史重置审计、`delivery_unknown` 发送终态和本机人工介入邮箱；旧 checkpoint/成员资料列仅作为本地管理数据保留，不再自动注入 runtime。已有 Conversation 一律恢复其原 provider session；版本、协议、Runtime 配置或 cwd 变化不会自动轮换 session，恢复失败会明确报错并保留原映射。
 
 ## 添加授权会话
 
@@ -319,6 +320,26 @@ agent-channel status --instance triss
 agent-channel view --once
 agent-channel run --instance triss
 ```
+
+活动 turn 的本机人工介入分为“读取状态、提交、查询结果”三步。调用方必须复用稳定 `request-id`，并原样携带刚读取到的完整 thread/turn ID：
+
+```powershell
+agent-channel conversation intervention-state `
+  --instance triss --id '<conversation UUID>'
+
+agent-channel conversation intervene `
+  --instance triss --id '<conversation UUID>' `
+  --request-id '<stable request ID>' `
+  --expected-thread-id '<full thread ID>' `
+  --expected-turn-id '<active turn ID>' `
+  --text '停止当前方向，先核对需求边界' `
+  --ttl-seconds 60
+
+agent-channel conversation intervention-result `
+  --instance triss --request-id '<stable request ID>'
+```
+
+只有 `intervention-state` 这个显式本机控制命令输出完整 ID；普通 `status/view` 仍保持脱敏。提交成功只表示进入邮箱，最终以 `intervention-result` 的终态为准。
 
 `status --instance` 输出一个 instance 的机器可读 JSON；`view` 是跨 instance 的交互管理面。非编辑态第一次按 `q` 或任何状态下按 `Ctrl+C` 只打开退出确认，并明确显示会停止多少个 View-owned Host；再次按 `q`、`Ctrl+C` 或 Enter 才退出，按 Esc/`←` 取消且保留当前页面与尚未提交的编辑内容。进程收到外部 SIGINT/SIGTERM 时仍立即安全收尾。总览和详情默认不显示正文、完整外部 conversation ID 或完整 provider session ID；本地排查时可显式加 `--show-content` 查看截断预览。instance 设置先通过与启动相同的 schema 校验，再原子保存；标记“重启后生效”的配置不会伪装成已即时应用。
 

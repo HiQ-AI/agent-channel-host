@@ -70,6 +70,8 @@ export class CodexAppServerSession implements AgentSession {
   ) {}
 
   get currentSessionId(): string | null { return this.providerSessionId; }
+  get currentTurnId(): string | null { return this.activeTurnId; }
+  get supportsActiveSteer(): boolean { return true; }
   get processId(): number | null { return this.child?.pid ?? null; }
   hasBackgroundWork(): boolean { return this.activeTurnId !== null; }
 
@@ -155,16 +157,26 @@ export class CodexAppServerSession implements AgentSession {
     }
   }
 
-  async steer(prompt: string): Promise<{ turnId: string }> {
+  async steer(
+    prompt: string,
+    expectedTurnId?: string,
+    clientUserMessageId?: string,
+  ): Promise<{ turnId: string }> {
     if (!this.providerSessionId || !this.activeTurnId) throw new Error('Codex 当前没有可引导的活动 turn');
-    await this.waitForTurnStarted(this.activeTurnId);
+    if (expectedTurnId && expectedTurnId !== this.activeTurnId) {
+      throw new Error(`Codex 活动 turn 已变化：expected=${expectedTurnId}`);
+    }
+    const targetTurnId = this.activeTurnId;
+    await this.waitForTurnStarted(targetTurnId);
+    if (this.activeTurnId !== targetTurnId) throw new Error(`Codex 活动 turn 已变化：expected=${targetTurnId}`);
     const result = await this.request('turn/steer', {
       threadId: this.providerSessionId,
-      expectedTurnId: this.activeTurnId,
+      expectedTurnId: targetTurnId,
       input: [{ type: 'text', text: prompt }],
+      ...(clientUserMessageId ? { clientUserMessageId } : {}),
     }) as JsonObject;
     const acceptedTurnId = typeof result.turnId === 'string' ? result.turnId : null;
-    if (acceptedTurnId !== this.activeTurnId) throw new Error('turn/steer 未确认当前活动 turn');
+    if (acceptedTurnId !== targetTurnId) throw new Error('turn/steer 未确认预期活动 turn');
     return { turnId: acceptedTurnId };
   }
 

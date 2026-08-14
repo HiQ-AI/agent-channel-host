@@ -177,6 +177,14 @@ export class EventDrivenScheduler {
     return this.workers.size + this.starts.size;
   }
 
+  processInterventions(): void {
+    if (this.stopping) return;
+    const workers = new Set<ConversationWorker>();
+    for (const handle of this.workers.values()) workers.add(handle.worker);
+    for (const worker of this.startingWorkers.values()) workers.add(worker);
+    for (const worker of workers) worker.processInterventions();
+  }
+
   private ensureWorker(conversation: Conversation): Promise<WorkerHandle> {
     const existing = this.workers.get(conversation.id);
     if (existing) return Promise.resolve(existing);
@@ -521,9 +529,11 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
     startupRecoveryComplete = true;
     for (const conversationId of startupSignals) scheduler.signal(conversationId);
     externalInputTimer = setInterval(() => {
+      store.expireInterventions();
       for (const conversationId of store.pendingContinuationConversationIds()) {
         scheduler?.signalContinuation(conversationId);
       }
+      scheduler?.processInterventions();
     }, EXTERNAL_INPUT_POLL_MILLISECONDS);
     externalInputTimer.unref();
     options.onControlReady?.({
