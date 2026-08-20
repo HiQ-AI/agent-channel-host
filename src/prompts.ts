@@ -60,7 +60,7 @@ function messagePrompt(conversation: Conversation, messages: MessageEnvelope[]):
     `${targetName}：${conversation.title}`,
   ].join('\n');
   const mentionGuide = conversation.channelId === 'dingtalk' && conversation.kind === 'group'
-    ? '\n群聊实际 @ 规则：需要 @ 某位发送者时，仅使用消息中非“未知”的发送者OpenDingTalkId；正文必须包含 <@openDingTalkId>，并在 dws chat message send 中同时传 --at-open-dingtalk-ids openDingTalkId。不要只写 @姓名，也不要猜测 ID。'
+    ? '\n群聊实际 @ 规则：需要 @ 某位发送者时，仅使用消息中非“未知”的发送者OpenDingTalkId；正文写可见的 @发送者姓名，并在 dws chat message send 中同时传 --at-open-dingtalk-ids openDingTalkId，由结构化参数生成真实 @。禁止把 <@ID> 占位符写进可见正文，也不要猜测 ID。'
     : '';
   const rendered = messages
     .map((message, index) => [
