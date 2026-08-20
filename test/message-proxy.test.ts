@@ -17,7 +17,7 @@ test('职责提醒间隔支持 1-99，0 关闭周期判断但保留职责变化�
   assert.equal(nextResponsibilityReminderCount(99, false, 0), 0);
 });
 
-test('普通群聊 turn 携带发送者 openDingTalkId 与 DWS 结构化 @ 规则', () => {
+test('普通群聊 turn 携带发送者 openDingTalkId 与正文姓名加结构化 ID 的 @ 规则', () => {
   const config = defaultConfig('message-proxy', '.', '身份标记');
   const store = new Store(':memory:');
   const conversation = store.addConversation({
@@ -48,9 +48,13 @@ test('普通群聊 turn 携带发送者 openDingTalkId 与 DWS 结构化 @ 规�
   assert.equal(prompt.match(/# 消息来源/g)?.length, 1);
   assert.match(prompt, /发送者：发送者甲/);
   assert.match(prompt, /发送者OpenDingTalkId：sender-id-marker/);
-  assert.match(prompt, /正文必须包含 <@openDingTalkId>/);
+  assert.match(prompt, /正文写可见的 @发送者姓名/);
   assert.match(prompt, /--at-open-dingtalk-ids openDingTalkId/);
-  assert.match(prompt, /不要只写 @姓名/);
+  assert.match(prompt, /由结构化参数生成真实 @/);
+  assert.match(prompt, /禁止把 <@ID> 占位符写进可见正文/);
+  assert.equal(prompt.includes('正文必须包含 <@openDingTalkId>'), false);
+  assert.equal(prompt.includes('<@sender-id-marker>'), false);
+  assert.equal(prompt.includes('不要只写 @姓名'), false);
   assert.match(prompt, /不要猜测 ID/);
   assert.match(prompt, /时间：2026-08-03 12:00:00/);
   assert.match(prompt, /内容：正文内容/);
