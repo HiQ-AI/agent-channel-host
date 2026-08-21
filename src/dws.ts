@@ -647,8 +647,10 @@ export function normalizeDwsEvent(
     ? text(source.sender_open_dingtalk_id) ?? text(source.conversation_id)
     : text(source.conversation_id) ?? text(source.open_conversation_id);
   if (!externalId) return null;
-  const eventId = text(source.event_id);
-  const messageId = text(source.message_id) ?? text(source.msg_id);
+  const eventId = text(firstValue(source, ['event_id', 'eventId']));
+  const messageId = text(firstValue(source, [
+    'openMessageId', 'open_message_id', 'messageId', 'message_id', 'msgId', 'msg_id',
+  ]));
   if (!eventId && !messageId) return null;
   const fingerprintSource = [
     channelId, channelProfileId, eventId, messageId, externalId,
@@ -670,7 +672,9 @@ export function normalizeDwsEvent(
     content: source.content ?? null,
     quotedMessage: source.quoted_message ?? null,
     forwardedMessages: source.forward_messages ?? null,
-    occurredAt: text(source.event_time) ?? text(source.create_time) ?? text(source.timestamp),
+    occurredAt: text(firstValue(source, [
+      'event_time', 'eventTime', 'create_time', 'createTime', 'send_time', 'sendTime', 'timestamp',
+    ])),
     receivedAt: new Date().toISOString(),
     source,
   };

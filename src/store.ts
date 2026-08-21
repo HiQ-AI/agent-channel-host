@@ -127,6 +127,8 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_inbound_conversation_sequence
         ON inbound_events(conversation_id, sequence DESC);
+      CREATE INDEX IF NOT EXISTS idx_inbound_external_identity
+        ON inbound_events(conversation_id, occurred_at, sender_id, sender_name);
       CREATE INDEX IF NOT EXISTS idx_outbox_state ON outbox(state, created_at);
     `);
     const version = Number((this.db.prepare('PRAGMA user_version').get() as Row).user_version);
@@ -1090,13 +1092,31 @@ export class Store {
     }
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      const body = JSON.stringify({
+        content: event.content,
+        quotedMessage: event.quotedMessage,
+        forwardedMessages: event.forwardedMessages,
+      });
       const duplicate = event.messageId
         ? this.db.prepare(`
             SELECT id FROM inbound_events
             WHERE fingerprint=? OR (conversation_id=? AND message_id=?) LIMIT 1
           `).get(event.fingerprint, conversation.id, event.messageId)
         : this.db.prepare('SELECT id FROM inbound_events WHERE fingerprint=?').get(event.fingerprint);
-      if (duplicate) {
+      const occurredAt = event.occurredAt;
+      const timeAliases = occurredAt === null ? [] : externalMessageTimeAliases(occurredAt);
+      const exactExternalDuplicate = timeAliases.length === 0 ? undefined : (this.db.prepare(`
+        SELECT id,sender_id,sender_name,occurred_at FROM inbound_events
+        WHERE conversation_id=? AND occurred_at IN (${timeAliases.map(() => '?').join(',')}) AND body_json=?
+          AND ingress IN ('live','history','self_poll')
+      `).all(conversation.id, ...timeAliases, body) as Row[]).find((row) => {
+        if (!sameExternalMessageTime(row.occurred_at, occurredAt!)) return false;
+        const existingSenderId = row.sender_id === null ? null : String(row.sender_id);
+        const existingSenderName = row.sender_name === null ? null : String(row.sender_name);
+        if (existingSenderId !== null && event.senderId !== null) return existingSenderId === event.senderId;
+        return existingSenderName !== null && event.senderName !== null && existingSenderName === event.senderName;
+      });
+      if (duplicate || exactExternalDuplicate) {
         this.db.exec('COMMIT');
         return { admitted: false, event: null };
       }
@@ -1105,11 +1125,6 @@ export class Store {
       ).get(conversation.id) as Row;
       const sequence = Number(latest.sequence) + 1;
       const id = randomUUID();
-      const body = JSON.stringify({
-        content: event.content,
-        quotedMessage: event.quotedMessage,
-        forwardedMessages: event.forwardedMessages,
-      });
       this.db.prepare(`
         INSERT INTO inbound_events(
           id,conversation_id,sequence,fingerprint,event_id,message_id,sender_id,sender_name,
@@ -2336,6 +2351,41 @@ function mapIntervention(row: Row): RuntimeIntervention {
     updatedAt: String(row.updated_at),
     completedAt: row.completed_at ? String(row.completed_at) : null,
   };
+}
+
+function sameExternalMessageTime(left: unknown, right: string): boolean {
+  if (left === null || left === undefined) return false;
+  const leftText = String(left);
+  if (leftText === right) return true;
+  const leftTime = parseExternalMessageTime(leftText);
+  const rightTime = parseExternalMessageTime(right);
+  return leftTime !== null && rightTime !== null && leftTime === rightTime;
+}
+
+function externalMessageTimeAliases(value: string): string[] {
+  const aliases = new Set([value]);
+  const timestamp = parseExternalMessageTime(value);
+  if (timestamp === null) return [...aliases];
+  const parsed = new Date(timestamp);
+  aliases.add(parsed.toISOString());
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(parsed);
+  const part = (type: Intl.DateTimeFormatPartTypes): string => parts.find((item) => item.type === type)!.value;
+  aliases.add(`${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}`);
+  return [...aliases];
+}
+
+function parseExternalMessageTime(value: string): number | null {
+  const numeric = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+  const parsed = Number.isFinite(numeric)
+    ? new Date(numeric < 10_000_000_000 ? numeric * 1_000 : numeric)
+    : new Date(/(?:Z|[+-]\d{2}:?\d{2})$/.test(value)
+      ? value
+      : `${value.replace(' ', 'T')}+08:00`);
+  const timestamp = parsed.getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function redactSender(value: unknown): string | null {

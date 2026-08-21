@@ -4,7 +4,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { defaultConfig } from '../src/config.js';
 import type { AgentSession, ChannelAdapter, ChannelBackfillResult, ChannelHandlers, RuntimeAdapter } from '../src/contracts.js';
-import { normalizeDwsEvent } from '../src/dws.js';
+import { normalizeDwsEvent, normalizeDwsHistoryMessage } from '../src/dws.js';
 import { EventDrivenScheduler, resolveEventConversation, runHost, selfMessagePollUntil, type HostControl } from '../src/host.js';
 import { Store } from '../src/store.js';
 import type { AdmittedEvent, Conversation, DeliveryRun, NormalizedEvent } from '../src/types.js';
@@ -83,6 +83,20 @@ class FailureLedgerBackfillChannel extends FakeChannel {
       loaded: 1,
       failures: [{ target: targets.find((target) => target.conversation.externalId === 'system-user')!.conversation.id, error: '模拟系统私聊历史读取失败' }],
     };
+  }
+}
+
+class RepeatStartupBackfillChannel extends FakeChannel {
+  async backfill(
+    targets: Array<{ conversation: Conversation; start: Date }>,
+    _until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<ChannelBackfillResult> {
+    onEvent(normalizeDwsHistoryMessage(targets[0]!.conversation, {
+      openMessageId: 'repeat-startup-message', senderOpenDingTalkId: targets[0]!.conversation.externalId,
+      senderName: '同事甲', createTime: '2030-08-04 09:00:00', content: '启动补拉只投递一次',
+    }));
+    return { loaded: 1, failures: [] };
   }
 }
 
@@ -673,6 +687,62 @@ test('Host 先建立实时订阅再补拉，补拉完成前不启动 Worker，�
     assert.match(runtime.sessions[0]!.prompts[0]!, /离线期间历史消息/);
     abort.abort();
     await running;
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+    else process.env.AGENT_CHANNEL_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Host 第二次启动补拉相同历史时不新增 sequence 或再次投递', async () => {
+  const root = resolve('.test-host-repeated-startup-backfill');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const previous = process.env.AGENT_CHANNEL_HOME;
+  process.env.AGENT_CHANNEL_HOME = root;
+  const config = defaultConfig('repeated-startup-backfill', '.', 'Agent');
+  config.scheduling.quietWindowMilliseconds = 0;
+  const state = resolve(root, 'instances', config.instance, 'state.sqlite3');
+  const setup = new Store(state);
+  const conversation = setup.addConversation({
+    kind: 'direct', externalId: 'repeat-user', title: '重复补拉私聊', responsibility: '', mode: 'shadow',
+  });
+  setup.close();
+  try {
+    const firstRuntime = new FakeRuntime();
+    const firstAbort = new AbortController();
+    const firstRun = runHost(config, {
+      signal: firstAbort.signal, handleProcessSignals: false,
+      channel: new RepeatStartupBackfillChannel(), runtime: firstRuntime,
+      ownerLock: new FakeOwnerLock('repeat-startup-owner-1'), log: () => undefined,
+    });
+    await waitFor(() => firstRuntime.sessions[0]?.prompts.length === 1);
+    await waitFor(() => {
+      const observer = new Store(state);
+      try { return observer.status().forwarded_messages === 1; } finally { observer.close(); }
+    });
+    firstAbort.abort();
+    await firstRun;
+
+    const secondRuntime = new FakeRuntime();
+    const secondLogs: Record<string, unknown>[] = [];
+    const secondAbort = new AbortController();
+    const secondRun = runHost(config, {
+      signal: secondAbort.signal, handleProcessSignals: false,
+      channel: new RepeatStartupBackfillChannel(), runtime: secondRuntime,
+      ownerLock: new FakeOwnerLock('repeat-startup-owner-2'), log: (record) => secondLogs.push(record),
+    });
+    await waitFor(() => secondLogs.some((record) => record.type === 'HOST_READY'));
+    const observer = new Store(state);
+    try {
+      assert.equal(observer.latestSequence(conversation.id), 1);
+      assert.equal(observer.status().forwarded_messages, 1);
+      assert.equal(observer.status().pending_messages, 0);
+      assert.equal(secondRuntime.sessions.length, 0);
+      assert.ok(secondLogs.some((record) => record.type === 'EVENT_DUPLICATE' && record.ingress === 'history'));
+    } finally { observer.close(); }
+    secondAbort.abort();
+    await secondRun;
   } finally {
     if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
     else process.env.AGENT_CHANNEL_HOME = previous;

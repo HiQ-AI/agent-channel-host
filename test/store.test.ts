@@ -248,6 +248,79 @@ test('历史与实时使用同一 message ID 时只准入一次，不误伤其�
   store.close();
 });
 
+test('实时事件识别 DWS 消息 ID 与时间字段别名且保留可见时间格式', () => {
+  const event = normalizeDwsEvent({
+    type: 'user_im_message_receive_o2o_all', eventId: 'camel-event', openMessageId: 'camel-message',
+    sender_open_dingtalk_id: 'camel-user', createTime: '2026-08-04 09:00:00', content: '别名消息',
+  });
+  assert.equal(event?.eventId, 'camel-event');
+  assert.equal(event?.messageId, 'camel-message');
+  assert.equal(event?.occurredAt, '2026-08-04 09:00:00');
+});
+
+test('启动补拉对已进入 inbox 的外部消息跨 ingress、状态与 Store 重启保持幂等', () => {
+  const root = resolve('.test-store-backfill-dedup');
+  const state = resolve(root, 'state.sqlite3');
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(root, { recursive: true });
+  try {
+    const firstStore = new Store(state);
+    const conversation = firstStore.addConversation({
+      kind: 'direct', externalId: 'restart-user', title: '重启私聊', responsibility: '', mode: 'shadow',
+    });
+    const live = normalizeDwsEvent({
+      type: 'user_im_message_receive_o2o_all', event_id: 'live-event', message_id: 'live-message-id',
+      sender_open_dingtalk_id: conversation.externalId, sender_name: '同事甲',
+      create_time: '2026-08-04 09:00:00', content: '只应传入一次',
+    })!;
+    const admitted = firstStore.admitEvent(conversation, live, 'live').event!;
+    const claimed = firstStore.claimPendingEvents(conversation, 'worker-before-restart', 1);
+    firstStore.markBatchForwarded(claimed, 'worker-before-restart', 'turn-before-restart');
+    assert.equal(admitted.sequence, 1);
+    assert.equal(firstStore.status().forwarded_messages, 1);
+    firstStore.close();
+
+    const restartedStore = new Store(state);
+    const restoredConversation = restartedStore.getConversation(conversation.id)!;
+    const repeatedHistory = normalizeDwsHistoryMessage(restoredConversation, {
+      openMessageId: 'history-changed-message-id', senderName: '同事甲',
+      createTime: '2026-08-04 09:00:00', content: '只应传入一次',
+    });
+    assert.equal(restartedStore.admitEvent(restoredConversation, repeatedHistory, 'history').admitted, false);
+    assert.equal(restartedStore.latestSequence(conversation.id), 1);
+    assert.deepEqual(restartedStore.recoverPendingWork(), []);
+
+    const sameTextDifferentMessage = normalizeDwsHistoryMessage(restoredConversation, {
+      openMessageId: 'genuinely-new-message-id', senderOpenDingTalkId: conversation.externalId,
+      senderName: '同事甲', createTime: '2026-08-04 09:00:01', content: '只应传入一次',
+    });
+    assert.equal(restartedStore.admitEvent(restoredConversation, sameTextDifferentMessage, 'history').admitted, true);
+    assert.equal(restartedStore.latestSequence(conversation.id), 2);
+    restartedStore.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('未知私聊发现与已有会话补拉重叠时只准入一条', () => {
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'discovered-user', title: '新联系人', responsibility: '', mode: 'shadow',
+  });
+  const discovered = normalizeDwsHistoryMessage(conversation, {
+    senderOpenDingTalkId: conversation.externalId, senderName: '新联系人',
+    createTime: '2026-08-04 09:00:00', content: '离线首次私聊',
+  });
+  const targetBackfill = normalizeDwsHistoryMessage(conversation, {
+    openMessageId: 'later-enriched-id', senderOpenDingTalkId: conversation.externalId, senderName: '新联系人',
+    createTime: '2026-08-04 09:00:00', content: '离线首次私聊',
+  });
+  assert.equal(store.admitEvent(conversation, discovered, 'history').admitted, true);
+  assert.equal(store.admitEvent(conversation, targetBackfill, 'history').admitted, false);
+  assert.equal(store.latestSequence(conversation.id), 1);
+  store.close();
+});
+
 test('已登记会话补拉逐项隔离失败并返回可观察 ledger', async () => {
   const config = defaultConfig('backfill-ledger', '.', 'Agent');
   const store = new Store(':memory:');
