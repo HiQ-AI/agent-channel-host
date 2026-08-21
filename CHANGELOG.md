@@ -6,7 +6,7 @@
 
 ### Added
 
-- View 的 Channel 页面新增“选择并添加最近私聊”，从 DWS 最近 7 天有界历史列出候选、标记已添加状态，并使用真实 `openDingTalkId` 登记。
+- View 的 Channel 页面新增“搜索人员添加私聊”，使用 DWS AI 搜问姓名维度列出全部候选、标记已添加状态，并使用真实 `openDingTalkId` 登记；零命中和多候选均不默认选择。
 - 新增 Host 持有 session 的 Conversation 人工消息邮箱：状态区分 `canSteer/canStartTurn/canSend`，活动时安全 `turn/steer`，空闲时在固定原 thread 上 `turn/start`；两条路径共用 request ID 幂等、TTL、expected ID 校验和明确终态，并返回实际 turn ID。
 - Codex Runtime 改为每个 Host 实例托管一个回环 WebSocket App Server；全部 Conversation 使用独立连接共享同一进程，并在 `status/view` 发布 `ws://127.0.0.1:<port>`、App Server instance ID 和 PID，供本机诊断和 Host 管理连接生命周期。
 - 新增 durable 任务续接入口 `conversation continue-task`：按完整父 provider session 原子准入，支持稳定 continuation ID 幂等重试，并固定在当前活动 turn 之后另开下一 turn，避免任务控制事件误入 `steer`。

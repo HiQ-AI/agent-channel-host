@@ -87,6 +87,7 @@ export interface ChannelGroupCandidate {
 export interface ChannelDirectCandidate {
   title: string;
   externalId: string;
+  detail?: string | null;
 }
 
 export interface SettingEntry {
@@ -114,7 +115,7 @@ export interface ManagementViewActions {
   afterSettingApplied?(instance: ViewInstance, entry: SettingEntry): Promise<string | void>;
   afterConversationAdded?(instance: ViewInstance, conversation: Conversation): Promise<string | void>;
   searchGroups?(instance: ViewInstance, query: string): Promise<ChannelGroupCandidate[]>;
-  listRecentDirects?(instance: ViewInstance): Promise<ChannelDirectCandidate[]>;
+  searchPeople?(instance: ViewInstance, query: string): Promise<ChannelDirectCandidate[]>;
   deleteInstance?(instance: ViewInstance): Promise<void>;
   deleteConversation?(instance: ViewInstance, conversationId: string): Promise<void>;
   sendToAgent?(instance: ViewInstance, conversationId: string, text: string): Promise<void>;
@@ -148,6 +149,9 @@ interface GroupSearchDraft {
 
 interface DirectSearchDraft {
   target: ChannelTarget;
+  phase: 'query' | 'results';
+  query: string;
+  cursor: number;
   results: ChannelDirectCandidate[];
   selected: number;
 }
@@ -531,7 +535,6 @@ export async function handleManagementViewInput(
     return;
   }
   if (state.directSearch) {
-    if (key.toLowerCase() === 'q') return;
     await handleDirectSearchInput(key, state, instances, actions);
     return;
   }
@@ -951,23 +954,15 @@ async function activateChannelItem(
     return;
   }
   if (item.kind === 'select-direct') {
-    if (!actions.listRecentDirects) throw new Error('当前 View 入口未提供最近私聊读取能力');
-    const candidates = await withPendingOperation(
-      state,
-      '读取最近私聊',
-      () => actions.listRecentDirects!(instance),
-    );
-    const seen = new Set<string>();
     state.directSearch = {
       target,
-      results: candidates.filter((candidate) => {
-        if (!candidate.title.trim() || !candidate.externalId.trim() || seen.has(candidate.externalId)) return false;
-        seen.add(candidate.externalId);
-        return true;
-      }),
+      phase: 'query',
+      query: '',
+      cursor: 0,
+      results: [],
       selected: 0,
     };
-    state.notice = candidates.length > 0 ? `找到 ${state.directSearch.results.length} 个最近私聊` : '最近 7 天没有可添加的私聊';
+    state.notice = null;
     return;
   }
   if (item.kind !== 'search-group') return;
@@ -983,9 +978,48 @@ async function handleDirectSearchInput(
   actions: ManagementViewActions,
 ): Promise<void> {
   const draft = state.directSearch!;
-  if (key === '\u001b' || key === '\u001b[D') {
-    state.directSearch = null;
-    state.notice = null;
+  const back = key === '\u001b' || (draft.phase === 'results' && key === '\u001b[D');
+  const forward = key === '\r' || key === '\n' || key === '\u001b[C';
+  if (back) {
+    if (draft.phase === 'results') {
+      draft.phase = 'query';
+      draft.results = [];
+      draft.selected = 0;
+      draft.cursor = textLength(draft.query);
+      state.notice = '可修改姓名后重新搜索';
+    } else {
+      state.directSearch = null;
+      state.notice = null;
+    }
+    return;
+  }
+  if (draft.phase === 'query') {
+    if (key !== '\r' && key !== '\n') {
+      const line = { value: draft.query, cursor: draft.cursor };
+      editSingleLine(line, key);
+      draft.query = line.value;
+      draft.cursor = line.cursor;
+      return;
+    }
+    const instance = instances.find((item) => item.name === draft.target.instanceName);
+    if (!instance) throw new Error('目标 instance 已不存在');
+    if (!actions.searchPeople) throw new Error('当前 View 入口未提供人员搜索能力');
+    const query = draft.query.trim();
+    if (!query) throw new Error('人员搜索关键词不能为空');
+    const seen = new Set<string>();
+    const candidates = await withPendingOperation(
+      state,
+      `搜索人员“${query}”`,
+      () => actions.searchPeople!(instance, query),
+    );
+    draft.results = candidates.filter((candidate) => {
+      if (!candidate.title.trim() || !candidate.externalId.trim() || seen.has(candidate.externalId)) return false;
+      seen.add(candidate.externalId);
+      return true;
+    });
+    draft.phase = 'results';
+    draft.selected = 0;
+    state.notice = draft.results.length > 0 ? `找到 ${draft.results.length} 个人员候选` : '没有匹配人员；← 返回修改姓名';
     return;
   }
   const direction = key === '\u001b[A' || key.toLowerCase() === 'k' ? -1
@@ -994,7 +1028,7 @@ async function handleDirectSearchInput(
     draft.selected = clamp(draft.selected + direction, 0, Math.max(0, draft.results.length - 1));
     return;
   }
-  if ((key !== '\r' && key !== '\n' && key !== '\u001b[C') || draft.results.length === 0) return;
+  if (!forward || draft.results.length === 0) return;
   const instance = instances.find((item) => item.name === draft.target.instanceName);
   if (!instance) throw new Error('目标 instance 已不存在');
   const candidate = draft.results[draft.selected]!;
@@ -1652,7 +1686,9 @@ export function renderManagementView(
     : state.creatingInstance
     ? ansi(`新增 Instance · ${creationStepLabel(state.creatingInstance.step)}：${renderTextCursor(state.creatingInstance.value, state.creatingInstance.cursor)}  ←/→ 移动  Enter 下一步  Esc 取消`, 'cyan-bold', color)
     : state.directSearch
-      ? ansi('最近私聊：↑/↓ 选择  Enter/→ 添加或打开  Esc/← 返回 Channel  q 保持当前页', 'cyan-bold', color)
+      ? state.directSearch.phase === 'query'
+        ? ansi(`人员搜索：${renderTextCursor(state.directSearch.query, state.directSearch.cursor)}  ←/→ 移动  Enter 搜索  Esc 返回 Channel`, 'cyan-bold', color)
+        : ansi('人员搜索结果：↑/↓ 选择  Enter/→ 添加或打开  ← 修改姓名  Esc 返回 Channel', 'cyan-bold', color)
     : state.groupSearch?.phase === 'query'
       ? ansi(`群组搜索：${renderTextCursor(state.groupSearch.query, state.groupSearch.cursor)}  ←/→ 移动  Enter 搜索  Esc 返回 Channel`, 'cyan-bold', color)
       : state.groupSearch?.phase === 'results'
@@ -1900,7 +1936,7 @@ function renderChannelManagement(
           direct.enabled ? 'enabled' : 'disabled', direct.mode, displayResponsibility(direct.responsibility), direct.runtimeId,
         ]),
         [
-          selected?.kind === 'select-direct' ? '>' : ' ', '+ 选择并添加最近私聊', '-', channel.defaultModes.directs,
+          selected?.kind === 'select-direct' ? '>' : ' ', '+ 搜索人员添加私聊', '-', channel.defaultModes.directs,
           '未配置（使用 Agent 自身职责）', instance.config.runtime.id,
         ],
       ],
@@ -1909,7 +1945,7 @@ function renderChannelManagement(
         ? directs.findIndex((direct) => direct.id === selected.conversation.id)
         : selected?.kind === 'select-direct' ? directs.length : -1, 2),
     ),
-    ansi('最近私聊来自 DWS 最近 7 天有界历史；选择后用真实 openDingTalkId 登记，不按姓名猜测 ID。', 'dim', color),
+    ansi('人员搜索使用 DWS 权威姓名搜索；多候选逐项展示，选择后用真实 openDingTalkId 登记。', 'dim', color),
   ];
   return lines;
 }
@@ -1922,18 +1958,20 @@ function renderDirectSearch(
 ): string[] {
   const bound = new Set(channelDirects(instance, draft.target).map((conversation) => conversation.externalId));
   return [
-    heading(`最近私聊 / ${instance.name} / ${draft.target.channelId}/${draft.target.profileId}`, color),
-    ansi('候选来自最近 7 天有界历史；选择后写入当前 Instance，不会发送消息。', 'dim', color),
-    '', heading('RECENT DIRECTS', color),
+    heading(`人员搜索 / ${instance.name} / ${draft.target.channelId}/${draft.target.profileId}`, color),
+    ansi(draft.phase === 'query'
+      ? '输入完整姓名关键词；不会默认选择第一个候选。'
+      : '候选来自 DWS AI 搜问；选择后写入当前 Instance，不会发送消息。', 'dim', color),
+    ...(draft.phase === 'query' ? [] : ['', heading('PEOPLE', color),
     ...table(
-      ['', 'DIRECT', 'BINDING'],
+      ['', 'PERSON', 'DETAIL', 'BINDING'],
       draft.results.map((candidate, index) => [
-        index === draft.selected ? '>' : ' ', candidate.title,
+        index === draft.selected ? '>' : ' ', candidate.title, candidate.detail ?? '-',
         bound.has(candidate.externalId) ? '已添加' : '未添加',
       ]),
       width,
       semanticTable(color, draft.selected, 2),
-    ),
+    )]),
   ];
 }
 

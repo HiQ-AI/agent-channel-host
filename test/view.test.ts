@@ -795,7 +795,7 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，职责未�
   }
 });
 
-test('Channel 最近私聊选择器显示固定入口，按真实候选 ID 添加并避免重复', async () => {
+test('Channel 人员搜索支持空关键词、零命中、多候选、添加与重复打开', async () => {
   const store = new Store(':memory:');
   const config = defaultConfig('direct-selector', '.', '小小鹏');
   config.channel.defaultModes.directs = 'reply';
@@ -804,13 +804,15 @@ test('Channel 最近私聊选择器显示固定入口，按真实候选 ID 添�
   state.detailInstanceName = instance.name;
   state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
   state.selectedChannelItem = 8;
-  let reads = 0;
+  const queries: string[] = [];
   const added: string[] = [];
   const actions = {
-    listRecentDirects: async () => {
-      reads++;
+    searchPeople: async (_instance: ViewInstance, query: string) => {
+      queries.push(query);
+      if (query === '无人') return [];
       return [
-        { title: '周佳佳', externalId: 'real-open-dingtalk-id' },
+        { title: '周佳佳', detail: '研发', externalId: 'real-open-dingtalk-id' },
+        { title: '周佳佳', detail: '产品', externalId: 'second-open-dingtalk-id' },
         { title: '重复', externalId: 'real-open-dingtalk-id' },
       ];
     },
@@ -821,11 +823,27 @@ test('Channel 最近私聊选择器显示固定入口，按真实候选 ID 添�
   };
   try {
     const channelView = renderManagementView([instance], state, null, [], 120);
-    assert.match(channelView, /\+ 选择并添加最近私聊/);
+    assert.match(channelView, /\+ 搜索人员添加私聊/);
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
-    assert.equal(state.directSearch?.results.length, 1);
+    assert.equal(state.directSearch?.phase, 'query');
+    await assert.rejects(
+      handleManagementViewInput('\r', state, [instance], () => undefined, actions),
+      /人员搜索关键词不能为空/,
+    );
+    for (const key of '无人') await handleManagementViewInput(key, state, [instance], () => undefined, actions);
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(state.directSearch?.phase, 'results');
+    assert.equal(state.directSearch?.results.length, 0);
+    assert.match(state.notice ?? '', /没有匹配人员/);
+    await handleManagementViewInput('\u001b[D', state, [instance], () => undefined, actions);
+    for (const key of ['\u007f', '\u007f', '周', '佳', '佳']) {
+      await handleManagementViewInput(key, state, [instance], () => undefined, actions);
+    }
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(state.directSearch?.results.length, 2);
     const candidateView = renderManagementView([instance], state, null, [], 120);
-    assert.match(candidateView, /最近私聊[\s\S]*周佳佳[\s\S]*未添加/);
+    assert.match(candidateView, /人员搜索[\s\S]*周佳佳[\s\S]*研发[\s\S]*未添加/);
+    assert.match(candidateView, /产品/);
     assert.doesNotMatch(candidateView, /real-open-dingtalk-id/);
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     const conversation = store.listConversations()[0]!;
@@ -838,12 +856,36 @@ test('Channel 最近私聊选择器显示固定入口，按真实候选 ID 添�
     await handleManagementViewInput('\u001b[D', state, [instance], () => undefined, actions);
     state.selectedChannelItem = 9;
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
-    assert.equal(state.directSearch?.results.length, 1);
+    for (const key of '周佳佳') await handleManagementViewInput(key, state, [instance], () => undefined, actions);
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(state.directSearch?.results.length, 2);
     assert.match(renderManagementView([instance], state, null, [], 120), /周佳佳[\s\S]*已添加/);
     await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
     assert.equal(store.listConversations().length, 1);
-    assert.equal(reads, 2);
+    assert.deepEqual(queries, ['无人', '周佳佳', '周佳佳']);
     assert.deepEqual(added, [conversation.id]);
+  } finally {
+    store.close();
+  }
+});
+
+test('Channel 人员搜索错误保持在搜索页并可由 View 展示', async () => {
+  const store = new Store(':memory:');
+  const instance = viewInstance('direct-search-error', defaultConfig('direct-search-error', '.', 'Agent'), store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
+  state.selectedChannelItem = 8;
+  try {
+    await handleManagementViewInput('\r', state, [instance], () => undefined, { searchPeople: async () => { throw new Error('DWS 人员搜索失败'); } });
+    for (const key of '张三') await handleManagementViewInput(key, state, [instance], () => undefined, {});
+    await assert.rejects(
+      handleManagementViewInput('\r', state, [instance], () => undefined, { searchPeople: async () => { throw new Error('DWS 人员搜索失败'); } }),
+      /DWS 人员搜索失败/,
+    );
+    assert.equal(state.directSearch?.phase, 'query');
+    state.notice = 'DWS 人员搜索失败';
+    assert.match(renderManagementView([instance], state, null, [], 120), /DWS 人员搜索失败/);
   } finally {
     store.close();
   }

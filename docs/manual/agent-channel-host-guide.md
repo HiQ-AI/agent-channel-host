@@ -174,7 +174,7 @@ _Conversation 详情集中展示会话名称、职责、职责周期提醒、sha
 
 View 会启动该 Instance 的唯一 Channel owner。首次启动会补拉该群的最近消息并交给固定 Agent Session；补拉阶段完成前不会启动 Worker。
 
-私聊可在 Channel 页的 `DIRECTS` 区域选择 `+ 选择并添加最近私聊`。候选来自 DWS 最近 7 天的有界历史，页面会标记是否已添加；按 `Enter` 后使用真实人员 ID 登记并进入详情，已添加项只打开原 Conversation。这个入口只表示“最近私聊”，不是完整通讯录搜索。
+私聊可在 Channel 页的 `DIRECTS` 区域选择 `+ 搜索人员添加私聊`。输入姓名后按 `Enter`，候选来自 DWS AI 搜问的姓名维度，页面会展示全部候选和已添加状态，不会默认选择第一项；选中后再次按 `Enter`，使用真实人员 ID 登记并进入详情，已添加项只打开原 Conversation。零命中可按 `←` 返回修改姓名，搜索或身份解析错误会留在页面提示，不按姓名猜测 ID。
 
 ### Step 7：在 View 中验收
 

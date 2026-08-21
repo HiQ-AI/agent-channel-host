@@ -5,7 +5,7 @@ import {
 } from './config.js';
 import { configPath, discoverInstances, statePath } from './paths.js';
 import { Store } from './store.js';
-import { dwsDoctor, listRecentDwsDirectCandidates, resolveExactGroup, searchDwsGroups } from './dws.js';
+import { dwsDoctor, resolveExactGroup, searchDwsGroups, searchDwsPeople } from './dws.js';
 import { verifyCodexAppServer } from './codex-app-server.js';
 import { CodexRuntimeAdapter } from './codex-runtime.js';
 import type { AgentSession } from './contracts.js';
@@ -482,8 +482,10 @@ program.command('view')
         ),
         searchGroups: async (instance, query) => (await searchDwsGroups(instance.config, query))
           .map((group) => ({ title: group.title, externalId: group.openConversationId })),
-        listRecentDirects: async (instance) => (await listRecentDwsDirectCandidates(instance.config))
-          .map((direct) => ({ title: direct.title, externalId: direct.openDingTalkId })),
+        searchPeople: async (instance, query) => (await searchDwsPeople(instance.config, query))
+          .map((person) => ({
+            title: person.title, externalId: person.openDingTalkId, detail: person.detail,
+          })),
         deleteConversation: async (instance, conversationId) => {
           await deleteConversationWithLifecycle(instance, conversationId, stopManagedHost, startManagedHost);
         },
