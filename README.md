@@ -36,7 +36,7 @@ flowchart LR
 - Runtime 自己保存、resume 和压缩 transcript。Host 不安装 compaction hook，也不覆盖 provider 的 developer/system 指令；Agent 的长期规则由 runtime 工作目录自行维护。
 - 每条消息先写 SQLite WAL，提交后才发进程内 ready signal；静默窗口内已到达的消息按 `maxBatchMessages` 合成一次 runtime 输入。Host 启动时释放中断的 claim，并重新投递未转发及未达 3 次上限的失败消息。Runtime `turn.completed` 只转换为 inbox `forwarded` 凭据，不产生 Host `completed/processed/decision`；它不代表 Agent 已逐条处理、已回复或业务已完成。
 - DWS 订阅若收到严格匹配“处理中/进行中/生成中/思考中”的短机器人占位消息，Channel 会用同一 `messageId` 在最多 15 秒内有界回查；非占位正文连续两次相同后才进入 inbox。普通消息不回查、不增加延迟；查询失败或到期时使用最后取得的正文，始终不丢弃原事件。
-- quiet window 用于合并短时间内连续到达的消息。活动 turn 开始后才到达的新消息在 `turn/started` 确认后通过 `turn/steer` 追加到同一 turn，不打断、不排队到下一 turn，也不并发 resume 同一 session；steer 失败时 Worker fail closed，重启恢复后重试，绝不静默改投下一 turn。
+- quiet window 用于合并短时间内连续到达的消息。活动 turn 开始后才到达的实时消息和本人定时补拉消息会按 Conversation sequence 通过 `turn/steer` 追加到同一 turn，不打断、不排队到下一 turn，也不并发 resume 同一 session；启动历史和任务续接仍固定进入下一 turn。steer 失败时消息保留在 inbox，待当前 turn 收尾后重试，绝不丢失。
 - 宿主控制面可用 `conversation continue-task` 将未完成 Task 的稳定 continuation ID 写入同一 SQLite WAL inbox。命令会在单个事务内精确校验父 provider session、可选 Conversation ID 与幂等键；续接事件固定为 `next-turn`，活动 turn 中绝不 steer，当前 turn 收尾后才开启下一 turn。重复 continuation 会回读原 sequence/processing state；父 session 缺失、多重映射或幂等键跨会话冲突均 fail closed。
 - 人工实时介入使用独立的本机 SQLite 邮箱。Host Worker 发布当前完整 `threadId`、`turnId` 和可介入状态；调用方必须携带读取到的 expected IDs 与稳定 `requestId`。只有持有该 Conversation App Server session 的 Worker 才会领取，并与普通消息共用串行 steer 队列。thread/turn 已变化、turn 已结束、请求过期或能力不支持时回写明确终态，绝不降级为下一 turn；未知执行结果也不会自动重放。
 - Host 不配置 turn 超时，也不会因运行时长或新消息终止活动 turn。Host 停止或 runtime 自身退出造成的未完成 claim 在下次启动时恢复。

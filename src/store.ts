@@ -1148,16 +1148,19 @@ export class Store {
     conversation: Conversation,
     workerId: string,
     limit: number,
-    ingress?: AdmittedEvent['ingress'],
+    ingresses?: readonly [AdmittedEvent['ingress'], ...AdmittedEvent['ingress'][]],
   ): AdmittedEvent[] {
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      const ingressClause = ingresses === undefined
+        ? ''
+        : ` AND ingress IN (${ingresses.map(() => '?').join(',')})`;
       const rows = this.db.prepare(`
         SELECT * FROM inbound_events
         WHERE conversation_id=? AND processing_state='admitted'
-          AND (? IS NULL OR ingress=?)
+          ${ingressClause}
         ORDER BY sequence LIMIT ?
-      `).all(conversation.id, ingress ?? null, ingress ?? null, limit) as Row[];
+      `).all(conversation.id, ...(ingresses ?? []), limit) as Row[];
       if (rows.length === 0) {
         this.db.exec('COMMIT');
         return [];
