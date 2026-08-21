@@ -87,7 +87,7 @@ export class ConversationWorker {
       this.conversation,
       this.workerId,
       Math.max(1, history.messages.length),
-      'history',
+      ['history'],
     );
     if (events.length > 0) {
       try {
@@ -385,7 +385,7 @@ export class ConversationWorker {
       this.conversation,
       this.workerId,
       this.config.scheduling.maxBatchMessages,
-      'live',
+      ['live', 'self_poll'],
     );
     if (events.length === 0) return;
     try {

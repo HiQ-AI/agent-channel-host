@@ -7,7 +7,7 @@ import type { AgentSession, ChannelAdapter, ChannelBackfillResult, ChannelHandle
 import { normalizeDwsEvent } from '../src/dws.js';
 import { EventDrivenScheduler, resolveEventConversation, runHost, selfMessagePollUntil, type HostControl } from '../src/host.js';
 import { Store } from '../src/store.js';
-import type { Conversation, DeliveryRun, NormalizedEvent } from '../src/types.js';
+import type { AdmittedEvent, Conversation, DeliveryRun, NormalizedEvent } from '../src/types.js';
 
 test('本人历史补拉给实时订阅预留 5 秒窗口', () => {
   assert.equal(
@@ -398,6 +398,56 @@ test('active turn 内新消息立即 steer 且不打断已传入 runtime 的消�
     assert.equal(session.interrupts, 0);
     assert.equal(session.prompts.length, 1);
     assert.match(session.prompts[0]!, /cancel-1/);
+  } finally {
+    await scheduler.stop();
+    store.close();
+  }
+});
+
+test('active turn 按 sequence steer 实时与本人补拉消息，历史和续接留到下一 turn', async () => {
+  const config = defaultConfig('scheduler-self-poll-steer', '.', 'Agent');
+  config.scheduling.quietWindowMilliseconds = 0;
+  const store = new Store(':memory:');
+  const conversation = store.addConversation({
+    kind: 'direct', externalId: 'self-poll-user', title: '本人补拉私聊', responsibility: '回答问题',
+    mode: 'shadow', workerWarmSeconds: 60,
+  });
+  const runtime = new FakeRuntime();
+  runtime.blockFirst = true;
+  const scheduler = new EventDrivenScheduler(
+    config,
+    store,
+    new Map([['dingtalk\0default', new FakeChannel()]]),
+    new Map([['codex', runtime]]),
+    () => undefined,
+  );
+  try {
+    admit(store, conversation, 'active-1');
+    scheduler.signal(conversation.id);
+    await waitFor(() => runtime.sessions[0]?.prompts.length === 1);
+
+    admit(store, conversation, 'self-poll-2', 'self_poll');
+    scheduler.signal(conversation.id);
+    admit(store, conversation, 'live-3', 'live');
+    scheduler.signal(conversation.id);
+    admit(store, conversation, 'history-4', 'history');
+    scheduler.signal(conversation.id);
+    admit(store, conversation, 'continuation-5', 'continuation');
+    scheduler.signalContinuation(conversation.id);
+
+    const session = runtime.sessions[0]!;
+    await waitFor(() => session.steered.length > 0);
+    const steered = session.steered.join('\n');
+    assert.ok(steered.indexOf('self-poll-2') < steered.indexOf('live-3'));
+    assert.doesNotMatch(steered, /history-4|continuation-5/);
+    assert.equal(store.status().claimed_messages, 3);
+    assert.equal(store.status().pending_messages, 2);
+
+    session.completeActive();
+    await waitFor(() => session.prompts.length === 2);
+    assert.match(session.prompts[1]!, /history-4/);
+    assert.match(session.prompts[1]!, /continuation-5/);
+    await waitFor(() => store.status().forwarded_messages === 5);
   } finally {
     await scheduler.stop();
     store.close();
@@ -1042,12 +1092,17 @@ test('Channel 订阅范围与新会话默认模式独立，名称优先取群名
   }
 });
 
-function admit(store: Store, conversation: Conversation, id: string): void {
+function admit(
+  store: Store,
+  conversation: Conversation,
+  id: string,
+  ingress: AdmittedEvent['ingress'] = 'live',
+): void {
   const event = normalizeDwsEvent({
     type: 'user_im_message_receive_o2o_all', event_id: id,
     sender_open_dingtalk_id: conversation.externalId, content: id,
   })!;
-  assert.equal(store.admitEvent(conversation, event).admitted, true);
+  assert.equal(store.admitEvent(conversation, event, ingress).admitted, true);
 }
 
 function silentRun(turnId: string): DeliveryRun {
