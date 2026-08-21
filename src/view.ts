@@ -65,6 +65,7 @@ export interface ManagementViewState {
   } | null;
   creatingInstance: InstanceCreationDraft | null;
   groupSearch: GroupSearchDraft | null;
+  directSearch: DirectSearchDraft | null;
   destructiveConfirmation: DestructiveConfirmation | null;
   exitConfirmation: boolean;
   paused: boolean;
@@ -79,6 +80,11 @@ export interface ChannelTarget {
 }
 
 export interface ChannelGroupCandidate {
+  title: string;
+  externalId: string;
+}
+
+export interface ChannelDirectCandidate {
   title: string;
   externalId: string;
 }
@@ -108,6 +114,7 @@ export interface ManagementViewActions {
   afterSettingApplied?(instance: ViewInstance, entry: SettingEntry): Promise<string | void>;
   afterConversationAdded?(instance: ViewInstance, conversation: Conversation): Promise<string | void>;
   searchGroups?(instance: ViewInstance, query: string): Promise<ChannelGroupCandidate[]>;
+  listRecentDirects?(instance: ViewInstance): Promise<ChannelDirectCandidate[]>;
   deleteInstance?(instance: ViewInstance): Promise<void>;
   deleteConversation?(instance: ViewInstance, conversationId: string): Promise<void>;
   sendToAgent?(instance: ViewInstance, conversationId: string, text: string): Promise<void>;
@@ -135,6 +142,13 @@ interface GroupSearchDraft {
   query: string;
   cursor: number;
   results: ChannelGroupCandidate[];
+  selected: number;
+}
+
+
+interface DirectSearchDraft {
+  target: ChannelTarget;
+  results: ChannelDirectCandidate[];
   selected: number;
 }
 
@@ -190,6 +204,7 @@ export function createManagementViewState(): ManagementViewState {
     editing: null,
     creatingInstance: null,
     groupSearch: null,
+    directSearch: null,
     destructiveConfirmation: null,
     exitConfirmation: false,
     paused: false,
@@ -513,6 +528,11 @@ export async function handleManagementViewInput(
       return;
     }
     await handleGroupSearchInput(key, state, instances, actions);
+    return;
+  }
+  if (state.directSearch) {
+    if (key.toLowerCase() === 'q') return;
+    await handleDirectSearchInput(key, state, instances, actions);
     return;
   }
   const overviewInstance = instances[state.selectedInstance] ?? null;
@@ -930,10 +950,93 @@ async function activateChannelItem(
     state.notice = null;
     return;
   }
+  if (item.kind === 'select-direct') {
+    if (!actions.listRecentDirects) throw new Error('当前 View 入口未提供最近私聊读取能力');
+    const candidates = await withPendingOperation(
+      state,
+      '读取最近私聊',
+      () => actions.listRecentDirects!(instance),
+    );
+    const seen = new Set<string>();
+    state.directSearch = {
+      target,
+      results: candidates.filter((candidate) => {
+        if (!candidate.title.trim() || !candidate.externalId.trim() || seen.has(candidate.externalId)) return false;
+        seen.add(candidate.externalId);
+        return true;
+      }),
+      selected: 0,
+    };
+    state.notice = candidates.length > 0 ? `找到 ${state.directSearch.results.length} 个最近私聊` : '最近 7 天没有可添加的私聊';
+    return;
+  }
   if (item.kind !== 'search-group') return;
   if (!actions.searchGroups) throw new Error('当前 View 入口未提供群搜索能力');
   state.groupSearch = { target, phase: 'query', query: '', cursor: 0, results: [], selected: 0 };
   state.notice = null;
+}
+
+async function handleDirectSearchInput(
+  key: string,
+  state: ManagementViewState,
+  instances: ViewInstance[],
+  actions: ManagementViewActions,
+): Promise<void> {
+  const draft = state.directSearch!;
+  if (key === '\u001b' || key === '\u001b[D') {
+    state.directSearch = null;
+    state.notice = null;
+    return;
+  }
+  const direction = key === '\u001b[A' || key.toLowerCase() === 'k' ? -1
+    : key === '\u001b[B' || key.toLowerCase() === 'j' ? 1 : 0;
+  if (direction !== 0) {
+    draft.selected = clamp(draft.selected + direction, 0, Math.max(0, draft.results.length - 1));
+    return;
+  }
+  if ((key !== '\r' && key !== '\n' && key !== '\u001b[C') || draft.results.length === 0) return;
+  const instance = instances.find((item) => item.name === draft.target.instanceName);
+  if (!instance) throw new Error('目标 instance 已不存在');
+  const candidate = draft.results[draft.selected]!;
+  let conversation = findChannelDirect(instance, draft.target, candidate.externalId);
+  let added = false;
+  if (!conversation) {
+    try {
+      conversation = instance.store.addConversation({
+        channelId: draft.target.channelId,
+        channelProfileId: draft.target.profileId,
+        kind: 'direct',
+        externalId: candidate.externalId,
+        title: candidate.title,
+        responsibility: '',
+        mode: instance.config.channel.defaultModes.directs,
+        runtimeId: instance.config.runtime.id,
+      });
+      added = true;
+      state.notice = `已添加私聊“${candidate.title}”；会话职责未配置，模式为 ${instance.config.channel.defaultModes.directs}`;
+    } catch (error) {
+      conversation = findChannelDirect(instance, draft.target, candidate.externalId);
+      if (!conversation) throw error;
+      state.notice = `私聊“${candidate.title}”已由其他操作添加`;
+    }
+  } else {
+    state.notice = `私聊“${candidate.title}”已添加，已打开会话详情`;
+  }
+  state.directSearch = null;
+  state.detailConversationId = conversation.id;
+  state.selectedConversationId = conversation.id;
+  state.conversationDetailFocus = 'settings';
+  state.selectedMember = 0;
+  state.selectedMessage = 0;
+  state.selectedMessageSequence = null;
+  const index = instance.store.listConversations().findIndex((item) => item.id === conversation!.id);
+  state.selectedConversation = Math.max(0, index);
+  if (added) {
+    const notice = await withPendingOperation(state, `加载私聊“${conversation.title}”的最近消息`, () => (
+      actions.afterConversationAdded?.(instance, conversation!) ?? Promise.resolve()
+    ));
+    if (notice) state.notice = notice;
+  }
 }
 
 async function handleGroupSearchInput(
@@ -1505,6 +1608,7 @@ export function renderManagementView(
   else if (state.editing) lines.push(...renderEditingPanel(state.editing, width, color));
   else if (state.tab === 'settings') lines.push(...renderGlobalSettings(instances, width, color));
   else if (state.groupSearch && detailInstance) lines.push(...renderGroupSearch(detailInstance, state.groupSearch, width, color));
+  else if (state.directSearch && detailInstance) lines.push(...renderDirectSearch(detailInstance, state.directSearch, width, color));
   else if (settingsInstance) {
     state.selectedSetting = clamp(state.selectedSetting, 0, Math.max(0, settings.length - 1));
     lines.push(...renderInstanceSettings(settingsInstance, detail, settings, state, width, color));
@@ -1547,6 +1651,8 @@ export function renderManagementView(
     ? ansi('显示已暂停，Host 仍在后台运行；可选中文字复制。p 恢复刷新  q 退出', 'yellow-bold', color)
     : state.creatingInstance
     ? ansi(`新增 Instance · ${creationStepLabel(state.creatingInstance.step)}：${renderTextCursor(state.creatingInstance.value, state.creatingInstance.cursor)}  ←/→ 移动  Enter 下一步  Esc 取消`, 'cyan-bold', color)
+    : state.directSearch
+      ? ansi('最近私聊：↑/↓ 选择  Enter/→ 添加或打开  Esc/← 返回 Channel  q 保持当前页', 'cyan-bold', color)
     : state.groupSearch?.phase === 'query'
       ? ansi(`群组搜索：${renderTextCursor(state.groupSearch.query, state.groupSearch.cursor)}  ←/→ 移动  Enter 搜索  Esc 返回 Channel`, 'cyan-bold', color)
       : state.groupSearch?.phase === 'results'
@@ -1746,7 +1852,7 @@ function renderChannelManagement(
     `配置=${statusText(channel.enabled ? 'enabled' : 'disabled', color)}  连接=${statusText(text(connection.state) ?? (channel.enabled ? 'stopped' : 'disabled'), color)}  owner=${text(connection.pid) ?? '-'}`,
     ansi(channel.enabled
       ? 'Channel 已启用；由当前 View 启动的 Host 会持有唯一 owner。'
-      : 'Channel 已停用；群组绑定会保留，但不会启动接收 owner。', channel.enabled ? 'green' : 'yellow', color),
+      : 'Channel 已停用；会话绑定会保留，但不会启动接收 owner。', channel.enabled ? 'green' : 'yellow', color),
     '', heading('CHANNEL', color),
     ...table(
       ['', 'ACTION', 'VALUE', 'EFFECT'],
@@ -1788,18 +1894,47 @@ function renderChannelManagement(
     '', heading('DIRECTS', color),
     ...table(
       ['', 'DIRECT', 'STATE', 'MODE', 'RESPONSIBILITY', 'RUNTIME'],
-      directs.map((direct) => [
-        selected?.kind === 'conversation' && selected.conversation.id === direct.id ? '>' : ' ', direct.title,
-        direct.enabled ? 'enabled' : 'disabled', direct.mode, displayResponsibility(direct.responsibility), direct.runtimeId,
-      ]),
+      [
+        ...directs.map((direct) => [
+          selected?.kind === 'conversation' && selected.conversation.id === direct.id ? '>' : ' ', direct.title,
+          direct.enabled ? 'enabled' : 'disabled', direct.mode, displayResponsibility(direct.responsibility), direct.runtimeId,
+        ]),
+        [
+          selected?.kind === 'select-direct' ? '>' : ' ', '+ 选择并添加最近私聊', '-', channel.defaultModes.directs,
+          '未配置（使用 Agent 自身职责）', instance.config.runtime.id,
+        ],
+      ],
       width,
       semanticTable(color, selected?.kind === 'conversation'
         ? directs.findIndex((direct) => direct.id === selected.conversation.id)
-        : -1, 2),
+        : selected?.kind === 'select-direct' ? directs.length : -1, 2),
     ),
-    ansi('指定私聊使用稳定 openDingTalkId 登记；事件能提供人员姓名时显示姓名，不按姓名猜测 ID。可用 conversation add 添加后在此管理。', 'dim', color),
+    ansi('最近私聊来自 DWS 最近 7 天有界历史；选择后用真实 openDingTalkId 登记，不按姓名猜测 ID。', 'dim', color),
   ];
   return lines;
+}
+
+function renderDirectSearch(
+  instance: ViewInstance,
+  draft: DirectSearchDraft,
+  width: number,
+  color: boolean,
+): string[] {
+  const bound = new Set(channelDirects(instance, draft.target).map((conversation) => conversation.externalId));
+  return [
+    heading(`最近私聊 / ${instance.name} / ${draft.target.channelId}/${draft.target.profileId}`, color),
+    ansi('候选来自最近 7 天有界历史；选择后写入当前 Instance，不会发送消息。', 'dim', color),
+    '', heading('RECENT DIRECTS', color),
+    ...table(
+      ['', 'DIRECT', 'BINDING'],
+      draft.results.map((candidate, index) => [
+        index === draft.selected ? '>' : ' ', candidate.title,
+        bound.has(candidate.externalId) ? '已添加' : '未添加',
+      ]),
+      width,
+      semanticTable(color, draft.selected, 2),
+    ),
+  ];
 }
 
 function renderGroupSearch(
@@ -2080,7 +2215,7 @@ function channelConversations(instance: ViewInstance, target: Pick<ChannelTarget
 }
 
 type ChannelManagementItem =
-  | { kind: 'enabled' | 'groups-subscription' | 'groups-default-mode' | 'directs-subscription' | 'directs-default-mode' | 'wake-word-enabled' | 'wake-word' | 'search-group' }
+  | { kind: 'enabled' | 'groups-subscription' | 'groups-default-mode' | 'directs-subscription' | 'directs-default-mode' | 'wake-word-enabled' | 'wake-word' | 'search-group' | 'select-direct' }
   | { kind: 'conversation'; conversation: Conversation };
 
 function channelManagementItems(
@@ -2098,7 +2233,16 @@ function channelManagementItems(
     ...channelGroups(instance, target).map((conversation) => ({ kind: 'conversation' as const, conversation })),
     { kind: 'search-group' },
     ...channelDirects(instance, target).map((conversation) => ({ kind: 'conversation' as const, conversation })),
+    { kind: 'select-direct' },
   ];
+}
+
+function findChannelDirect(
+  instance: ViewInstance,
+  target: Pick<ChannelTarget, 'channelId' | 'profileId'>,
+  externalId: string,
+): Conversation | null {
+  return channelDirects(instance, target).find((conversation) => conversation.externalId === externalId) ?? null;
 }
 
 function subscriptionEffect(mode: ChannelSubscriptionMode, kind: '群聊' | '私聊'): string {
@@ -2181,6 +2325,7 @@ function normalizeSelection(state: ManagementViewState, instances: ViewInstance[
     state.detailChannel = null;
     state.detailConversationId = null;
     state.groupSearch = null;
+    state.directSearch = null;
   }
   const detailInstance = state.detailInstanceName
     ? instances.find((instance) => instance.name === state.detailInstanceName) ?? null
@@ -2205,6 +2350,7 @@ function normalizeSelection(state: ManagementViewState, instances: ViewInstance[
   )) {
     state.detailChannel = null;
     state.groupSearch = null;
+    state.directSearch = null;
     state.selectedChannelItem = 0;
   }
   if (state.settingsInstanceName && !instances.some((instance) => instance.name === state.settingsInstanceName)) {

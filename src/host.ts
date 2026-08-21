@@ -5,6 +5,7 @@ import { statePath } from './paths.js';
 import { Store } from './store.js';
 import { OwnerLock } from './owner-lock.js';
 import { DwsChannelAdapter } from './dws.js';
+import { UNKNOWN_DIRECT_BACKFILL_MAX_LOOKBACK_MILLISECONDS } from './dws.js';
 import { CodexRuntimeAdapter } from './codex-runtime.js';
 import { ConversationWorker } from './actor.js';
 import type { AdmittedEvent, Conversation, NormalizedEvent } from './types.js';
@@ -448,6 +449,14 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
 
     if (channel) {
       const descriptor = channel.descriptor;
+      const directDiscoveryStart = config.channel.subscriptions.directs === 'all'
+        ? store.channelBackfillStart(
+          descriptor.channelId,
+          descriptor.profileId,
+          new Date(),
+          UNKNOWN_DIRECT_BACKFILL_MAX_LOOKBACK_MILLISECONDS,
+        )
+        : null;
       channelOwned = true;
       store.setChannelConnection({
         ...descriptor,
@@ -477,8 +486,32 @@ export async function runHost(config: HostConfig, options: HostRunOptions = {}):
           conversation,
           start: store.conversationBackfillStart(conversation),
         }));
-        const loaded = await channel.backfill(targets, until, (event) => admitNormalized(event, 'history'));
-        log({ type: 'OFFLINE_BACKFILL_COMPLETED', conversations: targets.length, loaded, until: until.toISOString() });
+        const result = await channel.backfill(targets, until, (event) => admitNormalized(event, 'history'));
+        for (const failure of result.failures) {
+          log({ type: 'OFFLINE_BACKFILL_FAILED', target: failure.target, error: failure.error });
+        }
+        log({
+          type: 'OFFLINE_BACKFILL_COMPLETED', conversations: targets.length,
+          loaded: result.loaded, failures: result.failures.length, until: until.toISOString(),
+        });
+      }
+      if (directDiscoveryStart && channel.discoverDirectBackfill) {
+        const until = new Date(connectedAt);
+        const knownExternalIds = new Set(store.listConversations().filter(
+          (conversation) => conversation.kind === 'direct',
+        ).map((conversation) => conversation.externalId));
+        const result = await channel.discoverDirectBackfill(
+          knownExternalIds, directDiscoveryStart, until,
+          (event) => admitNormalized(event, 'history'),
+        );
+        for (const failure of result.failures) {
+          log({ type: 'UNKNOWN_DIRECT_BACKFILL_FAILED', target: failure.target, error: failure.error });
+        }
+        log({
+          type: 'UNKNOWN_DIRECT_BACKFILL_COMPLETED', loaded: result.loaded,
+          failures: result.failures.length, knownConversations: knownExternalIds.size,
+          start: directDiscoveryStart.toISOString(), until: until.toISOString(),
+        });
       }
       if (channel.pollSelfMessages || (config.channel.wakeWordEnabled && channel.pollSelfChat)) {
         const poll = async (): Promise<void> => {

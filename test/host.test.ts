@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { defaultConfig } from '../src/config.js';
-import type { AgentSession, ChannelAdapter, ChannelHandlers, RuntimeAdapter } from '../src/contracts.js';
+import type { AgentSession, ChannelAdapter, ChannelBackfillResult, ChannelHandlers, RuntimeAdapter } from '../src/contracts.js';
 import { normalizeDwsEvent } from '../src/dws.js';
 import { EventDrivenScheduler, resolveEventConversation, runHost, selfMessagePollUntil, type HostControl } from '../src/host.js';
 import { Store } from '../src/store.js';
@@ -45,7 +45,7 @@ class BackfillChannel extends FakeChannel {
     targets: Array<{ conversation: Conversation; start: Date }>,
     _until: Date,
     onEvent: (event: NormalizedEvent) => void,
-  ): Promise<number> {
+  ): Promise<ChannelBackfillResult> {
     this.targets = targets;
     this.handlers?.onEvent(normalizeDwsEvent({
       type: 'user_im_message_receive_o2o_all', event_id: 'startup-live', message_id: 'startup-live-message',
@@ -58,12 +58,54 @@ class BackfillChannel extends FakeChannel {
       sender_open_dingtalk_id: targets[0]!.conversation.externalId,
       create_time: '2030-08-04 09:00:00', content: '离线期间历史消息',
     })!);
-    return 1;
+    return { loaded: 1, failures: [] };
   }
 
   release(): void {
     this.releaseBackfill?.();
     this.releaseBackfill = null;
+  }
+}
+
+class FailureLedgerBackfillChannel extends FakeChannel {
+  async backfill(
+    targets: Array<{ conversation: Conversation; start: Date }>,
+    _until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<ChannelBackfillResult> {
+    const successful = targets.find((target) => target.conversation.externalId === 'healthy-user')!;
+    onEvent(normalizeDwsEvent({
+      type: 'user_im_message_receive_o2o_all', message_id: 'healthy-history-message',
+      sender_open_dingtalk_id: successful.conversation.externalId,
+      create_time: '2030-08-04 09:00:00', content: '健康会话仍完成补拉',
+    })!);
+    return {
+      loaded: 1,
+      failures: [{ target: targets.find((target) => target.conversation.externalId === 'system-user')!.conversation.id, error: '模拟系统私聊历史读取失败' }],
+    };
+  }
+}
+
+class UnknownDirectBackfillChannel extends FakeChannel {
+  discoveryCalls = 0;
+  knownSnapshots: string[][] = [];
+
+  async discoverDirectBackfill(
+    knownExternalIds: ReadonlySet<string>,
+    _start: Date,
+    _until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<ChannelBackfillResult> {
+    this.discoveryCalls++;
+    this.knownSnapshots.push([...knownExternalIds]);
+    const event = normalizeDwsEvent({
+      type: 'user_im_message_receive_o2o_all', message_id: 'unknown-direct-message',
+      sender_open_dingtalk_id: 'new-direct-user', sender_name: '新联系人',
+      create_time: '2030-08-04 09:00:00', content: '离线首次私聊',
+    })!;
+    onEvent(event);
+    onEvent(event);
+    return { loaded: 2, failures: [] };
   }
 }
 
@@ -585,6 +627,97 @@ test('Host 先建立实时订阅再补拉，补拉完成前不启动 Worker，�
     if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
     else process.env.AGENT_CHANNEL_HOME = previous;
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('单个已登记会话补拉失败记录 ledger，其他会话继续且 Host 保持 ready', async () => {
+  const root = resolve('.test-host-backfill-failure-isolation');
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true });
+  const previous = process.env.AGENT_CHANNEL_HOME;
+  process.env.AGENT_CHANNEL_HOME = root;
+  const config = defaultConfig('backfill-failure-isolation', '.', 'Agent');
+  const state = resolve(root, 'instances', config.instance, 'state.sqlite3');
+  const setup = new Store(state);
+  setup.addConversation({ kind: 'direct', externalId: 'system-user', title: '系统会话', responsibility: '', mode: 'shadow' });
+  setup.addConversation({ kind: 'direct', externalId: 'healthy-user', title: '健康会话', responsibility: '', mode: 'shadow' });
+  setup.close();
+  const logs: Record<string, unknown>[] = [];
+  const runtime = new FakeRuntime();
+  const abort = new AbortController();
+  try {
+    const running = runHost(config, {
+      signal: abort.signal, handleProcessSignals: false,
+      channel: new FailureLedgerBackfillChannel(), runtime,
+      ownerLock: new FakeOwnerLock('backfill-failure-owner'), log: (record) => logs.push(record),
+    });
+    await waitFor(() => logs.some((record) => record.type === 'HOST_READY'));
+    await waitFor(() => runtime.sessions[0]?.prompts.length === 1);
+    assert.match(runtime.sessions[0]!.prompts[0]!, /健康会话仍完成补拉/);
+    assert.ok(logs.some((record) => record.type === 'OFFLINE_BACKFILL_FAILED'
+      && record.error === '模拟系统私聊历史读取失败'));
+    assert.ok(logs.some((record) => record.type === 'OFFLINE_BACKFILL_COMPLETED' && record.failures === 1));
+    const observer = new Store(state);
+    try {
+      assert.equal(observer.status().hostState, 'running');
+      assert.equal((observer.status().channels as Array<{ state: string }>)[0]?.state, 'ready');
+    } finally { observer.close(); }
+    abort.abort();
+    await running;
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+    else process.env.AGENT_CHANNEL_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('directs=all 启动时发现未知私聊并按 messageId 幂等，selected 与 none 不扫描', async () => {
+  for (const mode of ['all', 'selected', 'none'] as const) {
+    const root = resolve(`.test-host-unknown-direct-${mode}`);
+    await rm(root, { recursive: true, force: true });
+    await mkdir(root, { recursive: true });
+    const previous = process.env.AGENT_CHANNEL_HOME;
+    process.env.AGENT_CHANNEL_HOME = root;
+    const config = defaultConfig(`unknown-direct-${mode}`, '.', 'Agent');
+    config.channel.subscriptions.directs = mode;
+    config.scheduling.quietWindowMilliseconds = 0;
+    const state = resolve(root, 'instances', config.instance, 'state.sqlite3');
+    const setup = new Store(state);
+    setup.addConversation({ kind: 'direct', externalId: 'known-user', title: '已有私聊', responsibility: '', mode: 'shadow' });
+    setup.close();
+    const channel = new UnknownDirectBackfillChannel();
+    const runtime = new FakeRuntime();
+    const abort = new AbortController();
+    let running: Promise<void> | null = null;
+    try {
+      running = runHost(config, {
+        signal: abort.signal, handleProcessSignals: false, channel, runtime,
+        ownerLock: new FakeOwnerLock(`unknown-direct-${mode}-owner`), log: () => undefined,
+      });
+      await waitFor(() => {
+        const observer = new Store(state);
+        try { return observer.status().hostState === 'running'; } finally { observer.close(); }
+      });
+      if (mode === 'all') {
+        await waitFor(() => runtime.sessions[0]?.prompts.length === 1);
+        const observer = new Store(state);
+        try {
+          assert.equal(channel.discoveryCalls, 1);
+          assert.deepEqual(channel.knownSnapshots, [['known-user']]);
+          assert.equal(observer.listConversations().filter((item) => item.externalId === 'new-direct-user').length, 1);
+          assert.equal(observer.status().received, 1);
+        } finally { observer.close(); }
+      } else {
+        assert.equal(channel.discoveryCalls, 0);
+        assert.equal(runtime.sessions.length, 0);
+      }
+    } finally {
+      abort.abort();
+      await running?.catch(() => undefined);
+      if (previous === undefined) delete process.env.AGENT_CHANNEL_HOME;
+      else process.env.AGENT_CHANNEL_HOME = previous;
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 

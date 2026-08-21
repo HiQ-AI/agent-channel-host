@@ -1,5 +1,15 @@
 import type { Conversation, DeliveryRun, NormalizedEvent } from './types.js';
 
+export interface ChannelBackfillFailure {
+  target: string;
+  error: string;
+}
+
+export interface ChannelBackfillResult {
+  loaded: number;
+  failures: ChannelBackfillFailure[];
+}
+
 export interface ChannelDescriptor {
   channelId: string;
   profileId: string;
@@ -18,7 +28,13 @@ export interface ChannelAdapter {
     targets: Array<{ conversation: Conversation; start: Date }>,
     until: Date,
     onEvent: (event: NormalizedEvent) => void,
-  ): Promise<number>;
+  ): Promise<ChannelBackfillResult>;
+  discoverDirectBackfill?(
+    knownExternalIds: ReadonlySet<string>,
+    start: Date,
+    until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<ChannelBackfillResult>;
   pollSelfMessages?(
     targets: Array<{ conversation: Conversation; start: Date }>,
     until: Date,

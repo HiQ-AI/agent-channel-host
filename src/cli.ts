@@ -5,7 +5,7 @@ import {
 } from './config.js';
 import { configPath, discoverInstances, statePath } from './paths.js';
 import { Store } from './store.js';
-import { dwsDoctor, resolveExactGroup, searchDwsGroups } from './dws.js';
+import { dwsDoctor, listRecentDwsDirectCandidates, resolveExactGroup, searchDwsGroups } from './dws.js';
 import { verifyCodexAppServer } from './codex-app-server.js';
 import { CodexRuntimeAdapter } from './codex-runtime.js';
 import type { AgentSession } from './contracts.js';
@@ -451,11 +451,11 @@ program.command('view')
     };
     const refreshManagedHost = async (instance: ViewInstance, reason: string): Promise<string> => {
       if (instance.hostOwnership !== 'view') {
-        return `${reason}；当前是 ${instance.hostOwnership} Host，请重启外部 Host 以加载最近 50 条消息`;
+        return `${reason}；当前是 ${instance.hostOwnership} Host，请重启外部 Host 以补拉消息`;
       }
       await stopManagedHost(instance);
       startManagedHost(instance);
-      return `${reason}；Instance Host 已重启并开始加载最近 50 条消息`;
+      return `${reason}；Instance Host 已重启并开始补拉消息`;
     };
     try {
       for (const instance of instances) {
@@ -478,10 +478,12 @@ program.command('view')
         },
         afterSettingApplied: restartManagedHost,
         afterConversationAdded: async (instance, conversation) => (
-          refreshManagedHost(instance, `已绑定群组“${conversation.title}”`)
+          refreshManagedHost(instance, `${conversation.kind === 'group' ? '已绑定群组' : '已添加私聊'}“${conversation.title}”`)
         ),
         searchGroups: async (instance, query) => (await searchDwsGroups(instance.config, query))
           .map((group) => ({ title: group.title, externalId: group.openConversationId })),
+        listRecentDirects: async (instance) => (await listRecentDwsDirectCandidates(instance.config))
+          .map((direct) => ({ title: direct.title, externalId: direct.openDingTalkId })),
         deleteConversation: async (instance, conversationId) => {
           await deleteConversationWithLifecycle(instance, conversationId, stopManagedHost, startManagedHost);
         },

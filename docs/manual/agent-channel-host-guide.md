@@ -172,7 +172,9 @@ _Conversation 详情集中展示会话名称、职责、职责周期提醒、sha
 2. 按 `Enter/→` 将状态切换为 `enabled`。
 3. 等待页面顶部处理状态结束，不要在重启过程中重复操作。
 
-View 会启动该 Instance 的唯一 Channel owner。首次启动会补拉该群的最近消息并交给固定 Agent Session；补拉完成前不会启动 Worker。
+View 会启动该 Instance 的唯一 Channel owner。首次启动会补拉该群的最近消息并交给固定 Agent Session；补拉阶段完成前不会启动 Worker。
+
+私聊可在 Channel 页的 `DIRECTS` 区域选择 `+ 选择并添加最近私聊`。候选来自 DWS 最近 7 天的有界历史，页面会标记是否已添加；按 `Enter` 后使用真实人员 ID 登记并进入详情，已添加项只打开原 Conversation。这个入口只表示“最近私聊”，不是完整通讯录搜索。
 
 ### Step 7：在 View 中验收
 
@@ -256,7 +258,9 @@ agent-channel service remove --instance triss
 
 ## 离线消息与可靠性
 
-Host 启动顺序为：先建立实时订阅，再从每个已启用 Conversation 的本地最新消息时间补拉到订阅 ready 时刻。没有本地消息时，从 Conversation 创建时间开始。补拉期间 Worker 不启动；任何会话补拉失败都会 fail closed，不伪装 ready。
+Host 启动顺序为：先建立实时订阅，再从每个已启用 Conversation 的本地最新消息时间补拉到订阅 ready 时刻。没有本地消息时，从 Conversation 创建时间开始。补拉期间 Worker 不启动。单个已登记 Conversation 查询失败时，Host 会记录失败目标和错误并继续其他目标，Channel 仍可 ready；完成日志会显示成功消息数与失败数，不能把局部失败误读为全部补拉成功。
+
+当私聊订阅为 `all` 时，Host 还会在启动阶段执行一次有界全局历史查询，用来发现离线期间第一次出现、尚未登记的普通私聊。查询最长回看 24 小时，最多 20 页或 1000 条，并复用实时消息的准入、建档和消息 ID 去重；`selected` 与 `none` 不做全局发现，避免扩大订阅范围和查询压力。
 
 历史与实时消息有 2 秒重叠窗口，并按消息 ID 或 fingerprint 去重。SQLite durable inbox 是唯一水位事实源，不另外维护一份容易不一致的 cursor。DWS 事件总线本身是易失 fan-out，因此可靠性依赖“实时订阅 + 启动补拉 + 本地持久化”，不能宣称端到端 exactly-once。
 
