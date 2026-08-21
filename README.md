@@ -40,7 +40,7 @@ flowchart LR
 - 宿主控制面可用 `conversation continue-task` 将未完成 Task 的稳定 continuation ID 写入同一 SQLite WAL inbox。命令会在单个事务内精确校验父 provider session、可选 Conversation ID 与幂等键；续接事件固定为 `next-turn`，活动 turn 中绝不 steer，当前 turn 收尾后才开启下一 turn。重复 continuation 会回读原 sequence/processing state；父 session 缺失、多重映射或幂等键跨会话冲突均 fail closed。
 - 人工实时介入使用独立的本机 SQLite 邮箱。Host Worker 发布当前完整 `threadId`、`turnId` 和可介入状态；调用方必须携带读取到的 expected IDs 与稳定 `requestId`。只有持有该 Conversation App Server session 的 Worker 才会领取，并与普通消息共用串行 steer 队列。thread/turn 已变化、turn 已结束、请求过期或能力不支持时回写明确终态，绝不降级为下一 turn；未知执行结果也不会自动重放。
 - Host 不配置 turn 超时，也不会因运行时长或新消息终止活动 turn。Host 停止或 runtime 自身退出造成的未完成 claim 在下次启动时恢复。
-- Host 启动时先建立群聊/私聊实时 consumer，再以每个已启用 Conversation 的最后消息时间为起点补拉至 consumer ready 时刻；没有本地消息时从 Conversation 创建时间开始。补拉起点向前重叠 2 秒，历史与实时交叠消息按同一 Conversation 的消息 ID 或 fingerprint 去重。补拉完成前不启动 Worker，任一会话补拉失败则 Host fail closed，不伪装 ready。
+- Host 启动时先建立群聊/私聊实时 consumer，再以每个已启用 Conversation 的最后消息时间为起点补拉至 consumer ready 时刻；没有本地消息时从 Conversation 创建时间开始。补拉起点向前重叠 2 秒，历史与实时交叠消息按同一 Conversation 的消息 ID 或 fingerprint 去重。单个已登记 Conversation 的历史查询失败会记录目标和错误、跳过该目标并继续其余补拉，避免一条钉钉系统类私聊拖垮整个 Host；完成日志同时给出成功消息数和失败目标数。`directs=all` 还会用一次有界全局历史查询发现离线期间首次出现的普通私聊，并经现有准入与 inbox 去重路径自动建档；`selected/none` 不执行该发现查询。全部补拉阶段结束后才启动 Worker。
 - 群首次接入时只读拉取最近 50 条消息，先逐条写入 history inbox，再按时间顺序合成一个首次引导交给该群固定 session。Host 不要求自我介绍、不接收决定，也不发送回复。
 
 ## 三段扩展边界
@@ -269,9 +269,9 @@ agent-channel view
 `view` 会从用户状态目录发现全部已初始化 instance。顶层固定为 `总览 | 全局设置`，不会把某个 instance 的配置误称为全局设置：
 
 - `总览` 只展示 INSTANCES 索引、跨实例消息汇总和全局告警，不重复铺开具体 Channel、Conversation、Runtime 或最近消息。Instance 行保留 Host/owner、Channel/Conversation 数、pending 和 alert 数，便于先判断应下钻到哪里。`↑/↓` 选择，`Enter/→` 下钻，`Esc/←` 逐层返回；`Tab` 只切换顶层“总览 / 全局设置”。
-- Instance 详情集中展示该实例的 Channel、Conversation、消息汇总与最近消息、Runtime 和告警，其中 `CONVERSATIONS` 固定在 `MESSAGES` 上方。Conversation 选择以稳定 ID 跟踪，标题更新或跨 Channel 排序刷新后下钻仍打开当前高亮项。进入 Channel 后，五项依次为 `enabled/disabled`、群聊订阅、群聊默认模式、私聊订阅、私聊默认模式；后续分区展示指定群聊和指定私聊。群聊末行“搜索并绑定指定群聊”支持输入关键词、选择候选并写入现有 conversation registry；外部群 ID 不在界面展示。
+- Instance 详情集中展示该实例的 Channel、Conversation、消息汇总与最近消息、Runtime 和告警，其中 `CONVERSATIONS` 固定在 `MESSAGES` 上方。Conversation 选择以稳定 ID 跟踪，标题更新或跨 Channel 排序刷新后下钻仍打开当前高亮项。进入 Channel 后，五项依次为 `enabled/disabled`、群聊订阅、群聊默认模式、私聊订阅、私聊默认模式；后续分区展示指定群聊和指定私聊。群聊末行“搜索并绑定指定群聊”支持输入关键词、选择候选并写入现有 conversation registry；私聊末行“选择并添加最近私聊”从 DWS 最近 7 天的有界历史列出候选，标记是否已添加，并按真实 `openDingTalkId` 登记。外部群 ID 和人员 ID 均不在界面展示。
 - 新绑定群组使用“群聊默认模式”，会话职责初始为空并使用 Agent 自身职责，runtime 使用 Instance 当前配置。新绑定或重新启用群组会唤醒 Host；该群 Worker 首次启动时先拉取最近 50 条消息交给 Agent 自主判断，无需等待群内出现新消息。绑定不创建第二套接收服务；Channel disabled 时可先配置群组，重新启用后继续复用原 registry 和 session 映射。
-- 指定私聊继续使用稳定 `openDingTalkId` 登记，不按姓名猜测 ID；事件提供人员姓名时以姓名作为显示标题，确实拿不到时显示不泄露原始 ID 的稳定占位。通过 `conversation add --open-dingtalk-id` 添加后会出现在 Channel 的 DIRECTS 分区，并可下钻修改或删除。
+- 指定私聊继续使用稳定 `openDingTalkId` 登记，不按姓名猜测 ID；事件提供人员姓名时以姓名作为显示标题，确实拿不到时显示不泄露原始 ID 的稳定占位。可在 Channel 的 DIRECTS 分区直接选择最近私聊，添加后立即下钻修改或删除；已添加候选只会打开原 Conversation，不会重复建档。
 - `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 - 在群聊或私聊的 Conversation 详情页按 `i`，进入真人介入输入页。页面不读取或渲染固定 Codex session 的历史，只保留多行输入框；输入内容进入同一持久化 inbox 并唤醒或 steer 原固定 session，不会先发到钉钉，也不依赖 DWS 能否订阅到本人消息或 Channel 是否启用。发送后页面保持打开，可继续追加引导；`Shift+Enter` 换行、`Enter` 发送、`Esc` 返回。Agent 收到的发送者标记为“View 用户（本人）”，同时保留当前钉钉目标上下文。
@@ -357,7 +357,7 @@ agent-channel service remove --instance triss
 ## 可靠性与安全边界
 
 - SQLite WAL 保证 Host 收到事件后的本地 admission 与投递状态持久化。DWS v1.0.55 的本地 event bus 是易失 fan-out，不能宣称端到端 exactly-once。
-- 离线补拉使用 `dws chat message list --direction newer`：群聊按 `--group`、私聊按 `--open-dingtalk-id` 分页读取。DWS 时间参数只有秒级且无时区，Host 固定按 `Asia/Shanghai` 解释，因此采用 2 秒重叠窗口。
+- 已登记 Conversation 的离线补拉使用 `dws chat message list --direction newer`：群聊按 `--group`、私聊按 `--open-dingtalk-id` 分页读取。各 Conversation 查询相互隔离，一处失败会进入补拉失败清单并继续后续目标。`directs=all` 的未知私聊发现额外执行至多一次 `dws chat message list-all`，从 Channel 上次状态时间向前补拉且最长回看 24 小时，单次上限 20 页、1000 条；结果若仍有下一页会明确报错而不把截断结果当完整水位。`selected/none` 不产生这次全局查询。DWS 时间参数只有秒级且无时区，Host 固定按 `Asia/Shanghai` 解释，因此采用 2 秒重叠窗口。
 - 实时订阅建立后，Host 默认在上一轮完成 5 秒后再次串行扫描已启用会话，只保留当前 DWS profile 用户发送的历史消息。唤醒词模式开启时，每轮还会先按当前 profile 的 `userId` 查询一次资料页自聊窗口；命中唤醒词后自动建立固定私聊 Conversation。每轮截止到当前时间前 5 秒，让实时订阅优先准入；随后按 `openMessageId` 复用 inbox 唯一约束去重。普通会话水位保存在 `self_message_poll_state`，自聊发现水位按 Channel/profile 单独持久化，失败均不推进。
 - 本人补拉不会并发启动多个会话查询，也不会使用固定周期重叠执行：一轮先查询一次自聊窗口，再逐会话、逐页读取，整轮结束后才开始下一次等待。发现自聊 Conversation 后会从普通逐会话列表排除，避免同一窗口每轮查询两次。会话越多时同一会话的实际扫描周期会相应变长，以限制 DWS 子进程和历史接口压力。可通过 `channel.selfMessagePollSeconds` 设置 1–300 秒轮间等待。
 - 开启唤醒词模式后，实时订阅、启动离线补拉和本人定时补拉使用同一识别规则。示例唤醒词为“小小鹏”时，常规订阅未准入的 `小小鹏：检查发布状态` 会把“检查发布状态”交给对应固定 session；` 小小鹏：检查`、他人发送的同文消息、只有唤醒词而没有事项的消息均不会触发兜底。常规订阅已准入的会话仍按原消息处理，不重复投递。

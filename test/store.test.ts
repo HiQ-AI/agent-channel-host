@@ -8,11 +8,14 @@ import {
   DIRECT_EVENT,
   GROUP_EVENT,
   applyWakeWordSubscription,
+  collectConversationBackfill,
   consumerArgs,
   currentProfileUserName,
   currentProfileIdentity,
   dwsProcessExitError,
   fetchConversationBackfill,
+  fetchUnknownDirectBackfill,
+  listRecentDwsDirectCandidates,
   fetchSelfChatHistory,
   fetchRecentGroupHistory,
   inspectDwsBusStatus,
@@ -23,6 +26,7 @@ import {
   normalizeDwsHistoryMessage,
   parseDwsCommandFailure,
   parseDwsMessageLookup,
+  parseDirectHistoryConversations,
   searchDwsGroups,
   subscribedEventKeys,
   stabilizeDwsBotMessage,
@@ -242,6 +246,35 @@ test('历史与实时使用同一 message ID 时只准入一次，不误伤其�
   assert.equal(store.admitEvent(first, event(first, 'history-event'), 'history').admitted, false);
   assert.equal(store.admitEvent(second, event(second, 'other-conversation'), 'history').admitted, true);
   store.close();
+});
+
+test('已登记会话补拉逐项隔离失败并返回可观察 ledger', async () => {
+  const config = defaultConfig('backfill-ledger', '.', 'Agent');
+  const store = new Store(':memory:');
+  const failed = store.addConversation({ kind: 'direct', externalId: 'failed-user', title: '失败会话', responsibility: '', mode: 'shadow' });
+  const healthy = store.addConversation({ kind: 'direct', externalId: 'healthy-user', title: '健康会话', responsibility: '', mode: 'shadow' });
+  const admitted: string[] = [];
+  try {
+    const result = await collectConversationBackfill(
+      config,
+      [failed, healthy].map((conversation) => ({ conversation, start: new Date('2026-08-21T00:00:00Z') })),
+      new Date('2026-08-21T01:00:00Z'),
+      '本人',
+      (event) => admitted.push(event.conversationExternalId),
+      async (_config, conversation) => {
+        if (conversation.id === failed.id) throw new Error('DWS 系统会话不支持历史读取');
+        return [normalizeDwsHistoryMessage(conversation, {
+          openMessageId: 'healthy-message', senderOpenDingTalkId: healthy.externalId,
+          createTime: '2026-08-21 08:30:00', content: '健康消息',
+        })];
+      },
+    );
+    assert.deepEqual(result, {
+      loaded: 1,
+      failures: [{ target: failed.id, error: 'DWS 系统会话不支持历史读取' }],
+    });
+    assert.deepEqual(admitted, ['healthy-user']);
+  } finally { store.close(); }
 });
 
 test('离线补拉按群聊和私聊生成真实 DWS 参数，分页推进、排序并过滤启动截止时刻', async () => {
@@ -738,6 +771,94 @@ test('私聊 allowlist 使用对端 openDingTalkId，不与 conversationId 混�
   });
   assert.equal(event?.kind, 'direct');
   assert.equal(event?.conversationExternalId, 'open-user-1');
+});
+
+test('全局历史只投影最近单聊，并以非本人发送者作为私聊稳定 ID', async () => {
+  const config = defaultConfig('unknown-direct-history', '.', 'Agent');
+  let calls = 0;
+  let captured: string[] = [];
+  const events = await fetchUnknownDirectBackfill(
+    config,
+    'self-user',
+    new Set(['known-user']),
+    new Date('2026-08-21T01:00:00+08:00'),
+    new Date('2026-08-21T02:00:00+08:00'),
+    async (_config, args) => {
+      calls++;
+      captured = args;
+      return {
+        success: true,
+        result: {
+          hasMore: false,
+          conversationMessagesList: [
+            {
+              openConversationId: 'direct-cid-new', singleChat: true, title: '新联系人',
+              messages: [
+                { openMessageId: 'new-1', senderOpenDingTalkId: 'new-user', sender: '新联系人', createTime: '2026-08-21 01:10:00', content: '离线消息' },
+                { openMessageId: 'new-2', senderOpenDingTalkId: 'self-user', sender: '本人', createTime: '2026-08-21 01:11:00', content: '本人回复' },
+              ],
+            },
+            {
+              openConversationId: 'direct-cid-known', singleChat: true, title: '已知联系人',
+              messages: [{ openMessageId: 'known-1', senderOpenDingTalkId: 'known-user', createTime: '2026-08-21 01:20:00', content: '已有会话' }],
+            },
+            {
+              openConversationId: 'group-cid', singleChat: false, title: '群聊',
+              messages: [{ openMessageId: 'group-1', senderOpenDingTalkId: 'group-user', createTime: '2026-08-21 01:30:00', content: '群消息' }],
+            },
+          ],
+        },
+      };
+    },
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(captured, [
+    'chat', 'message', 'list-all', '--start', '2026-08-21 01:00:00', '--end', '2026-08-21 02:00:00',
+    '--limit', '100', '--page-all', '--page-limit', '20', '--max-items', '1000', '--page-delay', '0',
+  ]);
+  assert.equal(events.length, 2);
+  assert.ok(events.every((event) => event.conversationExternalId === 'new-user'));
+  assert.ok(events.every((event) => event.conversationTitle === '新联系人'));
+  assert.deepEqual(events.map((event) => event.messageId), ['new-1', 'new-2']);
+});
+
+test('全局历史有界结果仍有续页时明确失败，不把截断当完整', () => {
+  assert.throws(() => parseDirectHistoryConversations({
+    success: true,
+    result: { hasMore: true, conversationMessagesList: [] },
+  }), /超过有界上限/);
+});
+
+test('最近私聊候选先读取当前 profile，固定两次只读查询且按稳定 ID 去重', async () => {
+  const config = defaultConfig('recent-direct-candidates', '.', 'Agent');
+  const calls: string[][] = [];
+  const candidates = await listRecentDwsDirectCandidates(
+    config,
+    new Date('2026-08-21T02:00:00+08:00'),
+    async (_config, args) => {
+      calls.push(args);
+      if (args[0] === 'profile') {
+        return { currentProfile: 'default', profiles: [{ profile: 'default', isCurrent: true, userId: 'self-user', userName: '本人' }] };
+      }
+      return {
+        success: true,
+        result: {
+          hasMore: false,
+          conversationMessagesList: [{
+            openConversationId: 'direct-cid', singleChat: true, title: '周佳佳',
+            messages: [
+              { openMessageId: 'direct-1', senderOpenDingTalkId: 'colleague-user', sender: '周佳佳', createTime: '2026-08-20 12:00:00', content: '你好' },
+              { openMessageId: 'direct-2', senderOpenDingTalkId: 'colleague-user', sender: '周佳佳', createTime: '2026-08-20 12:01:00', content: '再问一次' },
+            ],
+          }],
+        },
+      };
+    },
+  );
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0], ['profile', 'list']);
+  assert.equal(calls[1]?.[0], 'chat');
+  assert.deepEqual(candidates, [{ title: '周佳佳', openDingTalkId: 'colleague-user' }]);
 });
 
 test('首次群历史固定从当前本地时间向前拉 50 条，并按时间从早到晚投影', async () => {

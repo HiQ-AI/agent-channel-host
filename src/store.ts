@@ -885,6 +885,21 @@ export class Store {
     return new Date(Math.max(0, latest - overlapMs));
   }
 
+  channelBackfillStart(
+    channelId: string,
+    profileId: string,
+    until: Date,
+    maxLookbackMs: number,
+    overlapMs = 2_000,
+  ): Date {
+    const row = this.db.prepare(`
+      SELECT updated_at FROM channel_connections WHERE channel_id=? AND profile_id=?
+    `).get(channelId, profileId) as Row | undefined;
+    const previous = parseStoredMessageTime(row?.updated_at);
+    const bounded = until.getTime() - maxLookbackMs;
+    return new Date(Math.max(0, bounded, (previous ?? bounded) - overlapMs));
+  }
+
   deleteConversation(id: string): boolean {
     const existing = this.getConversation(id);
     if (!existing) return false;

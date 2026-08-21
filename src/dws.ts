@@ -3,7 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface } from 'node:readline';
 import { MINIMUM_DWS_VERSION, type HostConfig } from './config.js';
 import { assertMinimumToolVersion } from './tool-version.js';
-import type { ChannelAdapter, ChannelHandlers } from './contracts.js';
+import type { ChannelAdapter, ChannelBackfillResult, ChannelHandlers } from './contracts.js';
 import type { Conversation, ConversationKind, NormalizedEvent } from './types.js';
 import { delay, stopChild, withTimeout } from './process-utils.js';
 import { commandArgs, execResolved, resolveCommand, type ResolvedCommand } from './command.js';
@@ -44,9 +44,24 @@ interface HistoryPage {
   hasMore: boolean;
 }
 
+interface DirectHistoryConversation {
+  openConversationId: string;
+  title: string | null;
+  messages: unknown[];
+}
+
+export const UNKNOWN_DIRECT_BACKFILL_PAGE_LIMIT = 20;
+export const UNKNOWN_DIRECT_BACKFILL_MAX_MESSAGES = 1_000;
+export const UNKNOWN_DIRECT_BACKFILL_MAX_LOOKBACK_MILLISECONDS = 24 * 60 * 60 * 1_000;
+
 export interface DwsGroupSearchResult {
   title: string;
   openConversationId: string;
+}
+
+export interface DwsDirectCandidate {
+  title: string;
+  openDingTalkId: string;
 }
 
 const BOT_MESSAGE_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
@@ -260,6 +275,136 @@ export async function fetchConversationBackfill(
     pageTime = new Date(boundary);
   }
   return events.sort((left, right) => Date.parse(left.occurredAt!) - Date.parse(right.occurredAt!));
+}
+
+export async function collectConversationBackfill(
+  config: HostConfig,
+  targets: Array<{ conversation: Conversation; start: Date }>,
+  until: Date,
+  currentUserName: string,
+  onEvent: (event: NormalizedEvent) => void,
+  fetcher: typeof fetchConversationBackfill = fetchConversationBackfill,
+): Promise<ChannelBackfillResult> {
+  let loaded = 0;
+  const failures: ChannelBackfillResult['failures'] = [];
+  for (const { conversation, start } of targets) {
+    try {
+      const events = await fetcher(config, conversation, start, until);
+      for (const event of events) {
+        const accepted = applyWakeWordSubscription(config, event, currentUserName);
+        if (!accepted) continue;
+        onEvent(accepted);
+        loaded++;
+      }
+    } catch (error) {
+      failures.push({ target: conversation.id, error: (error as Error).message });
+    }
+  }
+  return { loaded, failures };
+}
+
+export async function fetchUnknownDirectBackfill(
+  config: HostConfig,
+  selfUserId: string,
+  knownExternalIds: ReadonlySet<string>,
+  start: Date,
+  until: Date,
+  runner: typeof runDwsJson = runDwsJson,
+): Promise<NormalizedEvent[]> {
+  const value = await runner(config, [
+    'chat', 'message', 'list-all',
+    '--start', formatDwsLocalTime(start), '--end', formatDwsLocalTime(until),
+    '--limit', '100', '--page-all', '--page-limit', String(UNKNOWN_DIRECT_BACKFILL_PAGE_LIMIT),
+    '--max-items', String(UNKNOWN_DIRECT_BACKFILL_MAX_MESSAGES), '--page-delay', '0',
+  ], 45_000);
+  const conversations = parseDirectHistoryConversations(value);
+  const events: NormalizedEvent[] = [];
+  for (const conversation of conversations) {
+    const participants = new Set(conversation.messages.flatMap((message) => {
+      if (!message || typeof message !== 'object' || Array.isArray(message)) return [];
+      const senderId = text(firstValue(message as Record<string, unknown>, [
+        'senderOpenDingTalkId', 'sender_open_dingtalk_id', 'senderId', 'sender_id',
+      ]));
+      return senderId && senderId !== selfUserId ? [senderId] : [];
+    }));
+    if (participants.size !== 1) continue;
+    const externalId = [...participants][0]!;
+    if (knownExternalIds.has(externalId)) continue;
+    for (const raw of conversation.messages) {
+      const event = normalizeDwsHistoryMessage({
+        channelId: config.channel.id,
+        channelProfileId: config.channel.profileId,
+        externalId,
+        title: conversation.title ?? '',
+        kind: 'direct',
+      }, raw);
+      const occurred = Date.parse(event.occurredAt!);
+      if (occurred >= start.getTime() && occurred <= until.getTime()) events.push(event);
+    }
+  }
+  return events.sort((left, right) => Date.parse(left.occurredAt!) - Date.parse(right.occurredAt!));
+}
+
+export async function listRecentDwsDirects(
+  config: HostConfig,
+  selfUserId: string,
+  now = new Date(),
+  lookbackDays = 7,
+  runner: typeof runDwsJson = runDwsJson,
+): Promise<DwsDirectCandidate[]> {
+  const events = await fetchUnknownDirectBackfill(
+    config,
+    selfUserId,
+    new Set(),
+    new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1_000),
+    now,
+    runner,
+  );
+  const candidates = new Map<string, DwsDirectCandidate>();
+  for (const event of events) {
+    if (candidates.has(event.conversationExternalId)) continue;
+    candidates.set(event.conversationExternalId, {
+      title: event.conversationTitle?.trim() || event.senderName?.trim() || '最近私聊',
+      openDingTalkId: event.conversationExternalId,
+    });
+  }
+  return [...candidates.values()].sort((left, right) => left.title.localeCompare(right.title, 'zh-CN'));
+}
+
+export async function listRecentDwsDirectCandidates(
+  config: HostConfig,
+  now = new Date(),
+  runner: typeof runDwsJson = runDwsJson,
+): Promise<DwsDirectCandidate[]> {
+  const identity = currentProfileIdentity(await runner(config, ['profile', 'list'], 15_000));
+  return listRecentDwsDirects(config, identity.userId, now, 7, runner);
+}
+
+export function parseDirectHistoryConversations(value: unknown): DirectHistoryConversation[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS 全局历史返回结构无效');
+  const body = value as Record<string, unknown>;
+  if (body.success !== true) throw new Error(`DWS 全局历史读取失败：${text(body.errorMsg) ?? text(body.errorCode) ?? 'unknown'}`);
+  const result = body.result;
+  const nested = result && typeof result === 'object' && !Array.isArray(result)
+    ? result as Record<string, unknown> : null;
+  if (!nested || !Array.isArray(nested.conversationMessagesList)) {
+    throw new Error('DWS 全局历史返回缺少 conversationMessagesList');
+  }
+  if (nested.hasMore === true) {
+    throw new Error(`DWS 全局历史超过有界上限：pages=${UNKNOWN_DIRECT_BACKFILL_PAGE_LIMIT}, messages=${UNKNOWN_DIRECT_BACKFILL_MAX_MESSAGES}`);
+  }
+  return nested.conversationMessagesList.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const source = item as Record<string, unknown>;
+    if (source.singleChat !== true || !Array.isArray(source.messages)) return [];
+    const openConversationId = text(source.openConversationId);
+    if (!openConversationId) return [];
+    return [{
+      openConversationId,
+      title: text(firstValue(source, ['title', 'conversationName', 'conversation_name'])),
+      messages: source.messages,
+    }];
+  });
 }
 
 export async function fetchSelfChatHistory(
@@ -724,23 +869,33 @@ export class DwsChannelAdapter implements ChannelAdapter {
     targets: Array<{ conversation: Conversation; start: Date }>,
     until: Date,
     onEvent: (event: NormalizedEvent) => void,
-  ): Promise<number> {
-    let count = 0;
-    for (const { conversation, start } of targets) {
-      const events = await fetchConversationBackfill(
-        this.config,
-        conversation,
-        start,
-        until,
+  ): Promise<ChannelBackfillResult> {
+    if (!this.selfUserName) throw new Error('DWS 当前用户尚未解析');
+    return collectConversationBackfill(this.config, targets, until, this.selfUserName, onEvent);
+  }
+
+  async discoverDirectBackfill(
+    knownExternalIds: ReadonlySet<string>,
+    start: Date,
+    until: Date,
+    onEvent: (event: NormalizedEvent) => void,
+  ): Promise<ChannelBackfillResult> {
+    if (!this.selfUserId || !this.selfUserName) throw new Error('DWS 当前用户尚未解析');
+    try {
+      const events = await fetchUnknownDirectBackfill(
+        this.config, this.selfUserId, knownExternalIds, start, until,
       );
+      let loaded = 0;
       for (const event of events) {
-        const accepted = applyWakeWordSubscription(this.config, event, this.selfUserName!);
+        const accepted = applyWakeWordSubscription(this.config, event, this.selfUserName);
         if (!accepted) continue;
         onEvent(accepted);
-        count++;
+        loaded++;
       }
+      return { loaded, failures: [] };
+    } catch (error) {
+      return { loaded: 0, failures: [{ target: 'unknown-direct-discovery', error: (error as Error).message }] };
     }
-    return count;
   }
 
   async pollSelfMessages(

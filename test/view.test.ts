@@ -795,6 +795,60 @@ test('Channel 群搜索只用候选 ID 建立现有 registry 绑定，职责未�
   }
 });
 
+test('Channel 最近私聊选择器显示固定入口，按真实候选 ID 添加并避免重复', async () => {
+  const store = new Store(':memory:');
+  const config = defaultConfig('direct-selector', '.', '小小鹏');
+  config.channel.defaultModes.directs = 'reply';
+  const instance = viewInstance('direct-selector', config, store);
+  const state = createManagementViewState();
+  state.detailInstanceName = instance.name;
+  state.detailChannel = { instanceName: instance.name, channelId: 'dingtalk', profileId: 'default' };
+  state.selectedChannelItem = 8;
+  let reads = 0;
+  const added: string[] = [];
+  const actions = {
+    listRecentDirects: async () => {
+      reads++;
+      return [
+        { title: '周佳佳', externalId: 'real-open-dingtalk-id' },
+        { title: '重复', externalId: 'real-open-dingtalk-id' },
+      ];
+    },
+    afterConversationAdded: async (_instance: ViewInstance, conversation: Conversation) => {
+      added.push(conversation.id);
+      return 'Host 已重启';
+    },
+  };
+  try {
+    const channelView = renderManagementView([instance], state, null, [], 120);
+    assert.match(channelView, /\+ 选择并添加最近私聊/);
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(state.directSearch?.results.length, 1);
+    const candidateView = renderManagementView([instance], state, null, [], 120);
+    assert.match(candidateView, /最近私聊[\s\S]*周佳佳[\s\S]*未添加/);
+    assert.doesNotMatch(candidateView, /real-open-dingtalk-id/);
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    const conversation = store.listConversations()[0]!;
+    assert.equal(conversation.kind, 'direct');
+    assert.equal(conversation.externalId, 'real-open-dingtalk-id');
+    assert.equal(conversation.mode, 'reply');
+    assert.equal(conversation.responsibility, '');
+    assert.deepEqual(added, [conversation.id]);
+
+    await handleManagementViewInput('\u001b[D', state, [instance], () => undefined, actions);
+    state.selectedChannelItem = 9;
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(state.directSearch?.results.length, 1);
+    assert.match(renderManagementView([instance], state, null, [], 120), /周佳佳[\s\S]*已添加/);
+    await handleManagementViewInput('\r', state, [instance], () => undefined, actions);
+    assert.equal(store.listConversations().length, 1);
+    assert.equal(reads, 2);
+    assert.deepEqual(added, [conversation.id]);
+  } finally {
+    store.close();
+  }
+});
+
 test('Tab 只切顶层，左右键负责层级导航，alternate screen 序列成对', async () => {
   const store = new Store(':memory:');
   const config = defaultConfig('navigation', '.', 'Agent');
