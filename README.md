@@ -269,9 +269,9 @@ agent-channel view
 `view` 会从用户状态目录发现全部已初始化 instance。顶层固定为 `总览 | 全局设置`，不会把某个 instance 的配置误称为全局设置：
 
 - `总览` 只展示 INSTANCES 索引、跨实例消息汇总和全局告警，不重复铺开具体 Channel、Conversation、Runtime 或最近消息。Instance 行保留 Host/owner、Channel/Conversation 数、pending 和 alert 数，便于先判断应下钻到哪里。`↑/↓` 选择，`Enter/→` 下钻，`Esc/←` 逐层返回；`Tab` 只切换顶层“总览 / 全局设置”。
-- Instance 详情集中展示该实例的 Channel、Conversation、消息汇总与最近消息、Runtime 和告警，其中 `CONVERSATIONS` 固定在 `MESSAGES` 上方。Conversation 选择以稳定 ID 跟踪，标题更新或跨 Channel 排序刷新后下钻仍打开当前高亮项。进入 Channel 后，五项依次为 `enabled/disabled`、群聊订阅、群聊默认模式、私聊订阅、私聊默认模式；后续分区展示指定群聊和指定私聊。群聊末行“搜索并绑定指定群聊”支持输入关键词、选择候选并写入现有 conversation registry；私聊末行“选择并添加最近私聊”从 DWS 最近 7 天的有界历史列出候选，标记是否已添加，并按真实 `openDingTalkId` 登记。外部群 ID 和人员 ID 均不在界面展示。
+- Instance 详情集中展示该实例的 Channel、Conversation、消息汇总与最近消息、Runtime 和告警，其中 `CONVERSATIONS` 固定在 `MESSAGES` 上方。Conversation 选择以稳定 ID 跟踪，标题更新或跨 Channel 排序刷新后下钻仍打开当前高亮项。进入 Channel 后，五项依次为 `enabled/disabled`、群聊订阅、群聊默认模式、私聊订阅、私聊默认模式；后续分区展示指定群聊和指定私聊。群聊末行“搜索并绑定指定群聊”支持输入关键词、选择候选并写入现有 conversation registry；私聊末行“搜索人员添加私聊”使用 DWS AI 搜问的姓名维度返回人员候选，标记是否已添加，并按真实 `openDingTalkId` 登记。零命中停留在结果页，多候选逐项展示且不会默认选择首项；外部群 ID 和人员 ID 均不在界面展示。
 - 新绑定群组使用“群聊默认模式”，会话职责初始为空并使用 Agent 自身职责，runtime 使用 Instance 当前配置。新绑定或重新启用群组会唤醒 Host；该群 Worker 首次启动时先拉取最近 50 条消息交给 Agent 自主判断，无需等待群内出现新消息。绑定不创建第二套接收服务；Channel disabled 时可先配置群组，重新启用后继续复用原 registry 和 session 映射。
-- 指定私聊继续使用稳定 `openDingTalkId` 登记，不按姓名猜测 ID；事件提供人员姓名时以姓名作为显示标题，确实拿不到时显示不泄露原始 ID 的稳定占位。可在 Channel 的 DIRECTS 分区直接选择最近私聊，添加后立即下钻修改或删除；已添加候选只会打开原 Conversation，不会重复建档。
+- 指定私聊继续使用稳定 `openDingTalkId` 登记，不按姓名猜测 ID；事件提供人员姓名时以姓名作为显示标题，确实拿不到时显示不泄露原始 ID 的稳定占位。可在 Channel 的 DIRECTS 分区输入姓名搜索人员，选择候选后立即下钻修改或删除；已添加候选只会打开原 Conversation，不会重复建档。AI 搜问结果若只有 `userId`，Host 会用一次批量通讯录详情查询尝试补取 `openDingTalkId`；仍无法取得时明确报错，不生成不可用绑定。
 - `INSTANCES` 表末行固定为“新增 Instance”，也可在总览按 `a` 启动受校验的创建向导。创建复用 `agent-channel init` 的同一原子初始化逻辑，并立即加入当前 View 的 Channel 页面。
 - `全局设置` 只表示整个 View/Host 的作用域，绝不显示 Agent、Runtime、Channel 或 conversation 等 instance 配置。当前版本尚无已确认的全局可修改项，因此只展示真实管理状态并明确提示为空。
 - 在群聊或私聊的 Conversation 详情页按 `i`，进入真人介入输入页。页面不读取或渲染固定 Codex session 的历史，只保留多行输入框；输入内容进入同一持久化 inbox 并唤醒或 steer 原固定 session，不会先发到钉钉，也不依赖 DWS 能否订阅到本人消息或 Channel 是否启用。发送后页面保持打开，可继续追加引导；`Shift+Enter` 换行、`Enter` 发送、`Esc` 返回。Agent 收到的发送者标记为“View 用户（本人）”，同时保留当前钉钉目标上下文。

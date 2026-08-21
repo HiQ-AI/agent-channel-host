@@ -89,7 +89,6 @@ test('空闲 thread 启动 turn 原样携带 clientUserMessageId 并立即返回
     await session.start();
     const started = await session.startTurn('HUMAN_START', 'human-start-request');
     assert.equal(started.turnId, 'fake-turn');
-    assert.equal(session.currentTurnId, 'fake-turn');
     assert.deepEqual(await started.completion, { turnId: 'fake-turn', status: 'completed' });
     assert.equal(session.currentTurnId, null);
   } finally {

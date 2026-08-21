@@ -15,7 +15,6 @@ import {
   dwsProcessExitError,
   fetchConversationBackfill,
   fetchUnknownDirectBackfill,
-  listRecentDwsDirectCandidates,
   fetchSelfChatHistory,
   fetchRecentGroupHistory,
   inspectDwsBusStatus,
@@ -28,6 +27,7 @@ import {
   parseDwsMessageLookup,
   parseDirectHistoryConversations,
   searchDwsGroups,
+  searchDwsPeople,
   subscribedEventKeys,
   stabilizeDwsBotMessage,
 } from '../src/dws.js';
@@ -829,36 +829,61 @@ test('全局历史有界结果仍有续页时明确失败，不把截断当完�
   }), /超过有界上限/);
 });
 
-test('最近私聊候选先读取当前 profile，固定两次只读查询且按稳定 ID 去重', async () => {
-  const config = defaultConfig('recent-direct-candidates', '.', 'Agent');
+test('人员搜索按姓名维度返回全部真实候选，不默认选择首项并按 openDingTalkId 去重', async () => {
+  const config = defaultConfig('person-search', '.', 'Agent');
   const calls: string[][] = [];
-  const candidates = await listRecentDwsDirectCandidates(
-    config,
-    new Date('2026-08-21T02:00:00+08:00'),
-    async (_config, args) => {
-      calls.push(args);
-      if (args[0] === 'profile') {
-        return { currentProfile: 'default', profiles: [{ profile: 'default', isCurrent: true, userId: 'self-user', userName: '本人' }] };
-      }
-      return {
-        success: true,
-        result: {
-          hasMore: false,
-          conversationMessagesList: [{
-            openConversationId: 'direct-cid', singleChat: true, title: '周佳佳',
-            messages: [
-              { openMessageId: 'direct-1', senderOpenDingTalkId: 'colleague-user', sender: '周佳佳', createTime: '2026-08-20 12:00:00', content: '你好' },
-              { openMessageId: 'direct-2', senderOpenDingTalkId: 'colleague-user', sender: '周佳佳', createTime: '2026-08-20 12:01:00', content: '再问一次' },
-            ],
-          }],
-        },
-      };
-    },
-  );
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls[0], ['profile', 'list']);
-  assert.equal(calls[1]?.[0], 'chat');
-  assert.deepEqual(candidates, [{ title: '周佳佳', openDingTalkId: 'colleague-user' }]);
+  const candidates = await searchDwsPeople(config, ' 周佳佳 ', async (_config, args) => {
+    calls.push(args);
+    return {
+      success: true,
+      result: [
+        { title: '周佳佳', openDingTalkId: 'open-a', userId: 'user-a', snippet: '研发' },
+        { title: '周佳佳', openDingTalkId: 'open-b', userId: 'user-b', meta: { position: '产品' } },
+        { title: '重复', openDingTalkId: 'open-a', userId: 'user-a' },
+      ],
+    };
+  });
+  assert.deepEqual(calls, [['aisearch', 'person', '--keyword', '周佳佳', '--dimension', 'name']]);
+  assert.deepEqual(candidates, [
+    { title: '周佳佳', openDingTalkId: 'open-a', detail: '研发' },
+    { title: '周佳佳', openDingTalkId: 'open-b', detail: '产品' },
+  ]);
+});
+
+test('人员搜索支持零命中，并对仅 userId 候选批量补取 openDingTalkId', async () => {
+  const config = defaultConfig('person-search-fallback', '.', 'Agent');
+  const calls: string[][] = [];
+  const zero = await searchDwsPeople(config, '无人', async (_config, args) => {
+    calls.push(args);
+    return { success: true, result: [] };
+  });
+  assert.deepEqual(zero, []);
+  assert.deepEqual(calls, [['aisearch', 'person', '--keyword', '无人', '--dimension', 'name']]);
+  await assert.rejects(searchDwsPeople(config, '  ', async () => ({})), /关键词不能为空/);
+
+  calls.length = 0;
+  const supplemented = await searchDwsPeople(config, '候选', async (_config, args) => {
+    calls.push(args);
+    if (args[0] === 'aisearch') return { success: true, result: [{ title: '候选', userId: 'user-only' }] };
+    return {
+      success: true,
+      result: [{ orgEmployeeModel: { orgUserId: 'user-only', openDingTalkId: 'open-from-contact' } }],
+    };
+  });
+  assert.deepEqual(calls, [
+    ['aisearch', 'person', '--keyword', '候选', '--dimension', 'name'],
+    ['contact', 'user', 'get', '--ids', 'user-only'],
+  ]);
+  assert.deepEqual(supplemented, [{ title: '候选', openDingTalkId: 'open-from-contact', detail: null }]);
+});
+
+test('人员搜索候选经通讯录补取后仍缺少 openDingTalkId 时明确报错', async () => {
+  const config = defaultConfig('person-search-unresolved', '.', 'Agent');
+  await assert.rejects(searchDwsPeople(config, '候选', async (_config, args) => (
+    args[0] === 'aisearch'
+      ? { success: true, result: [{ title: '候选', userId: 'user-only' }] }
+      : { success: true, result: [{ orgEmployeeModel: { orgUserId: 'user-only' } }] }
+  )), /补取后仍无法登记：候选/);
 });
 
 test('首次群历史固定从当前本地时间向前拉 50 条，并按时间从早到晚投影', async () => {

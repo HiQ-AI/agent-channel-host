@@ -59,9 +59,10 @@ export interface DwsGroupSearchResult {
   openConversationId: string;
 }
 
-export interface DwsDirectCandidate {
+export interface DwsPersonSearchResult {
   title: string;
   openDingTalkId: string;
+  detail: string | null;
 }
 
 const BOT_MESSAGE_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
@@ -177,6 +178,96 @@ export function parseDwsGroupSearch(value: unknown): DwsGroupSearchResult[] {
     projected.push({ title, openConversationId });
   }
   return projected;
+}
+
+export async function searchDwsPeople(
+  config: HostConfig,
+  query: string,
+  runner: typeof runDwsJson = runDwsJson,
+): Promise<DwsPersonSearchResult[]> {
+  const keyword = query.trim();
+  if (!keyword) throw new Error('人员搜索关键词不能为空');
+  const parsed = parseDwsPersonSearch(await runner(config, [
+    'aisearch', 'person', '--keyword', keyword, '--dimension', 'name',
+  ]));
+  const missingIds = [...new Set(parsed.filter((candidate) => (
+    !candidate.openDingTalkId && candidate.userId
+  )).map((candidate) => candidate.userId!))];
+  const supplemented = missingIds.length > 0
+    ? parseContactOpenDingTalkIds(await runner(config, ['contact', 'user', 'get', '--ids', missingIds.join(',')]))
+    : new Map<string, string>();
+  const unresolved: string[] = [];
+  const seen = new Set<string>();
+  const results: DwsPersonSearchResult[] = [];
+  for (const candidate of parsed) {
+    const openDingTalkId = candidate.openDingTalkId ?? (candidate.userId ? supplemented.get(candidate.userId) : null);
+    if (!openDingTalkId) {
+      unresolved.push(candidate.title);
+      continue;
+    }
+    if (seen.has(openDingTalkId)) continue;
+    seen.add(openDingTalkId);
+    results.push({ title: candidate.title, openDingTalkId, detail: candidate.detail });
+  }
+  if (unresolved.length > 0) {
+    throw new Error(`DWS 人员搜索候选缺少 openDingTalkId，通讯录补取后仍无法登记：${unresolved.join('、')}`);
+  }
+  return results;
+}
+
+interface ParsedPersonCandidate {
+  title: string;
+  userId: string | null;
+  openDingTalkId: string | null;
+  detail: string | null;
+}
+
+export function parseDwsPersonSearch(value: unknown): ParsedPersonCandidate[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS 人员搜索返回结构无效');
+  const body = value as Record<string, unknown>;
+  if (body.success !== true) {
+    throw new Error(`DWS 人员搜索失败：${text(body.errorMsg) ?? text(body.errorCode) ?? 'unknown'}`);
+  }
+  if (!Array.isArray(body.result)) throw new Error('DWS 人员搜索返回缺少 result');
+  return body.result.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const person = item as Record<string, unknown>;
+    const meta = person.meta && typeof person.meta === 'object' && !Array.isArray(person.meta)
+      ? person.meta as Record<string, unknown> : null;
+    const title = text(firstValue(person, ['title', 'author']))?.trim()
+      ?? text(meta?.name)?.trim();
+    if (!title) return [];
+    const detail = [text(person.snippet)?.trim(), text(meta?.position)?.trim()]
+      .find((value) => Boolean(value)) ?? null;
+    return [{
+      title,
+      userId: text(person.userId)?.trim() ?? null,
+      openDingTalkId: text(person.openDingTalkId)?.trim() ?? null,
+      detail,
+    }];
+  });
+}
+
+export function parseContactOpenDingTalkIds(value: unknown): Map<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DWS 通讯录补取返回结构无效');
+  const body = value as Record<string, unknown>;
+  if (body.success !== true) {
+    throw new Error(`DWS 通讯录补取失败：${text(body.errorMsg) ?? text(body.errorCode) ?? 'unknown'}`);
+  }
+  if (!Array.isArray(body.result)) throw new Error('DWS 通讯录补取返回缺少 result');
+  const ids = new Map<string, string>();
+  for (const item of body.result) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const source = item as Record<string, unknown>;
+    const employee = source.orgEmployeeModel && typeof source.orgEmployeeModel === 'object'
+      && !Array.isArray(source.orgEmployeeModel) ? source.orgEmployeeModel as Record<string, unknown> : null;
+    const userId = text(firstValue(source, ['userId', 'orgUserId']))?.trim()
+      ?? text(firstValue(employee ?? {}, ['userId', 'orgUserId']))?.trim();
+    const openDingTalkId = text(firstValue(source, ['openDingTalkId', 'open_dingtalk_id']))?.trim()
+      ?? text(firstValue(employee ?? {}, ['openDingTalkId', 'open_dingtalk_id']))?.trim();
+    if (userId && openDingTalkId) ids.set(userId, openDingTalkId);
+  }
+  return ids;
 }
 
 export async function resolveExactGroup(config: HostConfig, title: string): Promise<{ title: string; openConversationId: string }> {
@@ -343,41 +434,6 @@ export async function fetchUnknownDirectBackfill(
     }
   }
   return events.sort((left, right) => Date.parse(left.occurredAt!) - Date.parse(right.occurredAt!));
-}
-
-export async function listRecentDwsDirects(
-  config: HostConfig,
-  selfUserId: string,
-  now = new Date(),
-  lookbackDays = 7,
-  runner: typeof runDwsJson = runDwsJson,
-): Promise<DwsDirectCandidate[]> {
-  const events = await fetchUnknownDirectBackfill(
-    config,
-    selfUserId,
-    new Set(),
-    new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1_000),
-    now,
-    runner,
-  );
-  const candidates = new Map<string, DwsDirectCandidate>();
-  for (const event of events) {
-    if (candidates.has(event.conversationExternalId)) continue;
-    candidates.set(event.conversationExternalId, {
-      title: event.conversationTitle?.trim() || event.senderName?.trim() || '最近私聊',
-      openDingTalkId: event.conversationExternalId,
-    });
-  }
-  return [...candidates.values()].sort((left, right) => left.title.localeCompare(right.title, 'zh-CN'));
-}
-
-export async function listRecentDwsDirectCandidates(
-  config: HostConfig,
-  now = new Date(),
-  runner: typeof runDwsJson = runDwsJson,
-): Promise<DwsDirectCandidate[]> {
-  const identity = currentProfileIdentity(await runner(config, ['profile', 'list'], 15_000));
-  return listRecentDwsDirects(config, identity.userId, now, 7, runner);
 }
 
 export function parseDirectHistoryConversations(value: unknown): DirectHistoryConversation[] {
